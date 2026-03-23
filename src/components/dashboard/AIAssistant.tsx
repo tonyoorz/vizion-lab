@@ -5,9 +5,9 @@ import { motion, AnimatePresence } from "framer-motion";
 const AIAssistant = () => {
   const [isOpen, setIsOpen] = useState(false);
   const [input, setInput] = useState("");
-  const [messages, setMessages] = useState([
+  const [messages, setMessages] = useState<{ role: "user" | "assistant"; content: string }[]>([
     {
-      role: "assistant" as const,
+      role: "assistant",
       content: "您好！我是 DTSV 数据分析助手。您可以向我询问缺陷趋势、项目状态或测试覆盖率等问题。",
     },
   ]);
