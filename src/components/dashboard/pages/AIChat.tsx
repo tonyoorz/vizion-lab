@@ -1,28 +1,45 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowUp,
-  BarChart3,
-  Bug,
-  Compass,
+  Check,
+  Copy,
   MessageSquarePlus,
+  MoreHorizontal,
   Paperclip,
+  Pencil,
+  Pin,
+  PinOff,
+  RefreshCcw,
   Sparkles,
+  Sparkle,
   StopCircle,
-  TrendingUp,
+  Trash2,
   User,
+  X,
 } from "lucide-react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import { motion, AnimatePresence } from "framer-motion";
+import MessageRenderer from "../chat/MessageRenderer";
+import SlashMenu, { SLASH_COMMANDS, SlashCommand } from "../chat/SlashMenu";
+import { segmentsToPlainText, parseAgentStream } from "../chat/agentParser";
 
 type Role = "user" | "assistant";
+interface Attachment {
+  id: string;
+  name: string;
+  kind: "image" | "file";
+  dataUrl?: string; // for images, base64
+  size: number;
+}
 interface Msg {
+  id: string;
   role: Role;
   content: string;
+  attachments?: Attachment[];
 }
 interface Conversation {
   id: string;
   title: string;
+  pinned?: boolean;
   messages: Msg[];
   updatedAt: number;
 }
@@ -34,28 +51,7 @@ const MODELS = [
   { id: "openai/gpt-5", label: "GPT-5", hint: "最强" },
 ];
 
-const SUGGESTIONS = [
-  {
-    icon: TrendingUp,
-    title: "Top Issue 趋势诊断",
-    prompt: "请基于近三个月的 Top Issue 数据，识别上升最快的三个问题模块并给出根因假设。",
-  },
-  {
-    icon: Bug,
-    title: "高频缺陷根因",
-    prompt: "在缺陷高频分析里，最近一周新增缺陷集中在哪些 ECU？是否与某次回归提交相关？",
-  },
-  {
-    icon: BarChart3,
-    title: "覆盖率风险面",
-    prompt: "覆盖率低于 70% 的模块有哪些？请按业务影响排序，并建议本周补测顺序。",
-  },
-  {
-    icon: Compass,
-    title: "团队产能复盘",
-    prompt: "对比各测试小组的执行效率与缺陷发现率，输出一份本周复盘要点。",
-  },
-];
+const STORAGE_KEY = "dtsv.chat.v2";
 
 const newConversation = (): Conversation => ({
   id: crypto.randomUUID(),
@@ -64,25 +60,58 @@ const newConversation = (): Conversation => ({
   updatedAt: Date.now(),
 });
 
-const AIChat = () => {
-  const [conversations, setConversations] = useState<Conversation[]>([newConversation()]);
-  const [activeId, setActiveId] = useState(conversations[0].id);
+const newId = () => crypto.randomUUID();
+
+interface Props {
+  moduleKey?: string;
+  moduleLabel?: string;
+}
+
+const AIChat = ({ moduleKey, moduleLabel }: Props) => {
+  const [conversations, setConversations] = useState<Conversation[]>(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as Conversation[];
+        if (Array.isArray(parsed) && parsed.length) return parsed;
+      }
+    } catch {}
+    return [newConversation()];
+  });
+  const [activeId, setActiveId] = useState<string>(() => conversations[0].id);
   const [input, setInput] = useState("");
   const [model, setModel] = useState(MODELS[0].id);
   const [streaming, setStreaming] = useState(false);
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [slashOpen, setSlashOpen] = useState(false);
+  const [slashQuery, setSlashQuery] = useState("");
+  const [renameId, setRenameId] = useState<string | null>(null);
+  const [renameVal, setRenameVal] = useState("");
+  const [menuId, setMenuId] = useState<string | null>(null);
+  const [editingMsgId, setEditingMsgId] = useState<string | null>(null);
+  const [editingMsgVal, setEditingMsgVal] = useState("");
+
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
 
-  const active = conversations.find((c) => c.id === activeId)!;
+  const active = conversations.find((c) => c.id === activeId) ?? conversations[0];
   const isEmpty = active.messages.length === 0;
+
+  // persist
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(conversations));
+    } catch {}
+  }, [conversations]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({
       top: scrollRef.current.scrollHeight,
       behavior: "smooth",
     });
-  }, [active.messages]);
+  }, [active?.messages]);
 
   useEffect(() => {
     const ta = taRef.current;
@@ -90,6 +119,19 @@ const AIChat = () => {
     ta.style.height = "auto";
     ta.style.height = Math.min(ta.scrollHeight, 200) + "px";
   }, [input]);
+
+  useEffect(() => {
+    const close = () => setMenuId(null);
+    document.addEventListener("click", close);
+    return () => document.removeEventListener("click", close);
+  }, []);
+
+  const sortedConvos = useMemo(() => {
+    return [...conversations].sort((a, b) => {
+      if (!!b.pinned !== !!a.pinned) return (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0);
+      return b.updatedAt - a.updatedAt;
+    });
+  }, [conversations]);
 
   const updateActive = (fn: (c: Conversation) => Conversation) =>
     setConversations((prev) => prev.map((c) => (c.id === activeId ? fn(c) : c)));
@@ -99,6 +141,7 @@ const AIChat = () => {
     setConversations((prev) => [c, ...prev]);
     setActiveId(c.id);
     setInput("");
+    setAttachments([]);
   };
 
   const stop = () => {
@@ -107,23 +150,78 @@ const AIChat = () => {
     setStreaming(false);
   };
 
-  const send = async (text?: string) => {
-    const content = (text ?? input).trim();
-    if (!content || streaming) return;
+  // ----- file handling -----
+  const handleFiles = async (files: FileList | null) => {
+    if (!files) return;
+    const adds: Attachment[] = [];
+    for (const f of Array.from(files).slice(0, 5)) {
+      if (f.size > 8 * 1024 * 1024) continue;
+      const isImg = f.type.startsWith("image/");
+      let dataUrl: string | undefined;
+      if (isImg) {
+        dataUrl = await new Promise<string>((resolve) => {
+          const r = new FileReader();
+          r.onload = () => resolve(r.result as string);
+          r.readAsDataURL(f);
+        });
+      }
+      adds.push({
+        id: newId(),
+        name: f.name,
+        kind: isImg ? "image" : "file",
+        dataUrl,
+        size: f.size,
+      });
+    }
+    setAttachments((prev) => [...prev, ...adds]);
+  };
 
-    const userMsg: Msg = { role: "user", content };
-    const history = [...active.messages, userMsg];
-    updateActive((c) => ({
-      ...c,
-      title: c.messages.length === 0 ? content.slice(0, 28) : c.title,
-      messages: [...history, { role: "assistant", content: "" }],
-      updatedAt: Date.now(),
-    }));
-    setInput("");
+  const onPaste = (e: React.ClipboardEvent) => {
+    if (e.clipboardData.files?.length) {
+      handleFiles(e.clipboardData.files);
+    }
+  };
+
+  // ----- slash menu -----
+  const onInputChange = (val: string) => {
+    setInput(val);
+    const line = val.split("\n").pop() ?? "";
+    if (line.startsWith("/")) {
+      setSlashOpen(true);
+      setSlashQuery(line.slice(1));
+    } else {
+      setSlashOpen(false);
+    }
+  };
+
+  const pickSlash = (c: SlashCommand) => {
+    setInput(c.prompt);
+    setSlashOpen(false);
+    setTimeout(() => taRef.current?.focus(), 0);
+  };
+
+  // ----- core send -----
+  const buildGatewayMessages = (history: Msg[]) =>
+    history.map((m) => {
+      if (m.role === "user" && m.attachments?.some((a) => a.kind === "image" && a.dataUrl)) {
+        const parts: any[] = [{ type: "text", text: m.content || "(图片)" }];
+        for (const a of m.attachments) {
+          if (a.kind === "image" && a.dataUrl) {
+            parts.push({ type: "image_url", image_url: { url: a.dataUrl } });
+          }
+        }
+        return { role: "user", content: parts };
+      }
+      return { role: m.role, content: m.content };
+    });
+
+  const runStream = async (history: Msg[], assistantMsgId: string) => {
     setStreaming(true);
-
     const controller = new AbortController();
     abortRef.current = controller;
+    const contextStr = moduleLabel
+      ? `User is currently viewing the "${moduleLabel}" module (key: ${moduleKey}). Reference this module in <cite> when relevant.`
+      : undefined;
 
     try {
       const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/chat`;
@@ -133,20 +231,24 @@ const AIChat = () => {
           "Content-Type": "application/json",
           Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
         },
-        body: JSON.stringify({ messages: history, model }),
+        body: JSON.stringify({
+          messages: buildGatewayMessages(history),
+          model,
+          context: contextStr,
+        }),
         signal: controller.signal,
       });
 
       if (!resp.ok || !resp.body) {
         const err = await resp.json().catch(() => ({ error: "请求失败" }));
-        updateActive((c) => {
-          const msgs = [...c.messages];
-          msgs[msgs.length - 1] = {
-            role: "assistant",
-            content: `⚠️ ${err.error || "请求失败，请稍后再试。"}`,
-          };
-          return { ...c, messages: msgs };
-        });
+        updateActive((c) => ({
+          ...c,
+          messages: c.messages.map((m) =>
+            m.id === assistantMsgId
+              ? { ...m, content: `⚠️ ${err.error || "请求失败，请稍后再试。"}` }
+              : m,
+          ),
+        }));
         return;
       }
 
@@ -176,11 +278,13 @@ const AIChat = () => {
             const chunk = parsed.choices?.[0]?.delta?.content as string | undefined;
             if (chunk) {
               acc += chunk;
-              updateActive((c) => {
-                const msgs = [...c.messages];
-                msgs[msgs.length - 1] = { role: "assistant", content: acc };
-                return { ...c, messages: msgs };
-              });
+              updateActive((c) => ({
+                ...c,
+                messages: c.messages.map((m) =>
+                  m.id === assistantMsgId ? { ...m, content: acc } : m,
+                ),
+                updatedAt: Date.now(),
+              }));
             }
           } catch {
             buffer = line + "\n" + buffer;
@@ -190,20 +294,91 @@ const AIChat = () => {
       }
     } catch (e: any) {
       if (e.name !== "AbortError") {
-        updateActive((c) => {
-          const msgs = [...c.messages];
-          msgs[msgs.length - 1] = {
-            role: "assistant",
-            content: "⚠️ 连接中断，请重试。",
-          };
-          return { ...c, messages: msgs };
-        });
+        updateActive((c) => ({
+          ...c,
+          messages: c.messages.map((m) =>
+            m.id === assistantMsgId ? { ...m, content: "⚠️ 连接中断，请重试。" } : m,
+          ),
+        }));
       }
     } finally {
       setStreaming(false);
       abortRef.current = null;
     }
   };
+
+  const send = async (text?: string) => {
+    const content = (text ?? input).trim();
+    if ((!content && attachments.length === 0) || streaming) return;
+
+    const userMsg: Msg = {
+      id: newId(),
+      role: "user",
+      content,
+      attachments: attachments.length ? attachments : undefined,
+    };
+    const assistantMsg: Msg = { id: newId(), role: "assistant", content: "" };
+    const history = [...active.messages, userMsg];
+    updateActive((c) => ({
+      ...c,
+      title: c.messages.length === 0 && content ? content.slice(0, 28) : c.title,
+      messages: [...history, assistantMsg],
+      updatedAt: Date.now(),
+    }));
+    setInput("");
+    setAttachments([]);
+    setSlashOpen(false);
+    await runStream(history, assistantMsg.id);
+  };
+
+  const regenerate = async () => {
+    if (streaming) return;
+    const msgs = active.messages;
+    // find last assistant and drop it
+    let lastAsst = -1;
+    for (let i = msgs.length - 1; i >= 0; i--) if (msgs[i].role === "assistant") { lastAsst = i; break; }
+    if (lastAsst < 0) return;
+    const trimmed = msgs.slice(0, lastAsst);
+    const assistantMsg: Msg = { id: newId(), role: "assistant", content: "" };
+    updateActive((c) => ({ ...c, messages: [...trimmed, assistantMsg], updatedAt: Date.now() }));
+    await runStream(trimmed, assistantMsg.id);
+  };
+
+  const editUserMessage = async (msgId: string) => {
+    const idx = active.messages.findIndex((m) => m.id === msgId);
+    if (idx < 0) return;
+    const trimmed = active.messages.slice(0, idx);
+    const newUser: Msg = { ...active.messages[idx], content: editingMsgVal };
+    const assistantMsg: Msg = { id: newId(), role: "assistant", content: "" };
+    const history = [...trimmed, newUser];
+    updateActive((c) => ({ ...c, messages: [...history, assistantMsg], updatedAt: Date.now() }));
+    setEditingMsgId(null);
+    setEditingMsgVal("");
+    await runStream(history, assistantMsg.id);
+  };
+
+  // ----- conversation management -----
+  const renameConvo = (id: string, title: string) =>
+    setConversations((prev) => prev.map((c) => (c.id === id ? { ...c, title: title || "新对话" } : c)));
+
+  const deleteConvo = (id: string) => {
+    setConversations((prev) => {
+      const next = prev.filter((c) => c.id !== id);
+      if (next.length === 0) {
+        const n = newConversation();
+        setActiveId(n.id);
+        return [n];
+      }
+      if (id === activeId) setActiveId(next[0].id);
+      return next;
+    });
+  };
+
+  const togglePin = (id: string) =>
+    setConversations((prev) => prev.map((c) => (c.id === id ? { ...c, pinned: !c.pinned } : c)));
+
+  // ----- UI helpers -----
+  const lastSeg = (m: Msg) => parseAgentStream(m.content);
 
   return (
     <div className="-m-6 flex h-[calc(100vh-64px)] overflow-hidden">
@@ -223,21 +398,91 @@ const AIChat = () => {
           </button>
         </div>
         <div className="px-3 pb-2">
-          <p className="filter-label px-1">最近</p>
+          <p className="filter-label px-1">会话</p>
         </div>
         <div className="flex-1 space-y-0.5 overflow-y-auto px-2 pb-3">
-          {conversations.map((c) => (
-            <button
+          {sortedConvos.map((c) => (
+            <div
               key={c.id}
-              onClick={() => setActiveId(c.id)}
-              className={`group flex w-full items-center gap-2 truncate rounded-md px-2.5 py-2 text-left text-sm transition-colors ${
-                c.id === activeId
-                  ? "bg-primary/10 text-primary"
-                  : "text-muted-foreground hover:bg-muted hover:text-foreground"
+              className={`group relative flex items-center gap-1 rounded-md px-1 ${
+                c.id === activeId ? "bg-primary/10" : "hover:bg-muted"
               }`}
             >
-              <span className="truncate">{c.title || "新对话"}</span>
-            </button>
+              {renameId === c.id ? (
+                <input
+                  autoFocus
+                  value={renameVal}
+                  onChange={(e) => setRenameVal(e.target.value)}
+                  onBlur={() => {
+                    renameConvo(c.id, renameVal.trim());
+                    setRenameId(null);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      renameConvo(c.id, renameVal.trim());
+                      setRenameId(null);
+                    }
+                    if (e.key === "Escape") setRenameId(null);
+                  }}
+                  className="my-1 w-full rounded bg-background px-1.5 py-1 text-sm outline-none ring-1 ring-primary/40"
+                />
+              ) : (
+                <button
+                  onClick={() => setActiveId(c.id)}
+                  className={`flex flex-1 items-center gap-1.5 truncate py-2 pl-1.5 text-left text-sm transition-colors ${
+                    c.id === activeId ? "text-primary" : "text-muted-foreground group-hover:text-foreground"
+                  }`}
+                >
+                  {c.pinned && <Pin className="h-3 w-3 shrink-0" />}
+                  <span className="truncate">{c.title || "新对话"}</span>
+                </button>
+              )}
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setMenuId(menuId === c.id ? null : c.id);
+                }}
+                className="mr-1 hidden h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-background hover:text-foreground group-hover:flex"
+              >
+                <MoreHorizontal className="h-3.5 w-3.5" />
+              </button>
+              {menuId === c.id && (
+                <div
+                  onClick={(e) => e.stopPropagation()}
+                  className="absolute right-1 top-9 z-20 w-36 overflow-hidden rounded-lg border border-border bg-popover py-1 shadow-xl"
+                >
+                  <MenuItem
+                    icon={c.pinned ? PinOff : Pin}
+                    onClick={() => {
+                      togglePin(c.id);
+                      setMenuId(null);
+                    }}
+                  >
+                    {c.pinned ? "取消置顶" : "置顶"}
+                  </MenuItem>
+                  <MenuItem
+                    icon={Pencil}
+                    onClick={() => {
+                      setRenameId(c.id);
+                      setRenameVal(c.title);
+                      setMenuId(null);
+                    }}
+                  >
+                    重命名
+                  </MenuItem>
+                  <MenuItem
+                    icon={Trash2}
+                    destructive
+                    onClick={() => {
+                      deleteConvo(c.id);
+                      setMenuId(null);
+                    }}
+                  >
+                    删除
+                  </MenuItem>
+                </div>
+              )}
+            </div>
           ))}
         </div>
         <div className="border-t border-border p-3">
@@ -248,7 +493,7 @@ const AIChat = () => {
             <span className="leading-tight">
               由 Lovable AI 提供
               <br />
-              <span className="text-[10px]">实时流式响应</span>
+              <span className="text-[10px]">本地保存 · 实时流式</span>
             </span>
           </div>
         </div>
@@ -256,7 +501,7 @@ const AIChat = () => {
 
       {/* Main chat area */}
       <div className="flex flex-1 flex-col bg-background">
-        {/* Top bar with model picker */}
+        {/* Top bar */}
         <div className="flex items-center justify-between border-b border-border px-6 py-3">
           <div className="flex items-center gap-2">
             <div className="flex h-7 w-7 items-center justify-center rounded-md bg-primary/10">
@@ -267,7 +512,7 @@ const AIChat = () => {
                 DTSV Intelligence
               </p>
               <p className="text-[11px] text-muted-foreground">
-                数据分析智能体 · 支持工具调用
+                数据分析智能体 · 可视化推理与工具调用
               </p>
             </div>
           </div>
@@ -300,13 +545,13 @@ const AIChat = () => {
                   你好，今天要分析什么？
                 </h2>
                 <p className="mt-1.5 text-sm text-muted-foreground">
-                  问我关于缺陷趋势、覆盖率、团队产能或具体项目的问题。
+                  输入 <kbd className="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px]">/</kbd> 调用预设命令，或直接提问。
                 </p>
               </motion.div>
               <div className="grid w-full gap-2 sm:grid-cols-2">
-                {SUGGESTIONS.map((s, i) => (
+                {SLASH_COMMANDS.slice(0, 4).map((s, i) => (
                   <motion.button
-                    key={s.title}
+                    key={s.id}
                     initial={{ opacity: 0, y: 8 }}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ delay: 0.05 * i }}
@@ -316,9 +561,7 @@ const AIChat = () => {
                     <div className="mb-1.5 flex h-7 w-7 items-center justify-center rounded-md bg-muted text-muted-foreground transition-colors group-hover:bg-primary/10 group-hover:text-primary">
                       <s.icon className="h-3.5 w-3.5" />
                     </div>
-                    <p className="text-sm font-medium text-foreground">
-                      {s.title}
-                    </p>
+                    <p className="text-sm font-medium text-foreground">{s.label.replace("/", "")}</p>
                     <p className="mt-0.5 line-clamp-2 text-xs leading-relaxed text-muted-foreground">
                       {s.prompt}
                     </p>
@@ -329,42 +572,119 @@ const AIChat = () => {
           ) : (
             <div className="mx-auto max-w-3xl space-y-6 px-6 py-8">
               <AnimatePresence initial={false}>
-                {active.messages.map((m, i) => (
-                  <motion.div
-                    key={i}
-                    initial={{ opacity: 0, y: 6 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    className="flex gap-3"
-                  >
-                    <div
-                      className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md ${
-                        m.role === "user"
-                          ? "bg-secondary text-foreground"
-                          : "bg-gradient-to-br from-primary to-primary/60 text-primary-foreground"
-                      }`}
+                {active.messages.map((m, i) => {
+                  const isLastAsst =
+                    m.role === "assistant" && i === active.messages.length - 1;
+                  return (
+                    <motion.div
+                      key={m.id}
+                      initial={{ opacity: 0, y: 6 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className="group flex gap-3"
                     >
-                      {m.role === "user" ? (
-                        <User className="h-3.5 w-3.5" />
-                      ) : (
-                        <Sparkles className="h-3.5 w-3.5" />
-                      )}
-                    </div>
-                    <div className="min-w-0 flex-1 pt-0.5">
-                      <p className="mb-1 text-xs font-medium text-muted-foreground">
-                        {m.role === "user" ? "你" : "DTSV Intelligence"}
-                      </p>
-                      {m.role === "assistant" && m.content === "" && streaming ? (
-                        <TypingDots />
-                      ) : (
-                        <div className="prose prose-sm max-w-none break-words text-foreground prose-headings:font-semibold prose-headings:text-foreground prose-p:my-2 prose-p:leading-relaxed prose-strong:text-foreground prose-code:rounded prose-code:bg-muted prose-code:px-1 prose-code:py-0.5 prose-code:text-[0.85em] prose-code:font-normal prose-code:before:content-none prose-code:after:content-none prose-pre:rounded-lg prose-pre:bg-muted prose-pre:text-foreground prose-ol:my-2 prose-ul:my-2 prose-li:my-0.5 prose-table:text-sm">
-                          <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                      <div
+                        className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md ${
+                          m.role === "user"
+                            ? "bg-secondary text-foreground"
+                            : "bg-gradient-to-br from-primary to-primary/60 text-primary-foreground"
+                        }`}
+                      >
+                        {m.role === "user" ? <User className="h-3.5 w-3.5" /> : <Sparkles className="h-3.5 w-3.5" />}
+                      </div>
+                      <div className="min-w-0 flex-1 pt-0.5">
+                        <p className="mb-1 text-xs font-medium text-muted-foreground">
+                          {m.role === "user" ? "你" : "DTSV Intelligence"}
+                        </p>
+
+                        {/* attachments */}
+                        {m.attachments && m.attachments.length > 0 && (
+                          <div className="mb-2 flex flex-wrap gap-2">
+                            {m.attachments.map((a) =>
+                              a.kind === "image" && a.dataUrl ? (
+                                <img
+                                  key={a.id}
+                                  src={a.dataUrl}
+                                  alt={a.name}
+                                  className="max-h-40 rounded-lg border border-border"
+                                />
+                              ) : (
+                                <div
+                                  key={a.id}
+                                  className="flex items-center gap-1.5 rounded-md border border-border bg-muted px-2 py-1 text-xs text-muted-foreground"
+                                >
+                                  <Paperclip className="h-3 w-3" />
+                                  {a.name}
+                                </div>
+                              ),
+                            )}
+                          </div>
+                        )}
+
+                        {/* body */}
+                        {editingMsgId === m.id ? (
+                          <div className="space-y-2">
+                            <textarea
+                              value={editingMsgVal}
+                              onChange={(e) => setEditingMsgVal(e.target.value)}
+                              rows={3}
+                              className="w-full resize-none rounded-lg border border-primary/40 bg-card p-2.5 text-sm outline-none"
+                            />
+                            <div className="flex gap-2">
+                              <button
+                                onClick={() => editUserMessage(m.id)}
+                                className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90"
+                              >
+                                重发
+                              </button>
+                              <button
+                                onClick={() => setEditingMsgId(null)}
+                                className="rounded-md border border-border px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground"
+                              >
+                                取消
+                              </button>
+                            </div>
+                          </div>
+                        ) : m.role === "assistant" && m.content === "" && streaming && isLastAsst ? (
+                          <TypingDots />
+                        ) : m.role === "assistant" ? (
+                          <MessageRenderer content={m.content} streaming={streaming && isLastAsst} />
+                        ) : (
+                          <p className="whitespace-pre-wrap text-sm leading-relaxed text-foreground">
                             {m.content}
-                          </ReactMarkdown>
-                        </div>
-                      )}
-                    </div>
-                  </motion.div>
-                ))}
+                          </p>
+                        )}
+
+                        {/* actions */}
+                        {!editingMsgId && (
+                          <div className="mt-1.5 flex h-6 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+                            {m.role === "assistant" ? (
+                              <>
+                                <CopyBtn
+                                  text={segmentsToPlainText(lastSeg(m)) || m.content}
+                                />
+                                {isLastAsst && !streaming && (
+                                  <ActionBtn icon={RefreshCcw} label="重新生成" onClick={regenerate} />
+                                )}
+                              </>
+                            ) : (
+                              <>
+                                <CopyBtn text={m.content} />
+                                <ActionBtn
+                                  icon={Pencil}
+                                  label="编辑"
+                                  onClick={() => {
+                                    setEditingMsgId(m.id);
+                                    setEditingMsgVal(m.content);
+                                  }}
+                                />
+                              </>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    </motion.div>
+                  );
+                })}
               </AnimatePresence>
             </div>
           )}
@@ -373,26 +693,82 @@ const AIChat = () => {
         {/* Composer */}
         <div className="border-t border-border bg-background px-6 py-4">
           <div className="mx-auto max-w-3xl">
+            {/* context chip */}
+            {moduleLabel && (
+              <div className="mb-2 flex items-center gap-1.5 text-[11px]">
+                <span className="inline-flex items-center gap-1 rounded-md border border-border bg-muted px-1.5 py-0.5 text-muted-foreground">
+                  <Sparkle className="h-2.5 w-2.5 text-primary" />
+                  上下文：<span className="font-medium text-foreground">{moduleLabel}</span>
+                </span>
+              </div>
+            )}
+
+            {/* attachment preview */}
+            {attachments.length > 0 && (
+              <div className="mb-2 flex flex-wrap gap-2">
+                {attachments.map((a) => (
+                  <div
+                    key={a.id}
+                    className="group/att relative flex items-center gap-1.5 rounded-md border border-border bg-card px-2 py-1 text-xs text-foreground"
+                  >
+                    {a.kind === "image" && a.dataUrl ? (
+                      <img src={a.dataUrl} className="h-6 w-6 rounded object-cover" alt="" />
+                    ) : (
+                      <Paperclip className="h-3 w-3 text-muted-foreground" />
+                    )}
+                    <span className="max-w-[140px] truncate">{a.name}</span>
+                    <button
+                      onClick={() => setAttachments((p) => p.filter((x) => x.id !== a.id))}
+                      className="ml-0.5 rounded-full p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
             <div className="relative flex items-end gap-2 rounded-2xl border border-border bg-card px-3 py-2 shadow-sm transition-colors focus-within:border-primary/50 focus-within:shadow-md">
+              {slashOpen && (
+                <SlashMenu
+                  query={slashQuery}
+                  onPick={pickSlash}
+                  onClose={() => setSlashOpen(false)}
+                />
+              )}
+              <input
+                ref={fileRef}
+                type="file"
+                multiple
+                accept="image/*,.pdf,.csv,.txt,.json,.md"
+                hidden
+                onChange={(e) => {
+                  handleFiles(e.target.files);
+                  e.currentTarget.value = "";
+                }}
+              />
               <button
                 type="button"
+                onClick={() => fileRef.current?.click()}
                 className="mb-1 flex h-8 w-8 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                title="附件"
+                title="附件 (图片 / 文件)"
               >
                 <Paperclip className="h-4 w-4" />
               </button>
               <textarea
                 ref={taRef}
                 value={input}
-                onChange={(e) => setInput(e.target.value)}
+                onChange={(e) => onInputChange(e.target.value)}
+                onPaste={onPaste}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
+                  if (e.key === "Enter" && !e.shiftKey && !slashOpen) {
                     e.preventDefault();
                     send();
                   }
+                  if (e.key === "Escape") setSlashOpen(false);
                 }}
                 rows={1}
-                placeholder="提问数据、要求总结，或让我提建议…  (Shift + Enter 换行)"
+                placeholder="提问数据、要求总结，或输入 / 调用命令…  (Shift + Enter 换行)"
                 className="max-h-[200px] min-h-[28px] flex-1 resize-none bg-transparent py-1.5 text-sm leading-relaxed text-foreground outline-none placeholder:text-muted-foreground"
               />
               {streaming ? (
@@ -406,7 +782,7 @@ const AIChat = () => {
               ) : (
                 <button
                   onClick={() => send()}
-                  disabled={!input.trim()}
+                  disabled={!input.trim() && attachments.length === 0}
                   className="mb-1 flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground transition-all hover:bg-primary/90 disabled:opacity-40"
                 >
                   <ArrowUp className="h-4 w-4" />
@@ -423,6 +799,8 @@ const AIChat = () => {
   );
 };
 
+// ----- small sub-components -----
+
 const TypingDots = () => (
   <div className="flex h-6 items-center gap-1">
     {[0, 1, 2].map((i) => (
@@ -434,6 +812,61 @@ const TypingDots = () => (
       />
     ))}
   </div>
+);
+
+const ActionBtn = ({
+  icon: Icon,
+  label,
+  onClick,
+}: {
+  icon: any;
+  label: string;
+  onClick: () => void;
+}) => (
+  <button
+    onClick={onClick}
+    title={label}
+    className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+  >
+    <Icon className="h-3.5 w-3.5" />
+  </button>
+);
+
+const CopyBtn = ({ text }: { text: string }) => {
+  const [done, setDone] = useState(false);
+  return (
+    <ActionBtn
+      icon={done ? Check : Copy}
+      label={done ? "已复制" : "复制"}
+      onClick={() => {
+        navigator.clipboard.writeText(text);
+        setDone(true);
+        setTimeout(() => setDone(false), 1200);
+      }}
+    />
+  );
+};
+
+const MenuItem = ({
+  icon: Icon,
+  children,
+  onClick,
+  destructive,
+}: {
+  icon: any;
+  children: any;
+  onClick: () => void;
+  destructive?: boolean;
+}) => (
+  <button
+    onClick={onClick}
+    className={`flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs transition-colors hover:bg-accent ${
+      destructive ? "text-destructive" : "text-foreground"
+    }`}
+  >
+    <Icon className="h-3.5 w-3.5" />
+    {children}
+  </button>
 );
 
 export default AIChat;

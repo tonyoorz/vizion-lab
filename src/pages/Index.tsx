@@ -48,7 +48,7 @@ const Index = () => {
       case "defect-status":
         return <DefectStatusAnalysis />;
       case "ai-chat":
-        return <AIChat />;
+        return <AIChat moduleKey={activeNav} moduleLabel={info.title} />;
       default:
         return (
           <>
