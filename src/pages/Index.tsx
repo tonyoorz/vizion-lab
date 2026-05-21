@@ -13,6 +13,7 @@ import TestTeamAnalysis from "@/components/dashboard/pages/TestTeamAnalysis";
 import CoverageAnalysis from "@/components/dashboard/pages/CoverageAnalysis";
 import TestStatusAnalysis from "@/components/dashboard/pages/TestStatusAnalysis";
 import DefectStatusAnalysis from "@/components/dashboard/pages/DefectStatusAnalysis";
+import AIChat from "@/components/dashboard/pages/AIChat";
 
 const pageTitles: Record<string, { title: string; subtitle: string }> = {
   topissue: { title: "Top Issue 分析", subtitle: "关键问题追踪与趋势分析" },
@@ -23,6 +24,7 @@ const pageTitles: Record<string, { title: string; subtitle: string }> = {
   coverage: { title: "测试覆盖率分析", subtitle: "模块覆盖率监控与提升" },
   "test-status": { title: "测试状态分析", subtitle: "用例执行状态与通过率" },
   "defect-status": { title: "缺陷状态分析", subtitle: "缺陷生命周期与流转趋势" },
+  "ai-chat": { title: "AI Chat", subtitle: "与 DTSV 智能体对话，获取分析洞察" },
 };
 
 const Index = () => {
@@ -45,6 +47,8 @@ const Index = () => {
         return <TestStatusAnalysis />;
       case "defect-status":
         return <DefectStatusAnalysis />;
+      case "ai-chat":
+        return <AIChat />;
       default:
         return (
           <>
