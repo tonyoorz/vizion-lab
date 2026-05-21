@@ -9,6 +9,7 @@ import {
   LineChart,
   ListChecks,
   ShieldCheck,
+  Sparkles,
   TrendingUp,
   Users,
 } from "lucide-react";
@@ -22,6 +23,7 @@ const navItems = [
   { id: "coverage", label: "测试覆盖率分析", icon: ShieldCheck },
   { id: "test-status", label: "测试状态分析", icon: ListChecks },
   { id: "defect-status", label: "缺陷状态分析", icon: BarChart3 },
+  { id: "ai-chat", label: "AI Chat", icon: Sparkles, badge: "Beta" as const },
 ];
 
 interface DashboardSidebarProps {
@@ -64,7 +66,16 @@ const DashboardSidebar = ({ active, onNavigate }: DashboardSidebarProps) => {
               title={collapsed ? item.label : undefined}
             >
               <Icon className="h-[18px] w-[18px] shrink-0" />
-              {!collapsed && <span className="truncate">{item.label}</span>}
+              {!collapsed && (
+                <>
+                  <span className="flex-1 truncate text-left">{item.label}</span>
+                  {"badge" in item && item.badge && (
+                    <span className="rounded-md bg-primary/20 px-1.5 py-0.5 text-[10px] font-semibold tracking-wide text-primary">
+                      {item.badge}
+                    </span>
+                  )}
+                </>
+              )}
             </button>
           );
         })}
