@@ -850,6 +850,25 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
                 placeholder="提问数据、要求总结，或输入 / 调用命令…  (Shift + Enter 换行)"
                 className="max-h-[200px] min-h-[28px] flex-1 resize-none bg-transparent py-1.5 text-sm leading-relaxed text-foreground outline-none placeholder:text-muted-foreground"
               />
+              <button
+                type="button"
+                onClick={recording ? stopRecording : startRecording}
+                disabled={transcribing}
+                className={`mb-1 flex h-8 w-8 items-center justify-center rounded-lg transition-colors ${
+                  recording
+                    ? "bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                    : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                } disabled:opacity-50`}
+                title={recording ? "停止录音" : transcribing ? "转写中…" : "语音输入"}
+              >
+                {transcribing ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : recording ? (
+                  <Square className="h-3.5 w-3.5 fill-current" />
+                ) : (
+                  <Mic className="h-4 w-4" />
+                )}
+              </button>
               {streaming ? (
                 <button
                   onClick={stop}
