@@ -3,7 +3,9 @@ import {
   ArrowUp,
   Check,
   Copy,
+  Loader2,
   MessageSquarePlus,
+  Mic,
   MoreHorizontal,
   Paperclip,
   Pencil,
@@ -12,6 +14,7 @@ import {
   RefreshCcw,
   Sparkles,
   Sparkle,
+  Square,
   StopCircle,
   Trash2,
   User,
@@ -90,11 +93,15 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
   const [menuId, setMenuId] = useState<string | null>(null);
   const [editingMsgId, setEditingMsgId] = useState<string | null>(null);
   const [editingMsgVal, setEditingMsgVal] = useState("");
+  const [recording, setRecording] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
 
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const recRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
 
   const active = conversations.find((c) => c.id === activeId) ?? conversations[0];
   const isEmpty = active.messages.length === 0;
@@ -181,6 +188,78 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
       handleFiles(e.clipboardData.files);
     }
   };
+
+  // ----- voice input -----
+  const startRecording = async () => {
+    if (recording || transcribing) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : "audio/webm";
+      const rec = new MediaRecorder(stream, { mimeType: mime });
+      chunksRef.current = [];
+      rec.ondataavailable = (e) => {
+        if (e.data.size > 0) chunksRef.current.push(e.data);
+      };
+      rec.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop());
+        const blob = new Blob(chunksRef.current, { type: "audio/webm" });
+        if (blob.size < 600) return; // too short
+        await transcribe(blob);
+      };
+      rec.start();
+      recRef.current = rec;
+      setRecording(true);
+    } catch (e) {
+      console.error("mic error", e);
+      alert("无法访问麦克风，请检查权限。");
+    }
+  };
+
+  const stopRecording = () => {
+    recRef.current?.stop();
+    recRef.current = null;
+    setRecording(false);
+  };
+
+  const transcribe = async (blob: Blob) => {
+    setTranscribing(true);
+    try {
+      const base64 = await new Promise<string>((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => {
+          const s = r.result as string;
+          resolve(s.split(",")[1] ?? "");
+        };
+        r.onerror = reject;
+        r.readAsDataURL(blob);
+      });
+      const resp = await fetch(
+        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/transcribe`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
+          },
+          body: JSON.stringify({ audio: base64, mime: "audio/webm" }),
+        },
+      );
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data?.error || "转写失败");
+      const text = (data.text || "").trim();
+      if (text) {
+        setInput((prev) => (prev ? prev + (prev.endsWith(" ") ? "" : " ") + text : text));
+        setTimeout(() => taRef.current?.focus(), 0);
+      }
+    } catch (e: any) {
+      alert(e?.message || "转写失败");
+    } finally {
+      setTranscribing(false);
+    }
+  };
+
 
   // ----- slash menu -----
   const onInputChange = (val: string) => {
@@ -771,6 +850,25 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
                 placeholder="提问数据、要求总结，或输入 / 调用命令…  (Shift + Enter 换行)"
                 className="max-h-[200px] min-h-[28px] flex-1 resize-none bg-transparent py-1.5 text-sm leading-relaxed text-foreground outline-none placeholder:text-muted-foreground"
               />
+              <button
+                type="button"
+                onClick={recording ? stopRecording : startRecording}
+                disabled={transcribing}
+                className={`mb-1 flex h-8 w-8 items-center justify-center rounded-lg transition-colors ${
+                  recording
+                    ? "bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                    : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                } disabled:opacity-50`}
+                title={recording ? "停止录音" : transcribing ? "转写中…" : "语音输入"}
+              >
+                {transcribing ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : recording ? (
+                  <Square className="h-3.5 w-3.5 fill-current" />
+                ) : (
+                  <Mic className="h-4 w-4" />
+                )}
+              </button>
               {streaming ? (
                 <button
                   onClick={stop}
