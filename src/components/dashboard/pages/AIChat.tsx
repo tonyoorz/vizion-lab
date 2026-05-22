@@ -807,6 +807,24 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
               </div>
             )}
 
+            {/* image quick-prompts */}
+            {attachments.some((a) => a.kind === "image") && !streaming && (
+              <div className="mb-2 flex flex-wrap items-center gap-1.5">
+                <span className="inline-flex items-center gap-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                  <Sparkle className="h-2.5 w-2.5 text-primary" /> 图片快捷提问
+                </span>
+                {IMAGE_QUICK_PROMPTS.map((q) => (
+                  <button
+                    key={q}
+                    onClick={() => send(q)}
+                    className="rounded-full border border-border bg-card px-2.5 py-1 text-[11px] text-foreground transition-colors hover:border-primary/50 hover:bg-primary/5 hover:text-primary"
+                  >
+                    {q}
+                  </button>
+                ))}
+              </div>
+            )}
+
             <div className="relative flex items-end gap-2 rounded-2xl border border-border bg-card px-3 py-2 shadow-sm transition-colors focus-within:border-primary/50 focus-within:shadow-md">
               {slashOpen && (
                 <SlashMenu
