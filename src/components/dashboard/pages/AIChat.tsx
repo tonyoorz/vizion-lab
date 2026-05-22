@@ -56,6 +56,14 @@ const MODELS = [
 
 const STORAGE_KEY = "dtsv.chat.v2";
 
+const IMAGE_QUICK_PROMPTS = [
+  "这张图说明什么？",
+  "找出异常点",
+  "解读 KPI 变化趋势",
+  "总结关键洞察（3 条以内）",
+  "提取图中数据为表格",
+];
+
 const newConversation = (): Conversation => ({
   id: crypto.randomUUID(),
   title: "新对话",
@@ -803,6 +811,24 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
                       <X className="h-3 w-3" />
                     </button>
                   </div>
+                ))}
+              </div>
+            )}
+
+            {/* image quick-prompts */}
+            {attachments.some((a) => a.kind === "image") && !streaming && (
+              <div className="mb-2 flex flex-wrap items-center gap-1.5">
+                <span className="inline-flex items-center gap-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                  <Sparkle className="h-2.5 w-2.5 text-primary" /> 图片快捷提问
+                </span>
+                {IMAGE_QUICK_PROMPTS.map((q) => (
+                  <button
+                    key={q}
+                    onClick={() => send(q)}
+                    className="rounded-full border border-border bg-card px-2.5 py-1 text-[11px] text-foreground transition-colors hover:border-primary/50 hover:bg-primary/5 hover:text-primary"
+                  >
+                    {q}
+                  </button>
                 ))}
               </div>
             )}
