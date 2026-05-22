@@ -56,6 +56,14 @@ const MODELS = [
 
 const STORAGE_KEY = "dtsv.chat.v2";
 
+const IMAGE_QUICK_PROMPTS = [
+  "这张图说明什么？",
+  "找出异常点",
+  "解读 KPI 变化趋势",
+  "总结关键洞察（3 条以内）",
+  "提取图中数据为表格",
+];
+
 const newConversation = (): Conversation => ({
   id: crypto.randomUUID(),
   title: "新对话",
