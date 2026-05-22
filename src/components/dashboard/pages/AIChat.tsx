@@ -189,6 +189,78 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
     }
   };
 
+  // ----- voice input -----
+  const startRecording = async () => {
+    if (recording || transcribing) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : "audio/webm";
+      const rec = new MediaRecorder(stream, { mimeType: mime });
+      chunksRef.current = [];
+      rec.ondataavailable = (e) => {
+        if (e.data.size > 0) chunksRef.current.push(e.data);
+      };
+      rec.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop());
+        const blob = new Blob(chunksRef.current, { type: "audio/webm" });
+        if (blob.size < 600) return; // too short
+        await transcribe(blob);
+      };
+      rec.start();
+      recRef.current = rec;
+      setRecording(true);
+    } catch (e) {
+      console.error("mic error", e);
+      alert("无法访问麦克风，请检查权限。");
+    }
+  };
+
+  const stopRecording = () => {
+    recRef.current?.stop();
+    recRef.current = null;
+    setRecording(false);
+  };
+
+  const transcribe = async (blob: Blob) => {
+    setTranscribing(true);
+    try {
+      const base64 = await new Promise<string>((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => {
+          const s = r.result as string;
+          resolve(s.split(",")[1] ?? "");
+        };
+        r.onerror = reject;
+        r.readAsDataURL(blob);
+      });
+      const resp = await fetch(
+        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/transcribe`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
+          },
+          body: JSON.stringify({ audio: base64, mime: "audio/webm" }),
+        },
+      );
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data?.error || "转写失败");
+      const text = (data.text || "").trim();
+      if (text) {
+        setInput((prev) => (prev ? prev + (prev.endsWith(" ") ? "" : " ") + text : text));
+        setTimeout(() => taRef.current?.focus(), 0);
+      }
+    } catch (e: any) {
+      alert(e?.message || "转写失败");
+    } finally {
+      setTranscribing(false);
+    }
+  };
+
+
   // ----- slash menu -----
   const onInputChange = (val: string) => {
     setInput(val);
