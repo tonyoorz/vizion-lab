@@ -14,9 +14,16 @@ export type AgentSegment =
       text: string;
       closed: boolean;
     }
+  | {
+      kind: "chart";
+      chartType: "line" | "bar" | "area" | "pie";
+      title?: string;
+      text: string;
+      closed: boolean;
+    }
   | { kind: "text"; text: string };
 
-const TAG_RE = /<(think|step)(\s[^>]*)?>|<\/(think|step)>/i;
+const TAG_RE = /<(think|step|chart)(\s[^>]*)?>|<\/(think|step|chart)>/i;
 
 function getAttr(attrs: string | undefined, name: string): string | undefined {
   if (!attrs) return undefined;
