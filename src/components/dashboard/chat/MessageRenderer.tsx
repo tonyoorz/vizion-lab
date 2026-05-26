@@ -164,6 +164,170 @@ function StepBlock({
   );
 }
 
+const CHART_PALETTE = [
+  "hsl(var(--primary))",
+  "#10b981",
+  "#f59e0b",
+  "#ef4444",
+  "#8b5cf6",
+  "#06b6d4",
+  "#ec4899",
+  "#84cc16",
+];
+
+function ChartBlock({
+  chartType,
+  title,
+  text,
+  closed,
+}: {
+  chartType: "line" | "bar" | "area" | "pie";
+  title?: string;
+  text: string;
+  closed: boolean;
+}) {
+  const spec = useMemo(() => {
+    if (!closed) return null;
+    try {
+      const cleaned = text.trim().replace(/^```json\s*|\s*```$/g, "");
+      return JSON.parse(cleaned);
+    } catch {
+      return null;
+    }
+  }, [text, closed]);
+
+  if (!closed) {
+    return (
+      <div className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-xs text-muted-foreground">
+        <Loader2 className="h-3 w-3 animate-spin" />
+        正在生成图表…
+      </div>
+    );
+  }
+  if (!spec || !Array.isArray(spec.data)) {
+    return (
+      <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+        图表数据解析失败
+      </div>
+    );
+  }
+
+  const data = spec.data;
+  const series: Array<{ key: string; color?: string }> =
+    spec.series ??
+    (chartType === "pie"
+      ? []
+      : Object.keys(data[0] || {})
+          .filter((k) => k !== "name" && typeof data[0][k] === "number")
+          .map((k) => ({ key: k })));
+
+  const axis = {
+    stroke: "hsl(var(--muted-foreground))",
+    fontSize: 11,
+    tickLine: false,
+  } as const;
+  const tooltipStyle = {
+    background: "hsl(var(--card))",
+    border: "1px solid hsl(var(--border))",
+    borderRadius: 8,
+    fontSize: 12,
+  };
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 4 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="overflow-hidden rounded-xl border border-border bg-card"
+    >
+      <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2">
+        <BarChart3 className="h-3.5 w-3.5 text-primary" />
+        <p className="text-xs font-semibold text-foreground">
+          {title || "数据图表"}
+        </p>
+      </div>
+      <div className="h-64 w-full p-3">
+        <ResponsiveContainer width="100%" height="100%">
+          {chartType === "line" ? (
+            <LineChart data={data} margin={{ top: 8, right: 12, left: -10, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
+              <XAxis dataKey="name" {...axis} />
+              <YAxis {...axis} />
+              <Tooltip contentStyle={tooltipStyle} />
+              {series.length > 1 && <Legend wrapperStyle={{ fontSize: 11 }} />}
+              {series.map((s, i) => (
+                <Line
+                  key={s.key}
+                  type="monotone"
+                  dataKey={s.key}
+                  stroke={s.color || CHART_PALETTE[i % CHART_PALETTE.length]}
+                  strokeWidth={2}
+                  dot={{ r: 3 }}
+                  activeDot={{ r: 5 }}
+                />
+              ))}
+            </LineChart>
+          ) : chartType === "bar" ? (
+            <BarChart data={data} margin={{ top: 8, right: 12, left: -10, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
+              <XAxis dataKey="name" {...axis} />
+              <YAxis {...axis} />
+              <Tooltip contentStyle={tooltipStyle} cursor={{ fill: "hsl(var(--muted))" }} />
+              {series.length > 1 && <Legend wrapperStyle={{ fontSize: 11 }} />}
+              {series.map((s, i) => (
+                <Bar
+                  key={s.key}
+                  dataKey={s.key}
+                  fill={s.color || CHART_PALETTE[i % CHART_PALETTE.length]}
+                  radius={[4, 4, 0, 0]}
+                />
+              ))}
+            </BarChart>
+          ) : chartType === "area" ? (
+            <AreaChart data={data} margin={{ top: 8, right: 12, left: -10, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
+              <XAxis dataKey="name" {...axis} />
+              <YAxis {...axis} />
+              <Tooltip contentStyle={tooltipStyle} />
+              {series.length > 1 && <Legend wrapperStyle={{ fontSize: 11 }} />}
+              {series.map((s, i) => {
+                const color = s.color || CHART_PALETTE[i % CHART_PALETTE.length];
+                return (
+                  <Area
+                    key={s.key}
+                    type="monotone"
+                    dataKey={s.key}
+                    stroke={color}
+                    fill={color}
+                    fillOpacity={0.18}
+                    strokeWidth={2}
+                  />
+                );
+              })}
+            </AreaChart>
+          ) : (
+            <PieChart>
+              <Tooltip contentStyle={tooltipStyle} />
+              <Pie
+                data={data}
+                dataKey="value"
+                nameKey="name"
+                outerRadius={90}
+                innerRadius={45}
+                paddingAngle={2}
+              >
+                {data.map((_: any, i: number) => (
+                  <Cell key={i} fill={CHART_PALETTE[i % CHART_PALETTE.length]} />
+                ))}
+              </Pie>
+              <Legend wrapperStyle={{ fontSize: 11 }} />
+            </PieChart>
+          )}
+        </ResponsiveContainer>
+      </div>
+    </motion.div>
+  );
+}
+
 function TextBlock({ text }: { text: string }) {
   const md = preprocessCitations(text);
   return (
