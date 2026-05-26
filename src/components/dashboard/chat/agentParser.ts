@@ -56,6 +56,19 @@ export function parseAgentStream(raw: string): AgentSegment[] {
       const closed = !!cm;
       if (openName === "think") {
         out.push({ kind: "think", text: inner, closed });
+      } else if (openName === "chart") {
+        const attrs = m[2];
+        const t = (getAttr(attrs, "type") || "line").toLowerCase();
+        const chartType = (["line", "bar", "area", "pie"].includes(t)
+          ? t
+          : "line") as "line" | "bar" | "area" | "pie";
+        out.push({
+          kind: "chart",
+          chartType,
+          title: getAttr(attrs, "title"),
+          text: inner,
+          closed,
+        });
       } else {
         const attrs = m[2];
         out.push({
