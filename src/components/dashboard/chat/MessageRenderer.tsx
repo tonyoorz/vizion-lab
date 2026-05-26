@@ -63,6 +63,16 @@ export default function MessageRenderer({ content, streaming }: Props) {
               closed={s.closed}
             />
           );
+        if (s.kind === "chart")
+          return (
+            <ChartBlock
+              key={i}
+              chartType={s.chartType}
+              title={s.title}
+              text={s.text}
+              closed={s.closed}
+            />
+          );
         return <TextBlock key={i} text={s.text} />;
       })}
     </div>
