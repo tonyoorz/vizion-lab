@@ -394,6 +394,15 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
     } finally {
       setStreaming(false);
       abortRef.current = null;
+      const ms = Math.round(performance.now() - startedAt);
+      updateActive((c) => ({
+        ...c,
+        messages: c.messages.map((m) =>
+          m.id === assistantMsgId
+            ? { ...m, meta: { ms, chars: (m.content || "").length, model: usedModel } }
+            : m,
+        ),
+      }));
     }
   };
 
