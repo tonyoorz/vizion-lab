@@ -746,7 +746,12 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
                         ) : m.role === "assistant" && m.content === "" && streaming && isLastAsst ? (
                           <TypingDots />
                         ) : m.role === "assistant" ? (
-                          <MessageRenderer content={m.content} streaming={streaming && isLastAsst} />
+                          <>
+                            <MessageRenderer content={m.content} streaming={streaming && isLastAsst} />
+                            {m.meta && !(streaming && isLastAsst) && (
+                              <MessageStats meta={m.meta} />
+                            )}
+                          </>
                         ) : (
                           <p className="whitespace-pre-wrap text-sm leading-relaxed text-foreground">
                             {m.content}
