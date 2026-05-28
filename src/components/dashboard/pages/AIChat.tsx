@@ -307,6 +307,8 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
     setStreaming(true);
     const controller = new AbortController();
     abortRef.current = controller;
+    const startedAt = performance.now();
+    const usedModel = model;
     const contextStr = moduleLabel
       ? `User is currently viewing the "${moduleLabel}" module (key: ${moduleKey}). Reference this module in <cite> when relevant.`
       : undefined;
