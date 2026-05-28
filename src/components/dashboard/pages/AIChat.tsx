@@ -38,6 +38,7 @@ interface Msg {
   role: Role;
   content: string;
   attachments?: Attachment[];
+  meta?: { ms?: number; chars?: number; model?: string };
 }
 interface Conversation {
   id: string;
