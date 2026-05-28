@@ -955,6 +955,28 @@ const TypingDots = () => (
   </div>
 );
 
+const MessageStats = ({
+  meta,
+}: {
+  meta: { ms?: number; chars?: number; model?: string };
+}) => {
+  const modelLabel = MODELS.find((m) => m.id === meta.model)?.label ?? meta.model;
+  const seconds = meta.ms != null ? (meta.ms / 1000).toFixed(1) + "s" : null;
+  const tokens = meta.chars != null ? Math.max(1, Math.round(meta.chars / 3.5)) : null;
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[10px] text-muted-foreground">
+      {modelLabel && (
+        <span className="inline-flex items-center gap-1">
+          <span className="h-1 w-1 rounded-full bg-primary/60" />
+          {modelLabel}
+        </span>
+      )}
+      {seconds && <span>· {seconds}</span>}
+      {tokens && <span>· ~{tokens.toLocaleString()} tok</span>}
+    </div>
+  );
+};
+
 const ActionBtn = ({
   icon: Icon,
   label,
