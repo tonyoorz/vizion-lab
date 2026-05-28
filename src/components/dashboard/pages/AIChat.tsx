@@ -38,6 +38,7 @@ interface Msg {
   role: Role;
   content: string;
   attachments?: Attachment[];
+  meta?: { ms?: number; chars?: number; model?: string };
 }
 interface Conversation {
   id: string;
@@ -306,6 +307,8 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
     setStreaming(true);
     const controller = new AbortController();
     abortRef.current = controller;
+    const startedAt = performance.now();
+    const usedModel = model;
     const contextStr = moduleLabel
       ? `User is currently viewing the "${moduleLabel}" module (key: ${moduleKey}). Reference this module in <cite> when relevant.`
       : undefined;
@@ -391,6 +394,15 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
     } finally {
       setStreaming(false);
       abortRef.current = null;
+      const ms = Math.round(performance.now() - startedAt);
+      updateActive((c) => ({
+        ...c,
+        messages: c.messages.map((m) =>
+          m.id === assistantMsgId
+            ? { ...m, meta: { ms, chars: (m.content || "").length, model: usedModel } }
+            : m,
+        ),
+      }));
     }
   };
 
@@ -734,7 +746,12 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
                         ) : m.role === "assistant" && m.content === "" && streaming && isLastAsst ? (
                           <TypingDots />
                         ) : m.role === "assistant" ? (
-                          <MessageRenderer content={m.content} streaming={streaming && isLastAsst} />
+                          <>
+                            <MessageRenderer content={m.content} streaming={streaming && isLastAsst} />
+                            {m.meta && !(streaming && isLastAsst) && (
+                              <MessageStats meta={m.meta} />
+                            )}
+                          </>
                         ) : (
                           <p className="whitespace-pre-wrap text-sm leading-relaxed text-foreground">
                             {m.content}
@@ -937,6 +954,28 @@ const TypingDots = () => (
     ))}
   </div>
 );
+
+const MessageStats = ({
+  meta,
+}: {
+  meta: { ms?: number; chars?: number; model?: string };
+}) => {
+  const modelLabel = MODELS.find((m) => m.id === meta.model)?.label ?? meta.model;
+  const seconds = meta.ms != null ? (meta.ms / 1000).toFixed(1) + "s" : null;
+  const tokens = meta.chars != null ? Math.max(1, Math.round(meta.chars / 3.5)) : null;
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[10px] text-muted-foreground">
+      {modelLabel && (
+        <span className="inline-flex items-center gap-1">
+          <span className="h-1 w-1 rounded-full bg-primary/60" />
+          {modelLabel}
+        </span>
+      )}
+      {seconds && <span>· {seconds}</span>}
+      {tokens && <span>· ~{tokens.toLocaleString()} tok</span>}
+    </div>
+  );
+};
 
 const ActionBtn = ({
   icon: Icon,

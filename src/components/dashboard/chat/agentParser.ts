@@ -1,12 +1,15 @@
 // Parses the streaming assistant text into structured segments.
 // The model emits:
 //   <think>...</think>           reasoning
+//   <plan>...</plan>             ordered task checklist (one item per line)
 //   <step title="x" source="y">summary</step>   tool/analysis steps
+//   <chart type="...">{ JSON }</chart>          inline chart spec
 //   <cite source="x">label</cite> inline citations (kept inside text segments)
 // Anything else is treated as final markdown body text.
 
 export type AgentSegment =
   | { kind: "think"; text: string; closed: boolean }
+  | { kind: "plan"; items: string[]; closed: boolean }
   | {
       kind: "step";
       title: string;
@@ -23,12 +26,19 @@ export type AgentSegment =
     }
   | { kind: "text"; text: string };
 
-const TAG_RE = /<(think|step|chart)(\s[^>]*)?>|<\/(think|step|chart)>/i;
+const TAG_RE = /<(think|plan|step|chart)(\s[^>]*)?>|<\/(think|plan|step|chart)>/i;
 
 function getAttr(attrs: string | undefined, name: string): string | undefined {
   if (!attrs) return undefined;
   const m = attrs.match(new RegExp(`${name}\\s*=\\s*"([^"]*)"`, "i"));
   return m?.[1];
+}
+
+function parsePlanItems(raw: string): string[] {
+  return raw
+    .split("\n")
+    .map((l) => l.replace(/^\s*(?:\d+\.|[-*])\s*(?:\[[ xX]\]\s*)?/, "").trim())
+    .filter(Boolean);
 }
 
 export function parseAgentStream(raw: string): AgentSegment[] {
@@ -49,13 +59,14 @@ export function parseAgentStream(raw: string): AgentSegment[] {
     rest = rest.slice(m.index! + tag.length);
 
     if (openName) {
-      // opening tag — find matching close in remaining text
       const closeRe = new RegExp(`</${openName}>`, "i");
       const cm = rest.match(closeRe);
       const inner = cm ? rest.slice(0, cm.index!) : rest;
       const closed = !!cm;
       if (openName === "think") {
         out.push({ kind: "think", text: inner, closed });
+      } else if (openName === "plan") {
+        out.push({ kind: "plan", items: parsePlanItems(inner), closed });
       } else if (openName === "chart") {
         const attrs = m[2];
         const t = (getAttr(attrs, "type") || "line").toLowerCase();

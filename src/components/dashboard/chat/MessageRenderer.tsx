@@ -10,6 +10,7 @@ import {
   Database,
   Loader2,
   BarChart3,
+  ListChecks,
   Wrench,
 } from "lucide-react";
 import {
@@ -48,11 +49,22 @@ function preprocessCitations(md: string) {
 
 export default function MessageRenderer({ content, streaming }: Props) {
   const segs = parseAgentStream(content);
+  const completedSteps = segs.filter((s) => s.kind === "step" && s.closed).length;
   return (
     <div className="space-y-3">
       {segs.map((s, i) => {
         if (s.kind === "think")
           return <ThinkBlock key={i} text={s.text} closed={s.closed} streaming={streaming} />;
+        if (s.kind === "plan")
+          return (
+            <PlanBlock
+              key={i}
+              items={s.items}
+              completed={completedSteps}
+              closed={s.closed}
+              streaming={streaming}
+            />
+          );
         if (s.kind === "step")
           return (
             <StepBlock
@@ -75,6 +87,88 @@ export default function MessageRenderer({ content, streaming }: Props) {
           );
         return <TextBlock key={i} text={s.text} />;
       })}
+    </div>
+  );
+}
+
+function PlanBlock({
+  items,
+  completed,
+  closed,
+  streaming,
+}: {
+  items: string[];
+  completed: number;
+  closed: boolean;
+  streaming: boolean;
+}) {
+  const [open, setOpen] = useState(true);
+  if (!items.length) return null;
+  const total = items.length;
+  const done = Math.min(completed, total);
+  const inProgress = streaming && closed && done < total ? done : -1;
+  return (
+    <div className="overflow-hidden rounded-xl border border-border bg-card">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-2 border-b border-border/60 px-3 py-2 text-left"
+      >
+        <div className="flex h-5 w-5 items-center justify-center rounded-md bg-primary/10 text-primary">
+          <ListChecks className="h-3 w-3" />
+        </div>
+        <p className="text-xs font-semibold text-foreground">任务计划</p>
+        <span className="ml-auto inline-flex items-center gap-1 font-mono text-[10px] text-muted-foreground">
+          {done}/{total}
+          <ChevronDown className={`h-3 w-3 transition-transform ${open ? "rotate-180" : ""}`} />
+        </span>
+      </button>
+      <AnimatePresence initial={false}>
+        {open && (
+          <motion.ol
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            className="overflow-hidden px-3 py-2 text-xs"
+          >
+            {items.map((it, idx) => {
+              const isDone = idx < done;
+              const isActive = idx === inProgress;
+              return (
+                <li key={idx} className="flex items-start gap-2 py-1">
+                  <span
+                    className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border ${
+                      isDone
+                        ? "border-primary bg-primary text-primary-foreground"
+                        : isActive
+                        ? "border-primary/60 bg-primary/10 text-primary"
+                        : "border-border bg-background text-muted-foreground"
+                    }`}
+                  >
+                    {isDone ? (
+                      <Check className="h-2.5 w-2.5" />
+                    ) : isActive ? (
+                      <Loader2 className="h-2.5 w-2.5 animate-spin" />
+                    ) : (
+                      <span className="text-[9px] font-medium">{idx + 1}</span>
+                    )}
+                  </span>
+                  <span
+                    className={
+                      isDone
+                        ? "text-muted-foreground line-through decoration-muted-foreground/40"
+                        : isActive
+                        ? "font-medium text-foreground"
+                        : "text-foreground"
+                    }
+                  >
+                    {it}
+                  </span>
+                </li>
+              );
+            })}
+          </motion.ol>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
