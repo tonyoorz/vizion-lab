@@ -103,7 +103,7 @@ export function parseAgentStream(raw: string): AgentSegment[] {
     }
   }
 
-  }
+
 
   return out;
 }
