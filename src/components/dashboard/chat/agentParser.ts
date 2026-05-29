@@ -60,11 +60,14 @@ export function parseAgentStream(raw: string): AgentSegment[] {
     if (before) pushText(out, before);
     const tag = m[0];
     const openName = m[1]?.toLowerCase();
-    const closeName = m[3]?.toLowerCase();
-    rest = rest.slice(m.index! + tag.length);
+      if (openName === "think") {
+        out.push({ kind: "think", text: inner, closed });
+      } else if (openName === "plan") {
+        out.push({ kind: "plan", items: parsePlanItems(inner), closed });
+      } else if (openName === "followup") {
+        out.push({ kind: "followup", items: parsePlanItems(inner), closed });
+      } else if (openName === "chart") {
 
-    if (openName) {
-      const closeRe = new RegExp(`</${openName}>`, "i");
       const cm = rest.match(closeRe);
       const inner = cm ? rest.slice(0, cm.index!) : rest;
       const closed = !!cm;
