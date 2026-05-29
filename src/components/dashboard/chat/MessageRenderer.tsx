@@ -35,6 +35,7 @@ import { AgentSegment, parseAgentStream } from "./agentParser";
 interface Props {
   content: string;
   streaming: boolean;
+  onPickFollowup?: (q: string) => void;
 }
 
 // Replaces <cite source="x">label</cite> in markdown with a custom token,
@@ -47,7 +48,7 @@ function preprocessCitations(md: string) {
   );
 }
 
-export default function MessageRenderer({ content, streaming }: Props) {
+export default function MessageRenderer({ content, streaming, onPickFollowup }: Props) {
   const segs = parseAgentStream(content);
   const completedSteps = segs.filter((s) => s.kind === "step" && s.closed).length;
   return (
@@ -85,11 +86,58 @@ export default function MessageRenderer({ content, streaming }: Props) {
               closed={s.closed}
             />
           );
+        if (s.kind === "followup")
+          return (
+            <FollowupBlock
+              key={i}
+              items={s.items}
+              closed={s.closed}
+              streaming={streaming}
+              onPick={onPickFollowup}
+            />
+          );
         return <TextBlock key={i} text={s.text} />;
       })}
     </div>
   );
 }
+
+function FollowupBlock({
+  items,
+  closed,
+  streaming,
+  onPick,
+}: {
+  items: string[];
+  closed: boolean;
+  streaming: boolean;
+  onPick?: (q: string) => void;
+}) {
+  // Only show once fully closed to avoid flickering during stream.
+  if (!closed || !items.length) return null;
+  return (
+    <div className="mt-1">
+      <p className="mb-1.5 inline-flex items-center gap-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+        <span className="h-1 w-1 rounded-full bg-primary" />
+        追问建议
+      </p>
+      <div className="flex flex-wrap gap-1.5">
+        {items.map((q, i) => (
+          <button
+            key={i}
+            onClick={() => onPick?.(q)}
+            disabled={streaming || !onPick}
+            className="group/fu inline-flex items-center gap-1 rounded-full border border-border bg-card px-2.5 py-1 text-[11px] text-foreground transition-all hover:border-primary/50 hover:bg-primary/5 hover:text-primary disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <span>{q}</span>
+            <span className="text-muted-foreground group-hover/fu:text-primary">→</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 
 function PlanBlock({
   items,
