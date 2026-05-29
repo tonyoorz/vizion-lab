@@ -7,6 +7,9 @@
 //   <cite source="x">label</cite> inline citations (kept inside text segments)
 // Anything else is treated as final markdown body text.
 
+//   <followup>question</followup>  suggested next questions (one per line)
+// Anything else is treated as final markdown body text.
+
 export type AgentSegment =
   | { kind: "think"; text: string; closed: boolean }
   | { kind: "plan"; items: string[]; closed: boolean }
@@ -24,9 +27,11 @@ export type AgentSegment =
       text: string;
       closed: boolean;
     }
+  | { kind: "followup"; items: string[]; closed: boolean }
   | { kind: "text"; text: string };
 
-const TAG_RE = /<(think|plan|step|chart)(\s[^>]*)?>|<\/(think|plan|step|chart)>/i;
+const TAG_RE = /<(think|plan|step|chart|followup)(\s[^>]*)?>|<\/(think|plan|step|chart|followup)>/i;
+
 
 function getAttr(attrs: string | undefined, name: string): string | undefined {
   if (!attrs) return undefined;
