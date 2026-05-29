@@ -395,16 +395,80 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
       setStreaming(false);
       abortRef.current = null;
       const ms = Math.round(performance.now() - startedAt);
-      updateActive((c) => ({
-        ...c,
-        messages: c.messages.map((m) =>
-          m.id === assistantMsgId
-            ? { ...m, meta: { ms, chars: (m.content || "").length, model: usedModel } }
-            : m,
-        ),
-      }));
+      let finalContent = "";
+      updateActive((c) => {
+        const msgs = c.messages.map((m) => {
+          if (m.id === assistantMsgId) {
+            finalContent = m.content || "";
+            return { ...m, meta: { ms, chars: finalContent.length, model: usedModel } };
+          }
+          return m;
+        });
+        return { ...c, messages: msgs };
+      });
+      // Auto-generate a concise title after first round
+      const conv = conversations.find((c) => c.id === activeId);
+      const isFirstRound =
+        conv &&
+        conv.messages.filter((m) => m.role === "assistant").length <= 1 &&
+        (conv.title === "新对话" || conv.title.length <= 28);
+      if (isFirstRound && finalContent.trim()) {
+        const firstUser = history.find((m) => m.role === "user")?.content || "";
+        generateTitle(firstUser, finalContent).catch(() => {});
+      }
     }
   };
+
+  const generateTitle = async (userQ: string, asstA: string) => {
+    try {
+      const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/chat`;
+      const resp = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
+        },
+        body: JSON.stringify({
+          model: "google/gemini-3-flash-preview",
+          messages: [
+            {
+              role: "user",
+              content: `请用 6-12 个汉字概括下面对话的主题，只输出标题，不要标点、引号、前缀。\n\n用户：${userQ.slice(0, 200)}\n助手：${asstA.replace(/<[^>]+>/g, " ").slice(0, 400)}`,
+            },
+          ],
+        }),
+      });
+      if (!resp.ok || !resp.body) return;
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      let title = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = buf.indexOf("\n")) !== -1) {
+          const line = buf.slice(0, nl).replace(/\r$/, "");
+          buf = buf.slice(nl + 1);
+          if (!line.startsWith("data: ")) continue;
+          const json = line.slice(6).trim();
+          if (json === "[DONE]") break;
+          try {
+            const p = JSON.parse(json);
+            title += p.choices?.[0]?.delta?.content ?? "";
+          } catch {}
+        }
+      }
+      title = title.replace(/["'""''`《》]/g, "").replace(/\s+/g, "").trim().slice(0, 16);
+      if (title) {
+        setConversations((prev) =>
+          prev.map((c) => (c.id === activeId ? { ...c, title } : c)),
+        );
+      }
+    } catch {}
+  };
+
 
   const send = async (text?: string) => {
     const content = (text ?? input).trim();
