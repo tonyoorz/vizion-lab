@@ -1,8 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowUp,
   Check,
+  ChevronDown,
+  ChevronUp,
   Copy,
+  FileSpreadsheet,
+  FileText,
   Loader2,
   MessageSquarePlus,
   Mic,
@@ -17,6 +21,7 @@ import {
   Square,
   StopCircle,
   Trash2,
+  Upload,
   User,
   X,
 } from "lucide-react";
@@ -24,14 +29,19 @@ import { motion, AnimatePresence } from "framer-motion";
 import MessageRenderer from "../chat/MessageRenderer";
 import SlashMenu, { SLASH_COMMANDS, SlashCommand } from "../chat/SlashMenu";
 import { segmentsToPlainText, parseAgentStream } from "../chat/agentParser";
+import { parseFile } from "@/utils/fileParser";
 
 type Role = "user" | "assistant";
 interface Attachment {
   id: string;
   name: string;
-  kind: "image" | "file";
+  kind: "image" | "file" | "parsed";
   dataUrl?: string; // for images, base64
   size: number;
+  parsedText?: string;   // extracted text content from parseFile()
+  parsedSummary?: string; // summary like "CSV 文件，120 行 × 8 列"
+  parsedRows?: number;
+  parsedColumns?: string[];
 }
 interface Msg {
   id: string;
@@ -63,7 +73,24 @@ const IMAGE_QUICK_PROMPTS = [
   "解读 KPI 变化趋势",
   "总结关键洞察（3 条以内）",
   "提取图中数据为表格",
+];;
+
+const FOLLOW_UP_SUGGESTIONS = [
+  { id: "detail", label: "详细解释", prompt: "请详细解释你上面的分析" },
+  { id: "data", label: "给出数据", prompt: "请提供支持你分析的具体数据" },
+  { id: "action", label: "建议行动", prompt: "基于以上分析，建议下一步具体行动" },
+  { id: "chart", label: "生成图表", prompt: "请生成一个可视化图表来展示上述数据" },
+  { id: "compare", label: "对比分析", prompt: "请做一个横向对比分析" },
+  { id: "export", label: "导出摘要", prompt: "请将以上分析整理为结构化摘要" },
 ];
+
+const getFollowUps = (msgId: string) => {
+  const seed = msgId.split("").reduce((a, c) => a + c.charCodeAt(0), 0);
+  const shuffled = [...FOLLOW_UP_SUGGESTIONS].sort((a, b) =>
+    ((seed * a.id.charCodeAt(0)) % 7) - ((seed * b.id.charCodeAt(0)) % 7)
+  );
+  return shuffled.slice(0, 3);
+}
 
 const newConversation = (): Conversation => ({
   id: crypto.randomUUID(),
@@ -104,6 +131,8 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
   const [editingMsgVal, setEditingMsgVal] = useState("");
   const [recording, setRecording] = useState(false);
   const [transcribing, setTranscribing] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
+  const [expandedPreviews, setExpandedPreviews] = useState<Set<string>>(new Set());
 
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -167,30 +196,58 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
   };
 
   // ----- file handling -----
-  const handleFiles = async (files: FileList | null) => {
-    if (!files) return;
-    const adds: Attachment[] = [];
-    for (const f of Array.from(files).slice(0, 5)) {
-      if (f.size > 8 * 1024 * 1024) continue;
-      const isImg = f.type.startsWith("image/");
-      let dataUrl: string | undefined;
-      if (isImg) {
-        dataUrl = await new Promise<string>((resolve) => {
-          const r = new FileReader();
-          r.onload = () => resolve(r.result as string);
-          r.readAsDataURL(f);
-        });
-      }
-      adds.push({
-        id: newId(),
-        name: f.name,
-        kind: isImg ? "image" : "file",
-        dataUrl,
-        size: f.size,
-      });
-    }
-    setAttachments((prev) => [...prev, ...adds]);
-  };
+ const handleFiles = async (files: FileList | null) => {
+   if (!files) return;
+   const adds: Attachment[] = [];
+   for (const f of Array.from(files).slice(0, 5)) {
+     if (f.size > 8 * 1024 * 1024) continue;
+     const isImg = f.type.startsWith("image/");
+     let dataUrl: string | undefined;
+     if (isImg) {
+       dataUrl = await new Promise<string>((resolve) => {
+         const r = new FileReader();
+         r.onload = () => resolve(r.result as string);
+         r.readAsDataURL(f);
+       });
+       adds.push({ id: newId(), name: f.name, kind: "image", dataUrl, size: f.size });
+     } else {
+       try {
+         const parsed = await parseFile(f);
+         if (parsed.text) {
+           adds.push({
+             id: newId(), name: f.name, kind: "parsed", size: f.size,
+             parsedText: parsed.text, parsedSummary: parsed.summary,
+             parsedRows: parsed.rows, parsedColumns: parsed.columns,
+           });
+         } else {
+           adds.push({ id: newId(), name: f.name, kind: "file", size: f.size });
+         }
+       } catch {
+         adds.push({ id: newId(), name: f.name, kind: "file", size: f.size });
+       }
+     }
+   }
+   setAttachments((prev) => [...prev, ...adds]);
+ };
+  // ----- drag & drop -----
+  const dragCounter = useRef(0);
+  const onDragEnter = useCallback((e: React.DragEvent) => {
+    e.preventDefault(); e.stopPropagation();
+    dragCounter.current++;
+    if (e.dataTransfer.types.includes("Files")) setIsDragging(true);
+  }, []);
+  const onDragOver = useCallback((e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); }, []);
+  const onDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault(); e.stopPropagation();
+    dragCounter.current--;
+    if (dragCounter.current === 0) setIsDragging(false);
+  }, []);
+  const onDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault(); e.stopPropagation();
+    dragCounter.current = 0;
+    setIsDragging(false);
+    if (e.dataTransfer.files?.length) handleFiles(e.dataTransfer.files);
+  }, [handleFiles]);
 
   const onPaste = (e: React.ClipboardEvent) => {
     if (e.clipboardData.files?.length) {
@@ -407,8 +464,15 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
   };
 
   const send = async (text?: string) => {
-    const content = (text ?? input).trim();
-    if ((!content && attachments.length === 0) || streaming) return;
+    const rawContent = (text ?? input).trim();
+    if ((!rawContent && attachments.length === 0) || streaming) return;
+
+    // Inject parsed file content into the message
+    let content = rawContent;
+    const parsedAttachments = attachments.filter((a) => a.kind === "parsed" && a.parsedText);
+    for (const pa of parsedAttachments) {
+      content += `\n[附件: ${pa.name}]\n${pa.parsedText}\n[/附件]\n`;
+    }
 
     const userMsg: Msg = {
       id: newId(),
@@ -480,7 +544,35 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
   const lastSeg = (m: Msg) => parseAgentStream(m.content);
 
   return (
-    <div className="-m-6 flex h-[calc(100vh-64px)] overflow-hidden">
+    <div
+      className="-m-6 flex h-[calc(100vh-64px)] overflow-hidden relative"
+      onDragEnter={onDragEnter}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+    >
+      {/* Drag & Drop overlay */}
+      <AnimatePresence>
+        {isDragging && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.15 }}
+            className="absolute inset-0 z-50 flex items-center justify-center bg-primary/5 backdrop-blur-sm"
+          >
+            <div className="flex flex-col items-center gap-3 rounded-2xl border-2 border-dashed border-primary/40 p-12">
+              <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/10 text-primary">
+                <Upload className="h-7 w-7" />
+              </div>
+              <div className="text-center">
+                <p className="text-base font-semibold text-foreground">拖拽文件到此处</p>
+                <p className="mt-1 text-xs text-muted-foreground">支持 CSV、Excel、JSON、图片、文本文件</p>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
       {/* Conversation list */}
       <aside className="hidden w-[260px] flex-col border-r border-border bg-muted/30 lg:flex">
         <div className="p-3">
@@ -631,41 +723,79 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
         {/* Messages */}
         <div ref={scrollRef} className="flex-1 overflow-y-auto">
           {isEmpty ? (
-            <div className="mx-auto flex h-full max-w-2xl flex-col items-center justify-center px-6">
+            <div className="mx-auto flex h-full max-w-2xl flex-col items-center justify-center px-6 pb-8">
               <motion.div
-                initial={{ opacity: 0, y: 8 }}
+                initial={{ opacity: 0, y: 12 }}
                 animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.4 }}
                 className="mb-8 text-center"
               >
-                <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-primary to-primary/60 shadow-lg shadow-primary/20">
-                  <Sparkles className="h-5 w-5 text-primary-foreground" />
+                <div className="mx-auto mb-5 flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-primary to-primary/70 shadow-xl shadow-primary/25 ring-4 ring-primary/10">
+                  <Sparkles className="h-7 w-7 text-primary-foreground" />
                 </div>
-                <h2 className="text-2xl font-bold tracking-tight text-foreground">
+                <h2 className="bg-gradient-to-r from-primary via-primary/90 to-primary/70 bg-clip-text text-3xl font-bold tracking-tight text-transparent">
                   你好，今天要分析什么？
                 </h2>
-                <p className="mt-1.5 text-sm text-muted-foreground">
-                  输入 <kbd className="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px]">/</kbd> 调用预设命令，或直接提问。
+                <p className="mt-2 text-sm text-muted-foreground">
+                  上传数据文件、截图，或使用预设命令开始智能分析
                 </p>
               </motion.div>
-              <div className="grid w-full gap-2 sm:grid-cols-2">
-                {SLASH_COMMANDS.slice(0, 4).map((s, i) => (
-                  <motion.button
-                    key={s.id}
-                    initial={{ opacity: 0, y: 8 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: 0.05 * i }}
-                    onClick={() => send(s.prompt)}
-                    className="group rounded-xl border border-border bg-card p-3.5 text-left transition-all hover:border-primary/40 hover:shadow-sm"
-                  >
-                    <div className="mb-1.5 flex h-7 w-7 items-center justify-center rounded-md bg-muted text-muted-foreground transition-colors group-hover:bg-primary/10 group-hover:text-primary">
-                      <s.icon className="h-3.5 w-3.5" />
-                    </div>
-                    <p className="text-sm font-medium text-foreground">{s.label.replace("/", "")}</p>
-                    <p className="mt-0.5 line-clamp-2 text-xs leading-relaxed text-muted-foreground">
-                      {s.prompt}
-                    </p>
-                  </motion.button>
-                ))}
+
+              {/* Quick analysis */}
+              <div className="w-full mb-2">
+                <p className="mb-2 px-1 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">快捷分析</p>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {SLASH_COMMANDS.slice(0, 4).map((s, i) => (
+                    <motion.button
+                      key={s.id}
+                      initial={{ opacity: 0, y: 8 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ delay: 0.08 * i }}
+                      onClick={() => send(s.prompt)}
+                      className="group rounded-xl border border-border bg-card p-3.5 text-left transition-all hover:border-primary/40 hover:shadow-sm"
+                    >
+                      <div className="mb-1.5 flex h-7 w-7 items-center justify-center rounded-md bg-muted text-muted-foreground transition-colors group-hover:bg-primary/10 group-hover:text-primary">
+                        <s.icon className="h-3.5 w-3.5" />
+                      </div>
+                      <p className="text-sm font-medium text-foreground">{s.label.replace("/", "")}</p>
+                      <p className="mt-0.5 line-clamp-2 text-xs leading-relaxed text-muted-foreground">
+                        {s.prompt}
+                      </p>
+                    </motion.button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="my-4 h-px w-full bg-gradient-to-r from-transparent via-border to-transparent" />
+
+              {/* Multimodal inputs */}
+              <div className="w-full">
+                <p className="mb-2 px-1 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">多模态输入</p>
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                  {[
+                    { icon: Upload, label: "上传截图", desc: "分析图表或界面截图", color: "text-blue-500 bg-blue-500/10", action: () => fileRef.current?.click() },
+                    { icon: FileSpreadsheet, label: "上传 CSV", desc: "解析数据趋势", color: "text-emerald-500 bg-emerald-500/10", action: () => { fileRef.current?.click(); } },
+                    { icon: Mic, label: "语音输入", desc: "口述你的问题", color: "text-orange-500 bg-orange-500/10", action: () => {} },
+                    { icon: FileText, label: "拖拽文件", desc: "支持多种格式", color: "text-violet-500 bg-violet-500/10", action: () => {} },
+                  ].map((item, i) => (
+                    <motion.button
+                      key={item.label}
+                      initial={{ opacity: 0, y: 8 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ delay: 0.35 + 0.06 * i }}
+                      onClick={item.action}
+                      className="group flex flex-col items-center gap-2 rounded-xl border border-border bg-card p-3 text-center transition-all hover:border-primary/30 hover:shadow-sm"
+                    >
+                      <div className={`flex h-8 w-8 items-center justify-center rounded-lg ${item.color} transition-transform group-hover:scale-110`}>
+                        <item.icon className="h-4 w-4" />
+                      </div>
+                      <div>
+                        <p className="text-xs font-medium text-foreground">{item.label}</p>
+                        <p className="text-[10px] text-muted-foreground">{item.desc}</p>
+                      </div>
+                    </motion.button>
+                  ))}
+                </div>
               </div>
             </div>
           ) : (
@@ -746,9 +876,12 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
                         ) : m.role === "assistant" && m.content === "" && streaming && isLastAsst ? (
                           <TypingDots />
                         ) : m.role === "assistant" ? (
-                          <>
-                            <MessageRenderer content={m.content} streaming={streaming && isLastAsst} />
-                            {m.meta && !(streaming && isLastAsst) && (
+                         <>
+                           <MessageRenderer content={m.content} streaming={streaming && isLastAsst} />
+                           {streaming && isLastAsst && (
+                             <span className="inline-block h-4 w-0.5 animate-pulse bg-primary ml-0.5 align-text-bottom" />
+                           )}
+                           {m.meta && !(streaming && isLastAsst) && (
                               <MessageStats meta={m.meta} />
                             )}
                           </>
@@ -785,6 +918,20 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
                             )}
                           </div>
                         )}
+                        {/* follow-up suggestion chips */}
+                        {m.role === "assistant" && isLastAsst && !streaming && m.content && !m.content.startsWith("\u26A0") && (
+                          <div className="mt-3 flex flex-wrap gap-1.5">
+                            {getFollowUps(m.id).map((s) => (
+                              <button
+                                key={s.id}
+                                onClick={() => send(s.prompt)}
+                                className="inline-flex items-center gap-1 rounded-full border border-border bg-card px-3 py-1 text-[11px] text-muted-foreground transition-all hover:border-primary/40 hover:bg-primary/5 hover:text-primary"
+                              >
+                                {s.label}
+                              </button>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     </motion.div>
                   );
@@ -809,24 +956,58 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
 
             {/* attachment preview */}
             {attachments.length > 0 && (
-              <div className="mb-2 flex flex-wrap gap-2">
+              <div className="mb-2 flex flex-col gap-2">
                 {attachments.map((a) => (
                   <div
                     key={a.id}
-                    className="group/att relative flex items-center gap-1.5 rounded-md border border-border bg-card px-2 py-1 text-xs text-foreground"
+                    className="group/att relative rounded-lg border border-border bg-card px-3 py-2 text-xs transition-colors hover:border-primary/30"
                   >
-                    {a.kind === "image" && a.dataUrl ? (
-                      <img src={a.dataUrl} className="h-6 w-6 rounded object-cover" alt="" />
-                    ) : (
-                      <Paperclip className="h-3 w-3 text-muted-foreground" />
+                    <div className="flex items-center gap-2">
+                      {a.kind === "image" && a.dataUrl ? (
+                        <img src={a.dataUrl} className="h-8 w-8 rounded object-cover" alt="" />
+                      ) : a.kind === "parsed" ? (
+                        <div className="flex h-8 w-8 items-center justify-center rounded-md bg-primary/10 text-primary">
+                          {a.name.match(/\.(csv|xls|xlsx|tsv)$/i) ? (
+                            <FileSpreadsheet className="h-4 w-4" />
+                          ) : (
+                            <FileText className="h-4 w-4" />
+                          )}
+                        </div>
+                      ) : (
+                        <div className="flex h-8 w-8 items-center justify-center rounded-md bg-muted text-muted-foreground">
+                          <Paperclip className="h-4 w-4" />
+                        </div>
+                      )}
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate font-medium text-foreground">{a.name}</p>
+                        {a.kind === "parsed" && a.parsedSummary && (
+                          <p className="text-[11px] text-muted-foreground">{a.parsedSummary}</p>
+                        )}
+                      </div>
+                      {a.kind === "parsed" && a.parsedText && (
+                        <button
+                          onClick={() => setExpandedPreviews(prev => {
+                            const next = new Set(prev);
+                            next.has(a.id) ? next.delete(a.id) : next.add(a.id);
+                            return next;
+                          })}
+                          className="rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+                        >
+                          {expandedPreviews.has(a.id) ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                        </button>
+                      )}
+                      <button
+                        onClick={() => setAttachments((p) => p.filter((x) => x.id !== a.id))}
+                        className="rounded-md p-1 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                    {a.kind === "parsed" && a.parsedText && expandedPreviews.has(a.id) && (
+                      <div className="mt-2 max-h-[160px] overflow-auto rounded-md bg-muted/50 p-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
+                        {a.parsedText.slice(0, 500)}{a.parsedText.length > 500 ? "..." : ""}
+                      </div>
                     )}
-                    <span className="max-w-[140px] truncate">{a.name}</span>
-                    <button
-                      onClick={() => setAttachments((p) => p.filter((x) => x.id !== a.id))}
-                      className="ml-0.5 rounded-full p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
-                    >
-                      <X className="h-3 w-3" />
-                    </button>
                   </div>
                 ))}
               </div>
@@ -862,7 +1043,7 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
                 ref={fileRef}
                 type="file"
                 multiple
-                accept="image/*,.pdf,.csv,.txt,.json,.md"
+                accept="image/*,.pdf,.csv,.tsv,.xlsx,.xls,.txt,.json,.md,.log"
                 hidden
                 onChange={(e) => {
                   handleFiles(e.target.files);

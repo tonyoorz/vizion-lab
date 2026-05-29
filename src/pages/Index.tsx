@@ -1,4 +1,6 @@
 import { useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
+import DashboardHeader from "@/components/dashboard/DashboardHeader";
 import DashboardSidebar from "@/components/dashboard/DashboardSidebar";
 import FilterPanel from "@/components/dashboard/FilterPanel";
 import KPICards from "@/components/dashboard/KPICards";
@@ -73,19 +75,20 @@ const Index = () => {
       <DashboardSidebar active={activeNav} onNavigate={setActiveNav} />
 
       <main className="flex-1 overflow-y-auto">
-        <header className="sticky top-0 z-30 flex items-center justify-between border-b border-border bg-background/80 backdrop-blur-md px-6 py-3.5">
-          <div>
-            <h1 className="text-lg font-bold text-foreground">{info.title}</h1>
-            <p className="text-xs text-muted-foreground">{info.subtitle}</p>
-          </div>
-          <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            <span className="flex h-2 w-2 rounded-full bg-success" />
-            数据已同步 · 2026-03-23
-          </div>
-        </header>
+        <DashboardHeader title={info.title} subtitle={info.subtitle} />
 
         <div className="space-y-5 p-6">
-          {renderContent()}
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={activeNav}
+              initial={{ opacity: 0, y: 12 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              transition={{ duration: 0.25, ease: "easeInOut" }}
+            >
+              {renderContent()}
+            </motion.div>
+          </AnimatePresence>
         </div>
       </main>
 
