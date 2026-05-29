@@ -747,11 +747,16 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
                           <TypingDots />
                         ) : m.role === "assistant" ? (
                           <>
-                            <MessageRenderer content={m.content} streaming={streaming && isLastAsst} />
+                            <MessageRenderer
+                              content={m.content}
+                              streaming={streaming && isLastAsst}
+                              onPickFollowup={isLastAsst && !streaming ? (q) => send(q) : undefined}
+                            />
                             {m.meta && !(streaming && isLastAsst) && (
                               <MessageStats meta={m.meta} />
                             )}
                           </>
+
                         ) : (
                           <p className="whitespace-pre-wrap text-sm leading-relaxed text-foreground">
                             {m.content}
