@@ -71,6 +71,12 @@ ${DATASET_SCHEMA}
 **Signal** <cite source="topissue">5 月缺陷峰值</cite>
 缺陷激增 41%，主因 OTA 回归。
 **Recommendation** 优先回滚 OTA 5.2.1 灰度策略，并加固冒烟用例。
+<followup>
+拆解 OTA 缺陷 Top 5 模块
+对比上半年 vs 下半年回归率
+列出 5 月新增 P0 缺陷明细
+</followup>
+
 `;
 
 Deno.serve(async (req) => {
