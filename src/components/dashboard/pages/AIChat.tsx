@@ -1030,7 +1030,7 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
                 ref={fileRef}
                 type="file"
                 multiple
-                accept="image/*,.pdf,.csv,.txt,.json,.md"
+                accept="image/*,.pdf,.pptx,.docx,.xlsx,.csv,.txt,.json,.md"
                 hidden
                 onChange={(e) => {
                   handleFiles(e.target.files);
