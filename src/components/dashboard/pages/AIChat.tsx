@@ -956,14 +956,38 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
                 {attachments.map((a) => (
                   <div
                     key={a.id}
-                    className="group/att relative flex items-center gap-1.5 rounded-md border border-border bg-card px-2 py-1 text-xs text-foreground"
+                    title={
+                      a.error
+                        ? `解析失败: ${a.error}`
+                        : a.extractedText
+                          ? `已解析 ${a.extractedText.length.toLocaleString()} 字符${a.truncated ? "（已截断）" : ""}`
+                          : a.extracting
+                            ? "解析中…"
+                            : a.name
+                    }
+                    className={`group/att relative flex items-center gap-1.5 rounded-md border bg-card px-2 py-1 text-xs text-foreground ${
+                      a.error
+                        ? "border-destructive/40"
+                        : a.extracting
+                          ? "border-primary/40"
+                          : "border-border"
+                    }`}
                   >
                     {a.kind === "image" && a.dataUrl ? (
                       <img src={a.dataUrl} className="h-6 w-6 rounded object-cover" alt="" />
+                    ) : a.extracting ? (
+                      <Loader2 className="h-3 w-3 animate-spin text-primary" />
+                    ) : a.error ? (
+                      <X className="h-3 w-3 text-destructive" />
+                    ) : a.extractedText ? (
+                      <Check className="h-3 w-3 text-primary" />
                     ) : (
                       <Paperclip className="h-3 w-3 text-muted-foreground" />
                     )}
                     <span className="max-w-[140px] truncate">{a.name}</span>
+                    {a.kind === "file" && a.pages != null && !a.error && (
+                      <span className="text-[10px] text-muted-foreground">· {a.pages}p</span>
+                    )}
                     <button
                       onClick={() => setAttachments((p) => p.filter((x) => x.id !== a.id))}
                       className="ml-0.5 rounded-full p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
