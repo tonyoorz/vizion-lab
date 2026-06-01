@@ -350,16 +350,31 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
   // ----- core send -----
   const buildGatewayMessages = (history: Msg[]) =>
     history.map((m) => {
-      if (m.role === "user" && m.attachments?.some((a) => a.kind === "image" && a.dataUrl)) {
-        const parts: any[] = [{ type: "text", text: m.content || "(图片)" }];
-        for (const a of m.attachments) {
-          if (a.kind === "image" && a.dataUrl) {
-            parts.push({ type: "image_url", image_url: { url: a.dataUrl } });
-          }
-        }
-        return { role: "user", content: parts };
+      if (m.role !== "user" || !m.attachments?.length) {
+        return { role: m.role, content: m.content };
       }
-      return { role: m.role, content: m.content };
+      // Build text prefix from extracted file contents
+      const fileBlocks: string[] = [];
+      for (const a of m.attachments) {
+        if (a.kind === "file" && a.extractedText) {
+          const header = `--- 附件: ${a.name}${a.pages ? ` (${a.pages} 页)` : ""}${a.truncated ? " · 已截断" : ""} ---`;
+          fileBlocks.push(`${header}\n${a.extractedText}\n--- 附件结束 ---`);
+        } else if (a.kind === "file" && a.error) {
+          fileBlocks.push(`--- 附件: ${a.name} · 解析失败: ${a.error} ---`);
+        }
+      }
+      const textBody = [fileBlocks.join("\n\n"), m.content].filter(Boolean).join("\n\n");
+      const hasImage = m.attachments.some((a) => a.kind === "image" && a.dataUrl);
+      if (!hasImage) {
+        return { role: "user", content: textBody || "(附件)" };
+      }
+      const parts: any[] = [{ type: "text", text: textBody || "(图片)" }];
+      for (const a of m.attachments) {
+        if (a.kind === "image" && a.dataUrl) {
+          parts.push({ type: "image_url", image_url: { url: a.dataUrl } });
+        }
+      }
+      return { role: "user", content: parts };
     });
 
   const runStream = async (history: Msg[], assistantMsgId: string) => {
