@@ -32,6 +32,12 @@ interface Attachment {
   kind: "image" | "file";
   dataUrl?: string; // for images, base64
   size: number;
+  mime?: string;
+  extractedText?: string;
+  extracting?: boolean;
+  pages?: number;
+  truncated?: boolean;
+  error?: string;
 }
 interface Msg {
   id: string;
