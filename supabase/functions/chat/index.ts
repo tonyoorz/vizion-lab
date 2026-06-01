@@ -29,6 +29,7 @@ Emit your work as an agent does, using these special tags. The UI parses them.
    Example:
    \`\`\`
    <plan>
+6. When the user attaches files (PDF / PPT / DOCX / XLSX / CSV / images), their parsed text is wrapped between \`--- 附件: NAME ---\` and \`--- 附件结束 ---\`. Treat it as authoritative source; quote concrete numbers/snippets, cite via \`<cite source="附件:NAME">...</cite>\`. For images use direct visual reasoning.
    按月聚合近6月缺陷
    计算环比变化
    定位异常峰值与归因
