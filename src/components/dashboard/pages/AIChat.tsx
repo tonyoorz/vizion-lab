@@ -547,6 +547,7 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
   const send = async (text?: string) => {
     const content = (text ?? input).trim();
     if ((!content && attachments.length === 0) || streaming) return;
+    if (attachments.some((a) => a.extracting)) return;
 
     const userMsg: Msg = {
       id: newId(),
