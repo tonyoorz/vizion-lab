@@ -1091,7 +1091,10 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
               ) : (
                 <button
                   onClick={() => send()}
-                  disabled={!input.trim() && attachments.length === 0}
+                  disabled={
+                    (!input.trim() && attachments.length === 0) ||
+                    attachments.some((a) => a.extracting)
+                  }
                   className="mb-1 flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground transition-all hover:bg-primary/90 disabled:opacity-40"
                 >
                   <ArrowUp className="h-4 w-4" />
