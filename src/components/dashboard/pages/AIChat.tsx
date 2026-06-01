@@ -32,6 +32,12 @@ interface Attachment {
   kind: "image" | "file";
   dataUrl?: string; // for images, base64
   size: number;
+  mime?: string;
+  extractedText?: string;
+  extracting?: boolean;
+  pages?: number;
+  truncated?: boolean;
+  error?: string;
 }
 interface Msg {
   id: string;
@@ -167,11 +173,57 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
   };
 
   // ----- file handling -----
+  const extractFile = async (att: Attachment, file: File) => {
+    try {
+      const base64 = await new Promise<string>((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => {
+          const s = r.result as string;
+          resolve(s.split(",")[1] ?? "");
+        };
+        r.onerror = reject;
+        r.readAsDataURL(file);
+      });
+      const resp = await fetch(
+        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/extract-file`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
+          },
+          body: JSON.stringify({ name: file.name, mime: file.type, dataBase64: base64 }),
+        },
+      );
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data?.error || "解析失败");
+      setAttachments((prev) =>
+        prev.map((a) =>
+          a.id === att.id
+            ? {
+                ...a,
+                extracting: false,
+                extractedText: data.text || "",
+                pages: data.pages,
+                truncated: !!data.truncated,
+              }
+            : a,
+        ),
+      );
+    } catch (e: any) {
+      setAttachments((prev) =>
+        prev.map((a) =>
+          a.id === att.id ? { ...a, extracting: false, error: e?.message || "解析失败" } : a,
+        ),
+      );
+    }
+  };
+
   const handleFiles = async (files: FileList | null) => {
     if (!files) return;
-    const adds: Attachment[] = [];
+    const adds: { att: Attachment; file: File }[] = [];
     for (const f of Array.from(files).slice(0, 5)) {
-      if (f.size > 8 * 1024 * 1024) continue;
+      if (f.size > 15 * 1024 * 1024) continue;
       const isImg = f.type.startsWith("image/");
       let dataUrl: string | undefined;
       if (isImg) {
@@ -181,15 +233,22 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
           r.readAsDataURL(f);
         });
       }
-      adds.push({
+      const att: Attachment = {
         id: newId(),
         name: f.name,
         kind: isImg ? "image" : "file",
         dataUrl,
         size: f.size,
-      });
+        mime: f.type,
+        extracting: !isImg,
+      };
+      adds.push({ att, file: f });
     }
-    setAttachments((prev) => [...prev, ...adds]);
+    setAttachments((prev) => [...prev, ...adds.map((x) => x.att)]);
+    // kick off extraction in parallel for non-image files
+    for (const { att, file } of adds) {
+      if (att.kind === "file") extractFile(att, file);
+    }
   };
 
   const onPaste = (e: React.ClipboardEvent) => {
@@ -291,16 +350,31 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
   // ----- core send -----
   const buildGatewayMessages = (history: Msg[]) =>
     history.map((m) => {
-      if (m.role === "user" && m.attachments?.some((a) => a.kind === "image" && a.dataUrl)) {
-        const parts: any[] = [{ type: "text", text: m.content || "(图片)" }];
-        for (const a of m.attachments) {
-          if (a.kind === "image" && a.dataUrl) {
-            parts.push({ type: "image_url", image_url: { url: a.dataUrl } });
-          }
-        }
-        return { role: "user", content: parts };
+      if (m.role !== "user" || !m.attachments?.length) {
+        return { role: m.role, content: m.content };
       }
-      return { role: m.role, content: m.content };
+      // Build text prefix from extracted file contents
+      const fileBlocks: string[] = [];
+      for (const a of m.attachments) {
+        if (a.kind === "file" && a.extractedText) {
+          const header = `--- 附件: ${a.name}${a.pages ? ` (${a.pages} 页)` : ""}${a.truncated ? " · 已截断" : ""} ---`;
+          fileBlocks.push(`${header}\n${a.extractedText}\n--- 附件结束 ---`);
+        } else if (a.kind === "file" && a.error) {
+          fileBlocks.push(`--- 附件: ${a.name} · 解析失败: ${a.error} ---`);
+        }
+      }
+      const textBody = [fileBlocks.join("\n\n"), m.content].filter(Boolean).join("\n\n");
+      const hasImage = m.attachments.some((a) => a.kind === "image" && a.dataUrl);
+      if (!hasImage) {
+        return { role: "user", content: textBody || "(附件)" };
+      }
+      const parts: any[] = [{ type: "text", text: textBody || "(图片)" }];
+      for (const a of m.attachments) {
+        if (a.kind === "image" && a.dataUrl) {
+          parts.push({ type: "image_url", image_url: { url: a.dataUrl } });
+        }
+      }
+      return { role: "user", content: parts };
     });
 
   const runStream = async (history: Msg[], assistantMsgId: string) => {
@@ -473,6 +547,7 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
   const send = async (text?: string) => {
     const content = (text ?? input).trim();
     if ((!content && attachments.length === 0) || streaming) return;
+    if (attachments.some((a) => a.extracting)) return;
 
     const userMsg: Msg = {
       id: newId(),
@@ -882,14 +957,38 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
                 {attachments.map((a) => (
                   <div
                     key={a.id}
-                    className="group/att relative flex items-center gap-1.5 rounded-md border border-border bg-card px-2 py-1 text-xs text-foreground"
+                    title={
+                      a.error
+                        ? `解析失败: ${a.error}`
+                        : a.extractedText
+                          ? `已解析 ${a.extractedText.length.toLocaleString()} 字符${a.truncated ? "（已截断）" : ""}`
+                          : a.extracting
+                            ? "解析中…"
+                            : a.name
+                    }
+                    className={`group/att relative flex items-center gap-1.5 rounded-md border bg-card px-2 py-1 text-xs text-foreground ${
+                      a.error
+                        ? "border-destructive/40"
+                        : a.extracting
+                          ? "border-primary/40"
+                          : "border-border"
+                    }`}
                   >
                     {a.kind === "image" && a.dataUrl ? (
                       <img src={a.dataUrl} className="h-6 w-6 rounded object-cover" alt="" />
+                    ) : a.extracting ? (
+                      <Loader2 className="h-3 w-3 animate-spin text-primary" />
+                    ) : a.error ? (
+                      <X className="h-3 w-3 text-destructive" />
+                    ) : a.extractedText ? (
+                      <Check className="h-3 w-3 text-primary" />
                     ) : (
                       <Paperclip className="h-3 w-3 text-muted-foreground" />
                     )}
                     <span className="max-w-[140px] truncate">{a.name}</span>
+                    {a.kind === "file" && a.pages != null && !a.error && (
+                      <span className="text-[10px] text-muted-foreground">· {a.pages}p</span>
+                    )}
                     <button
                       onClick={() => setAttachments((p) => p.filter((x) => x.id !== a.id))}
                       className="ml-0.5 rounded-full p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
@@ -931,7 +1030,7 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
                 ref={fileRef}
                 type="file"
                 multiple
-                accept="image/*,.pdf,.csv,.txt,.json,.md"
+                accept="image/*,.pdf,.pptx,.docx,.xlsx,.csv,.txt,.json,.md"
                 hidden
                 onChange={(e) => {
                   handleFiles(e.target.files);
@@ -992,7 +1091,10 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
               ) : (
                 <button
                   onClick={() => send()}
-                  disabled={!input.trim() && attachments.length === 0}
+                  disabled={
+                    (!input.trim() && attachments.length === 0) ||
+                    attachments.some((a) => a.extracting)
+                  }
                   className="mb-1 flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground transition-all hover:bg-primary/90 disabled:opacity-40"
                 >
                   <ArrowUp className="h-4 w-4" />
