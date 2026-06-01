@@ -173,11 +173,57 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
   };
 
   // ----- file handling -----
+  const extractFile = async (att: Attachment, file: File) => {
+    try {
+      const base64 = await new Promise<string>((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => {
+          const s = r.result as string;
+          resolve(s.split(",")[1] ?? "");
+        };
+        r.onerror = reject;
+        r.readAsDataURL(file);
+      });
+      const resp = await fetch(
+        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/extract-file`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
+          },
+          body: JSON.stringify({ name: file.name, mime: file.type, dataBase64: base64 }),
+        },
+      );
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data?.error || "解析失败");
+      setAttachments((prev) =>
+        prev.map((a) =>
+          a.id === att.id
+            ? {
+                ...a,
+                extracting: false,
+                extractedText: data.text || "",
+                pages: data.pages,
+                truncated: !!data.truncated,
+              }
+            : a,
+        ),
+      );
+    } catch (e: any) {
+      setAttachments((prev) =>
+        prev.map((a) =>
+          a.id === att.id ? { ...a, extracting: false, error: e?.message || "解析失败" } : a,
+        ),
+      );
+    }
+  };
+
   const handleFiles = async (files: FileList | null) => {
     if (!files) return;
-    const adds: Attachment[] = [];
+    const adds: { att: Attachment; file: File }[] = [];
     for (const f of Array.from(files).slice(0, 5)) {
-      if (f.size > 8 * 1024 * 1024) continue;
+      if (f.size > 15 * 1024 * 1024) continue;
       const isImg = f.type.startsWith("image/");
       let dataUrl: string | undefined;
       if (isImg) {
@@ -187,15 +233,22 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
           r.readAsDataURL(f);
         });
       }
-      adds.push({
+      const att: Attachment = {
         id: newId(),
         name: f.name,
         kind: isImg ? "image" : "file",
         dataUrl,
         size: f.size,
-      });
+        mime: f.type,
+        extracting: !isImg,
+      };
+      adds.push({ att, file: f });
     }
-    setAttachments((prev) => [...prev, ...adds]);
+    setAttachments((prev) => [...prev, ...adds.map((x) => x.att)]);
+    // kick off extraction in parallel for non-image files
+    for (const { att, file } of adds) {
+      if (att.kind === "file") extractFile(att, file);
+    }
   };
 
   const onPaste = (e: React.ClipboardEvent) => {
