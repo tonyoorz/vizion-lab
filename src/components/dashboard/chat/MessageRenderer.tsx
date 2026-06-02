@@ -35,10 +35,18 @@ import {
 } from "recharts";
 import { AgentSegment, parseAgentStream } from "./agentParser";
 
+export interface ToolResult {
+  ok: boolean;
+  ms?: number;
+  data?: any;
+  error?: string;
+}
+
 interface Props {
   content: string;
   streaming: boolean;
   onPickFollowup?: (q: string) => void;
+  toolResults?: Record<string, ToolResult>;
 }
 
 // Replaces <cite source="x">label</cite> in markdown with a custom token,
