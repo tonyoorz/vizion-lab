@@ -48,6 +48,8 @@ interface Msg {
   content: string;
   attachments?: Attachment[];
   meta?: { ms?: number; chars?: number; model?: string };
+  hidden?: boolean; // tool_result messages — sent to model, not shown
+  toolResults?: Record<string, ToolResult>;
 }
 interface Conversation {
   id: string;
