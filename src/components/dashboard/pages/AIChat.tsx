@@ -411,15 +411,21 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
       return { role: "user", content: parts };
     });
 
-  const runStream = async (history: Msg[], assistantMsgId: string) => {
+  const runStream = async (history: Msg[], assistantMsgId: string, round = 0) => {
     setStreaming(true);
     const controller = new AbortController();
     abortRef.current = controller;
     const startedAt = performance.now();
     const usedModel = model;
-    const contextStr = moduleLabel
-      ? `User is currently viewing the "${moduleLabel}" module (key: ${moduleKey}). Reference this module in <cite> when relevant.`
-      : undefined;
+    const ctxParts: string[] = [];
+    if (moduleLabel) {
+      ctxParts.push(
+        `User is currently viewing the "${moduleLabel}" module (key: ${moduleKey}). Reference this module in <cite> when relevant.`,
+      );
+    }
+    const schema = summarizeSchemaForPrompt();
+    if (schema) ctxParts.push(schema);
+    const contextStr = ctxParts.join("\n\n") || undefined;
 
     try {
       const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/chat`;
