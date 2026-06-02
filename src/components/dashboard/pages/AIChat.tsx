@@ -3,6 +3,7 @@ import {
   ArrowUp,
   Check,
   Copy,
+  Database,
   Loader2,
   MessageSquarePlus,
   Mic,
@@ -21,9 +22,11 @@ import {
   X,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
-import MessageRenderer from "../chat/MessageRenderer";
+import MessageRenderer, { ToolResult } from "../chat/MessageRenderer";
 import SlashMenu, { SLASH_COMMANDS, SlashCommand } from "../chat/SlashMenu";
-import { segmentsToPlainText, parseAgentStream } from "../chat/agentParser";
+import { segmentsToPlainText, parseAgentStream, extractToolCalls } from "../chat/agentParser";
+import { duckdbManager, isDuckdbFile, TableInfo } from "@/lib/duckdb/client";
+import { profileTable, riskScan, summarizeSchemaForPrompt } from "@/lib/duckdb/profile";
 
 type Role = "user" | "assistant";
 interface Attachment {
