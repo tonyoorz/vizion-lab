@@ -3,9 +3,11 @@ import {
   BarChart3,
   Bug,
   Compass,
+  Database,
   FileBarChart,
   GaugeCircle,
   LineChart,
+  ShieldAlert,
   TrendingUp,
 } from "lucide-react";
 
