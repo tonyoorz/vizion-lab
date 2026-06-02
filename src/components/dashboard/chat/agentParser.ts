@@ -1,12 +1,11 @@
 // Parses the streaming assistant text into structured segments.
-// The model emits:
+// Tags supported:
 //   <think>...</think>           reasoning
 //   <plan>...</plan>             ordered task checklist (one item per line)
 //   <step title="x" source="y">summary</step>   tool/analysis steps
 //   <chart type="...">{ JSON }</chart>          inline chart spec
+//   <tool name="..." id="...">payload</tool>    agent tool invocation (executed locally)
 //   <cite source="x">label</cite> inline citations (kept inside text segments)
-// Anything else is treated as final markdown body text.
-
 //   <followup>question</followup>  suggested next questions (one per line)
 // Anything else is treated as final markdown body text.
 
@@ -27,16 +26,33 @@ export type AgentSegment =
       text: string;
       closed: boolean;
     }
+  | {
+      kind: "tool";
+      toolName: string;
+      toolId: string;
+      args?: Record<string, string>;
+      text: string;
+      closed: boolean;
+    }
   | { kind: "followup"; items: string[]; closed: boolean }
   | { kind: "text"; text: string };
 
-const TAG_RE = /<(think|plan|step|chart|followup)(\s[^>]*)?>|<\/(think|plan|step|chart|followup)>/i;
-
+const TAG_RE =
+  /<(think|plan|step|chart|tool|followup)(\s[^>]*)?>|<\/(think|plan|step|chart|tool|followup)>/i;
 
 function getAttr(attrs: string | undefined, name: string): string | undefined {
   if (!attrs) return undefined;
   const m = attrs.match(new RegExp(`${name}\\s*=\\s*"([^"]*)"`, "i"));
   return m?.[1];
+}
+
+function parseAllAttrs(attrs: string | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!attrs) return out;
+  const re = /([a-zA-Z_][\w-]*)\s*=\s*"([^"]*)"/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(attrs))) out[m[1]] = m[2];
+  return out;
 }
 
 function parsePlanItems(raw: string): string[] {
@@ -68,6 +84,7 @@ export function parseAgentStream(raw: string): AgentSegment[] {
       const cm = rest.match(closeRe);
       const inner = cm ? rest.slice(0, cm.index!) : rest;
       const closed = !!cm;
+      const attrs = m[2];
       if (openName === "think") {
         out.push({ kind: "think", text: inner, closed });
       } else if (openName === "plan") {
@@ -75,7 +92,6 @@ export function parseAgentStream(raw: string): AgentSegment[] {
       } else if (openName === "followup") {
         out.push({ kind: "followup", items: parsePlanItems(inner), closed });
       } else if (openName === "chart") {
-        const attrs = m[2];
         const t = (getAttr(attrs, "type") || "line").toLowerCase();
         const chartType = (["line", "bar", "area", "pie"].includes(t)
           ? t
@@ -87,8 +103,17 @@ export function parseAgentStream(raw: string): AgentSegment[] {
           text: inner,
           closed,
         });
+      } else if (openName === "tool") {
+        const all = parseAllAttrs(attrs);
+        out.push({
+          kind: "tool",
+          toolName: all.name || "query_sql",
+          toolId: all.id || `t_${out.length}`,
+          args: all,
+          text: inner,
+          closed,
+        });
       } else {
-        const attrs = m[2];
         out.push({
           kind: "step",
           title: getAttr(attrs, "title") || "分析步骤",
@@ -103,8 +128,6 @@ export function parseAgentStream(raw: string): AgentSegment[] {
     }
   }
 
-
-
   return out;
 }
 
@@ -113,6 +136,13 @@ function pushText(out: AgentSegment[], text: string) {
   const last = out[out.length - 1];
   if (last && last.kind === "text") last.text += text;
   else out.push({ kind: "text", text });
+}
+
+// Extract tool calls that the agent emitted in the assistant message.
+export function extractToolCalls(raw: string) {
+  return parseAgentStream(raw).filter(
+    (s): s is Extract<AgentSegment, { kind: "tool" }> => s.kind === "tool" && s.closed,
+  );
 }
 
 // Convert segments back to plain text (used for copy-to-clipboard).

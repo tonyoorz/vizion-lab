@@ -3,9 +3,11 @@ import {
   BarChart3,
   Bug,
   Compass,
+  Database,
   FileBarChart,
   GaugeCircle,
   LineChart,
+  ShieldAlert,
   TrendingUp,
 } from "lucide-react";
 
@@ -18,6 +20,20 @@ export interface SlashCommand {
 }
 
 export const SLASH_COMMANDS: SlashCommand[] = [
+  {
+    id: "risk-scan",
+    label: "/数据风险扫描",
+    hint: "对已连接的本地数据做风险扫描，给出 Insights",
+    prompt: "对当前已连接的本地 DuckDB 数据做完整风险扫描：先列出表，再对每张关键表调用 risk_scan，并对最严重的发现写 SQL 取证、给出图表和行动建议。",
+    icon: ShieldAlert,
+  },
+  {
+    id: "explore-db",
+    label: "/探查我的数据",
+    hint: "列出表 + 列出 schema + 给出可分析方向",
+    prompt: "列出我已连接的所有表，对每张表做 profile_table，然后给出 5 个值得深入分析的角度。",
+    icon: Database,
+  },
   {
     id: "top-issue",
     label: "/Top Issue 诊断",

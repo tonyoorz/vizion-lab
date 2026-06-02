@@ -3,6 +3,7 @@ import {
   ArrowUp,
   Check,
   Copy,
+  Database,
   Loader2,
   MessageSquarePlus,
   Mic,
@@ -21,9 +22,11 @@ import {
   X,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
-import MessageRenderer from "../chat/MessageRenderer";
+import MessageRenderer, { ToolResult } from "../chat/MessageRenderer";
 import SlashMenu, { SLASH_COMMANDS, SlashCommand } from "../chat/SlashMenu";
-import { segmentsToPlainText, parseAgentStream } from "../chat/agentParser";
+import { segmentsToPlainText, parseAgentStream, extractToolCalls } from "../chat/agentParser";
+import { duckdbManager, isDuckdbFile, TableInfo } from "@/lib/duckdb/client";
+import { profileTable, riskScan, summarizeSchemaForPrompt } from "@/lib/duckdb/profile";
 
 type Role = "user" | "assistant";
 interface Attachment {
@@ -45,6 +48,8 @@ interface Msg {
   content: string;
   attachments?: Attachment[];
   meta?: { ms?: number; chars?: number; model?: string };
+  hidden?: boolean; // tool_result messages — sent to model, not shown
+  toolResults?: Record<string, ToolResult>;
 }
 interface Conversation {
   id: string;
@@ -110,6 +115,13 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
   const [editingMsgVal, setEditingMsgVal] = useState("");
   const [recording, setRecording] = useState(false);
   const [transcribing, setTranscribing] = useState(false);
+  const [dbTables, setDbTables] = useState<TableInfo[]>(duckdbManager.listTables());
+  const [dbLoading, setDbLoading] = useState(false);
+
+  useEffect(() => {
+    const unsub = duckdbManager.subscribe(() => setDbTables(duckdbManager.listTables()));
+    return () => { unsub(); };
+  }, []);
 
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -219,10 +231,31 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
     }
   };
 
+  const loadIntoDuckdb = async (file: File) => {
+    setDbLoading(true);
+    try {
+      if (file.name.toLowerCase().endsWith(".duckdb")) {
+        await duckdbManager.registerDuckdbFile(file);
+      } else {
+        await duckdbManager.registerTabular(file);
+      }
+    } catch (e: any) {
+      alert(`加载 ${file.name} 失败: ${e?.message || e}`);
+    } finally {
+      setDbLoading(false);
+    }
+  };
+
   const handleFiles = async (files: FileList | null) => {
     if (!files) return;
     const adds: { att: Attachment; file: File }[] = [];
     for (const f of Array.from(files).slice(0, 5)) {
+      if (f.size > 100 * 1024 * 1024) continue;
+      // Route data files to DuckDB instead of the extract-file edge function.
+      if (isDuckdbFile(f)) {
+        loadIntoDuckdb(f);
+        continue;
+      }
       if (f.size > 15 * 1024 * 1024) continue;
       const isImg = f.type.startsWith("image/");
       let dataUrl: string | undefined;
@@ -250,6 +283,7 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
       if (att.kind === "file") extractFile(att, file);
     }
   };
+
 
   const onPaste = (e: React.ClipboardEvent) => {
     if (e.clipboardData.files?.length) {
@@ -377,15 +411,37 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
       return { role: "user", content: parts };
     });
 
-  const runStream = async (history: Msg[], assistantMsgId: string) => {
+  // Truncate tool data before sending back to the model (keep token budget sane).
+  const truncateResultForModel = (data: any): any => {
+    if (data && Array.isArray(data.rows)) {
+      const rowCount = data.rowCount ?? data.rows.length;
+      return {
+        columns: data.columns,
+        rowCount,
+        ms: data.ms,
+        truncated: rowCount > 50,
+        rows: data.rows.slice(0, 50),
+      };
+    }
+    if (Array.isArray(data)) return data.slice(0, 50);
+    return data;
+  };
+
+  const runStream = async (history: Msg[], assistantMsgId: string, round = 0) => {
     setStreaming(true);
     const controller = new AbortController();
     abortRef.current = controller;
     const startedAt = performance.now();
     const usedModel = model;
-    const contextStr = moduleLabel
-      ? `User is currently viewing the "${moduleLabel}" module (key: ${moduleKey}). Reference this module in <cite> when relevant.`
-      : undefined;
+    const ctxParts: string[] = [];
+    if (moduleLabel) {
+      ctxParts.push(
+        `User is currently viewing the "${moduleLabel}" module (key: ${moduleKey}). Reference this module in <cite> when relevant.`,
+      );
+    }
+    const schema = summarizeSchemaForPrompt();
+    if (schema) ctxParts.push(schema);
+    const contextStr = ctxParts.join("\n\n") || undefined;
 
     try {
       const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/chat`;
@@ -480,6 +536,48 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
         });
         return { ...c, messages: msgs };
       });
+
+      // ----- Tool execution loop (DuckDB) -----
+      const toolCalls = extractToolCalls(finalContent);
+      if (toolCalls.length && round < 4 && !controller.signal.aborted) {
+        const results: Record<string, ToolResult> = {};
+        for (const tc of toolCalls) {
+          results[tc.toolId] = await executeTool(tc.toolName, tc.text, tc.args);
+        }
+        // Attach results to the assistant message for UI rendering
+        updateActive((c) => ({
+          ...c,
+          messages: c.messages.map((m) =>
+            m.id === assistantMsgId ? { ...m, toolResults: { ...(m.toolResults || {}), ...results } } : m,
+          ),
+        }));
+        // Build hidden tool_result message for next model turn
+        const toolResultText = toolCalls
+          .map((tc) => {
+            const r = results[tc.toolId];
+            const payload = r.ok
+              ? JSON.stringify(truncateResultForModel(r.data))
+              : JSON.stringify({ error: r.error });
+            return `<tool_result id="${tc.toolId}" name="${tc.toolName}" ok="${r.ok}">${payload}</tool_result>`;
+          })
+          .join("\n");
+        const hiddenMsg: Msg = {
+          id: newId(),
+          role: "user",
+          content: toolResultText,
+          hidden: true,
+        };
+        const nextAsst: Msg = { id: newId(), role: "assistant", content: "" };
+        updateActive((c) => ({
+          ...c,
+          messages: [...c.messages, hiddenMsg, nextAsst],
+          updatedAt: Date.now(),
+        }));
+        const nextHistory = [...history, { ...(active.messages.find((m) => m.id === assistantMsgId)!), content: finalContent }, hiddenMsg];
+        await runStream(nextHistory, nextAsst.id, round + 1);
+        return;
+      }
+
       // Auto-generate a concise title after first round
       const conv = conversations.find((c) => c.id === activeId);
       const isFirstRound =
@@ -492,6 +590,34 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
       }
     }
   };
+
+  const executeTool = async (name: string, payload: string, args?: Record<string, string>): Promise<ToolResult> => {
+    const start = performance.now();
+    try {
+      if (name === "list_tables") {
+        return { ok: true, ms: Math.round(performance.now() - start), data: duckdbManager.listTables() };
+      }
+      if (name === "query_sql") {
+        const sql = payload.trim();
+        const res = await duckdbManager.runQuery(sql, 200);
+        return { ok: true, ms: res.ms, data: res };
+      }
+      if (name === "profile_table") {
+        const t = (args?.table || payload).trim();
+        const res = await profileTable(t);
+        return { ok: true, ms: Math.round(performance.now() - start), data: res };
+      }
+      if (name === "risk_scan") {
+        const t = (args?.table || payload).trim() || undefined;
+        const res = await riskScan(t);
+        return { ok: true, ms: Math.round(performance.now() - start), data: res };
+      }
+      return { ok: false, error: `未知工具: ${name}` };
+    } catch (e: any) {
+      return { ok: false, error: e?.message || String(e), ms: Math.round(performance.now() - start) };
+    }
+  };
+
 
   const generateTitle = async (userQ: string, asstA: string) => {
     try {
@@ -754,17 +880,45 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
               </p>
             </div>
           </div>
-          <select
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
-            className="rounded-md border border-border bg-card px-2.5 py-1.5 text-xs font-medium text-foreground outline-none transition-colors hover:bg-secondary focus:border-primary"
-          >
-            {MODELS.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.label} · {m.hint}
-              </option>
-            ))}
-          </select>
+          <div className="flex items-center gap-2">
+            {(dbTables.length > 0 || dbLoading) && (
+              <div className="flex items-center gap-1.5 rounded-md border border-border bg-card px-2 py-1 text-[11px]">
+                {dbLoading ? (
+                  <Loader2 className="h-3 w-3 animate-spin text-primary" />
+                ) : (
+                  <span className="relative flex h-1.5 w-1.5">
+                    <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-500 opacity-60" />
+                    <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                  </span>
+                )}
+                <Database className="h-3 w-3 text-muted-foreground" />
+                <span className="font-medium text-foreground">DuckDB</span>
+                <span className="text-muted-foreground">
+                  {dbTables.length} 表 · {dbTables.reduce((s, t) => s + t.rows, 0).toLocaleString()} 行
+                </span>
+                <button
+                  onClick={() => {
+                    if (confirm("断开本地 DuckDB 数据？")) duckdbManager.reset();
+                  }}
+                  className="ml-1 rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+                  title="断开"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </div>
+            )}
+            <select
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              className="rounded-md border border-border bg-card px-2.5 py-1.5 text-xs font-medium text-foreground outline-none transition-colors hover:bg-secondary focus:border-primary"
+            >
+              {MODELS.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.label} · {m.hint}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
 
         {/* Messages */}
@@ -810,9 +964,9 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
           ) : (
             <div className="mx-auto max-w-3xl space-y-6 px-6 py-8">
               <AnimatePresence initial={false}>
-                {active.messages.map((m, i) => {
+                {active.messages.filter((m) => !m.hidden).map((m, i, arr) => {
                   const isLastAsst =
-                    m.role === "assistant" && i === active.messages.length - 1;
+                    m.role === "assistant" && i === arr.length - 1;
                   return (
                     <motion.div
                       key={m.id}
@@ -890,6 +1044,7 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
                               content={m.content}
                               streaming={streaming && isLastAsst}
                               onPickFollowup={isLastAsst && !streaming ? (q) => send(q) : undefined}
+                              toolResults={m.toolResults}
                             />
                             {m.meta && !(streaming && isLastAsst) && (
                               <MessageStats meta={m.meta} />
@@ -1030,7 +1185,7 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
                 ref={fileRef}
                 type="file"
                 multiple
-                accept="image/*,.pdf,.pptx,.docx,.xlsx,.csv,.txt,.json,.md"
+                accept="image/*,.pdf,.pptx,.docx,.xlsx,.csv,.tsv,.parquet,.duckdb,.txt,.json,.ndjson,.md"
                 hidden
                 onChange={(e) => {
                   handleFiles(e.target.files);
