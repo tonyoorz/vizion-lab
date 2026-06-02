@@ -1016,6 +1016,7 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
                               content={m.content}
                               streaming={streaming && isLastAsst}
                               onPickFollowup={isLastAsst && !streaming ? (q) => send(q) : undefined}
+                              toolResults={m.toolResults}
                             />
                             {m.meta && !(streaming && isLastAsst) && (
                               <MessageStats meta={m.meta} />
