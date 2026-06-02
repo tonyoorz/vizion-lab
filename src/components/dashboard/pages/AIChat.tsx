@@ -411,6 +411,22 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
       return { role: "user", content: parts };
     });
 
+  // Truncate tool data before sending back to the model (keep token budget sane).
+  const truncateResultForModel = (data: any): any => {
+    if (data && Array.isArray(data.rows)) {
+      const rowCount = data.rowCount ?? data.rows.length;
+      return {
+        columns: data.columns,
+        rowCount,
+        ms: data.ms,
+        truncated: rowCount > 50,
+        rows: data.rows.slice(0, 50),
+      };
+    }
+    if (Array.isArray(data)) return data.slice(0, 50);
+    return data;
+  };
+
   const runStream = async (history: Msg[], assistantMsgId: string, round = 0) => {
     setStreaming(true);
     const controller = new AbortController();
