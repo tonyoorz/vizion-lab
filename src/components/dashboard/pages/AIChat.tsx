@@ -520,6 +520,48 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
         });
         return { ...c, messages: msgs };
       });
+
+      // ----- Tool execution loop (DuckDB) -----
+      const toolCalls = extractToolCalls(finalContent);
+      if (toolCalls.length && round < 4 && !controller.signal.aborted) {
+        const results: Record<string, ToolResult> = {};
+        for (const tc of toolCalls) {
+          results[tc.toolId] = await executeTool(tc.toolName, tc.text, tc.args);
+        }
+        // Attach results to the assistant message for UI rendering
+        updateActive((c) => ({
+          ...c,
+          messages: c.messages.map((m) =>
+            m.id === assistantMsgId ? { ...m, toolResults: { ...(m.toolResults || {}), ...results } } : m,
+          ),
+        }));
+        // Build hidden tool_result message for next model turn
+        const toolResultText = toolCalls
+          .map((tc) => {
+            const r = results[tc.toolId];
+            const payload = r.ok
+              ? JSON.stringify(truncateResultForModel(r.data))
+              : JSON.stringify({ error: r.error });
+            return `<tool_result id="${tc.toolId}" name="${tc.toolName}" ok="${r.ok}">${payload}</tool_result>`;
+          })
+          .join("\n");
+        const hiddenMsg: Msg = {
+          id: newId(),
+          role: "user",
+          content: toolResultText,
+          hidden: true,
+        };
+        const nextAsst: Msg = { id: newId(), role: "assistant", content: "" };
+        updateActive((c) => ({
+          ...c,
+          messages: [...c.messages, hiddenMsg, nextAsst],
+          updatedAt: Date.now(),
+        }));
+        const nextHistory = [...history, { ...(active.messages.find((m) => m.id === assistantMsgId)!), content: finalContent }, hiddenMsg];
+        await runStream(nextHistory, nextAsst.id, round + 1);
+        return;
+      }
+
       // Auto-generate a concise title after first round
       const conv = conversations.find((c) => c.id === activeId);
       const isFirstRound =
@@ -532,6 +574,34 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
       }
     }
   };
+
+  const executeTool = async (name: string, payload: string, args?: Record<string, string>): Promise<ToolResult> => {
+    const start = performance.now();
+    try {
+      if (name === "list_tables") {
+        return { ok: true, ms: Math.round(performance.now() - start), data: duckdbManager.listTables() };
+      }
+      if (name === "query_sql") {
+        const sql = payload.trim();
+        const res = await duckdbManager.runQuery(sql, 200);
+        return { ok: true, ms: res.ms, data: res };
+      }
+      if (name === "profile_table") {
+        const t = (args?.table || payload).trim();
+        const res = await profileTable(t);
+        return { ok: true, ms: Math.round(performance.now() - start), data: res };
+      }
+      if (name === "risk_scan") {
+        const t = (args?.table || payload).trim() || undefined;
+        const res = await riskScan(t);
+        return { ok: true, ms: Math.round(performance.now() - start), data: res };
+      }
+      return { ok: false, error: `未知工具: ${name}` };
+    } catch (e: any) {
+      return { ok: false, error: e?.message || String(e), ms: Math.round(performance.now() - start) };
+    }
+  };
+
 
   const generateTitle = async (userQ: string, asstA: string) => {
     try {
