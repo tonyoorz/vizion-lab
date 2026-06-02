@@ -12,6 +12,9 @@ import {
   BarChart3,
   ListChecks,
   Wrench,
+  AlertTriangle,
+  Table as TableIcon,
+  Play,
 } from "lucide-react";
 import {
   Area,
