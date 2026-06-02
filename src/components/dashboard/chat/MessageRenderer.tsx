@@ -59,7 +59,7 @@ function preprocessCitations(md: string) {
   );
 }
 
-export default function MessageRenderer({ content, streaming, onPickFollowup }: Props) {
+export default function MessageRenderer({ content, streaming, onPickFollowup, toolResults }: Props) {
   const segs = parseAgentStream(content);
   const completedSteps = segs.filter((s) => s.kind === "step" && s.closed).length;
   return (
@@ -97,6 +97,18 @@ export default function MessageRenderer({ content, streaming, onPickFollowup }: 
               closed={s.closed}
             />
           );
+        if (s.kind === "tool")
+          return (
+            <ToolBlock
+              key={i}
+              toolName={s.toolName}
+              toolId={s.toolId}
+              args={s.args}
+              text={s.text}
+              closed={s.closed}
+              result={toolResults?.[s.toolId]}
+            />
+          );
         if (s.kind === "followup")
           return (
             <FollowupBlock
@@ -111,6 +123,159 @@ export default function MessageRenderer({ content, streaming, onPickFollowup }: 
       })}
     </div>
   );
+}
+
+function ToolBlock({
+  toolName,
+  toolId,
+  args,
+  text,
+  closed,
+  result,
+}: {
+  toolName: string;
+  toolId: string;
+  args?: Record<string, string>;
+  text: string;
+  closed: boolean;
+  result?: ToolResult;
+}) {
+  const [open, setOpen] = useState(false);
+  const labelMap: Record<string, string> = {
+    query_sql: "查询 SQL",
+    profile_table: "数据画像",
+    list_tables: "列出表",
+    risk_scan: "风险扫描",
+  };
+  const label = labelMap[toolName] || toolName;
+  const status = !closed
+    ? "writing"
+    : !result
+      ? "running"
+      : result.ok
+        ? "ok"
+        : "error";
+  const target = args?.table || args?.name;
+
+  return (
+    <div className="overflow-hidden rounded-xl border border-border bg-card">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-2 px-3 py-2 text-left"
+      >
+        <div
+          className={`flex h-5 w-5 items-center justify-center rounded-md ${
+            status === "ok"
+              ? "bg-emerald-500/10 text-emerald-600"
+              : status === "error"
+                ? "bg-destructive/10 text-destructive"
+                : "bg-primary/10 text-primary"
+          }`}
+        >
+          {status === "writing" || status === "running" ? (
+            <Loader2 className="h-3 w-3 animate-spin" />
+          ) : status === "error" ? (
+            <AlertTriangle className="h-3 w-3" />
+          ) : toolName === "query_sql" ? (
+            <Play className="h-3 w-3" />
+          ) : toolName === "profile_table" ? (
+            <TableIcon className="h-3 w-3" />
+          ) : (
+            <Wrench className="h-3 w-3" />
+          )}
+        </div>
+        <p className="text-xs font-semibold text-foreground">{label}</p>
+        {target && (
+          <span className="rounded-full bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+            {target}
+          </span>
+        )}
+        <span className="ml-auto inline-flex items-center gap-1.5 font-mono text-[10px] text-muted-foreground">
+          {status === "ok" && result?.ms != null && <span>{result.ms}ms</span>}
+          {status === "ok" && result?.data?.rowCount != null && (
+            <span>{result.data.rowCount} 行</span>
+          )}
+          {status === "error" && <span className="text-destructive">失败</span>}
+          {status === "writing" && <span>生成中</span>}
+          {status === "running" && <span>执行中</span>}
+          <ChevronDown className={`h-3 w-3 transition-transform ${open ? "rotate-180" : ""}`} />
+        </span>
+      </button>
+      <AnimatePresence initial={false}>
+        {open && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            className="overflow-hidden border-t border-border/60"
+          >
+            {text.trim() && (
+              <pre className="overflow-x-auto bg-muted/40 px-3 py-2 font-mono text-[11px] leading-relaxed text-foreground">
+                {text.trim()}
+              </pre>
+            )}
+            {result?.ok && result.data && (
+              <ToolResultPreview name={toolName} data={result.data} />
+            )}
+            {result?.error && (
+              <p className="px-3 py-2 text-xs text-destructive">{result.error}</p>
+            )}
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+function ToolResultPreview({ name, data }: { name: string; data: any }) {
+  if (name === "query_sql" && Array.isArray(data.rows)) {
+    const rows = data.rows.slice(0, 8);
+    const cols: string[] = data.columns || (rows[0] ? Object.keys(rows[0]) : []);
+    if (!rows.length) return <p className="px-3 py-2 text-xs text-muted-foreground">空结果</p>;
+    return (
+      <div className="overflow-x-auto px-3 py-2">
+        <table className="w-full border-collapse text-[11px]">
+          <thead>
+            <tr className="border-b border-border text-left text-muted-foreground">
+              {cols.map((c) => (
+                <th key={c} className="py-1 pr-3 font-medium">
+                  {c}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r: any, i: number) => (
+              <tr key={i} className="border-b border-border/40">
+                {cols.map((c) => (
+                  <td key={c} className="py-1 pr-3 font-mono text-foreground">
+                    {formatCell(r[c])}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {data.rowCount > rows.length && (
+          <p className="mt-1 text-[10px] text-muted-foreground">
+            显示前 {rows.length} / {data.rowCount} 行
+          </p>
+        )}
+      </div>
+    );
+  }
+  return (
+    <pre className="overflow-x-auto bg-background px-3 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
+      {JSON.stringify(data, null, 2).slice(0, 1200)}
+    </pre>
+  );
+}
+
+function formatCell(v: unknown): string {
+  if (v == null) return "—";
+  if (typeof v === "number") return Number.isInteger(v) ? v.toString() : v.toFixed(3);
+  const s = String(v);
+  return s.length > 60 ? s.slice(0, 57) + "…" : s;
 }
 
 function FollowupBlock({
