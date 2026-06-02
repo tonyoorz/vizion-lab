@@ -880,17 +880,45 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
               </p>
             </div>
           </div>
-          <select
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
-            className="rounded-md border border-border bg-card px-2.5 py-1.5 text-xs font-medium text-foreground outline-none transition-colors hover:bg-secondary focus:border-primary"
-          >
-            {MODELS.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.label} · {m.hint}
-              </option>
-            ))}
-          </select>
+          <div className="flex items-center gap-2">
+            {(dbTables.length > 0 || dbLoading) && (
+              <div className="flex items-center gap-1.5 rounded-md border border-border bg-card px-2 py-1 text-[11px]">
+                {dbLoading ? (
+                  <Loader2 className="h-3 w-3 animate-spin text-primary" />
+                ) : (
+                  <span className="relative flex h-1.5 w-1.5">
+                    <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-500 opacity-60" />
+                    <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                  </span>
+                )}
+                <Database className="h-3 w-3 text-muted-foreground" />
+                <span className="font-medium text-foreground">DuckDB</span>
+                <span className="text-muted-foreground">
+                  {dbTables.length} 表 · {dbTables.reduce((s, t) => s + t.rows, 0).toLocaleString()} 行
+                </span>
+                <button
+                  onClick={() => {
+                    if (confirm("断开本地 DuckDB 数据？")) duckdbManager.reset();
+                  }}
+                  className="ml-1 rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+                  title="断开"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </div>
+            )}
+            <select
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              className="rounded-md border border-border bg-card px-2.5 py-1.5 text-xs font-medium text-foreground outline-none transition-colors hover:bg-secondary focus:border-primary"
+            >
+              {MODELS.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.label} · {m.hint}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
 
         {/* Messages */}
