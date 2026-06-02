@@ -231,10 +231,31 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
     }
   };
 
+  const loadIntoDuckdb = async (file: File) => {
+    setDbLoading(true);
+    try {
+      if (file.name.toLowerCase().endsWith(".duckdb")) {
+        await duckdbManager.registerDuckdbFile(file);
+      } else {
+        await duckdbManager.registerTabular(file);
+      }
+    } catch (e: any) {
+      alert(`加载 ${file.name} 失败: ${e?.message || e}`);
+    } finally {
+      setDbLoading(false);
+    }
+  };
+
   const handleFiles = async (files: FileList | null) => {
     if (!files) return;
     const adds: { att: Attachment; file: File }[] = [];
     for (const f of Array.from(files).slice(0, 5)) {
+      if (f.size > 100 * 1024 * 1024) continue;
+      // Route data files to DuckDB instead of the extract-file edge function.
+      if (isDuckdbFile(f)) {
+        loadIntoDuckdb(f);
+        continue;
+      }
       if (f.size > 15 * 1024 * 1024) continue;
       const isImg = f.type.startsWith("image/");
       let dataUrl: string | undefined;
@@ -262,6 +283,7 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
       if (att.kind === "file") extractFile(att, file);
     }
   };
+
 
   const onPaste = (e: React.ClipboardEvent) => {
     if (e.clipboardData.files?.length) {
