@@ -115,6 +115,10 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
   const [editingMsgVal, setEditingMsgVal] = useState("");
   const [recording, setRecording] = useState(false);
   const [transcribing, setTranscribing] = useState(false);
+  const [dbTables, setDbTables] = useState<TableInfo[]>(duckdbManager.listTables());
+  const [dbLoading, setDbLoading] = useState(false);
+
+  useEffect(() => duckdbManager.subscribe(() => setDbTables(duckdbManager.listTables())), []);
 
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
