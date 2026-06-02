@@ -936,9 +936,9 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
           ) : (
             <div className="mx-auto max-w-3xl space-y-6 px-6 py-8">
               <AnimatePresence initial={false}>
-                {active.messages.map((m, i) => {
+                {active.messages.filter((m) => !m.hidden).map((m, i, arr) => {
                   const isLastAsst =
-                    m.role === "assistant" && i === active.messages.length - 1;
+                    m.role === "assistant" && i === arr.length - 1;
                   return (
                     <motion.div
                       key={m.id}
