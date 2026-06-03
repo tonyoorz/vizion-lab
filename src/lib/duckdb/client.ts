@@ -156,10 +156,43 @@ class DuckDBManager {
     return this.tables.slice();
   }
 
+  /** Internal helper: dump a registered table as CSV text (bypasses safety; for Pyodide). */
+  async exportTableCsv(table: string, limit = 50000): Promise<string> {
+    const db = await this.init();
+    const conn = await db.connect();
+    try {
+      // Validate table name (alnum + underscore only)
+      if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(table)) {
+        throw new Error(`非法表名: ${table}`);
+      }
+      const res = await conn.query(
+        `SELECT * FROM "${table}" LIMIT ${Math.max(1, Math.floor(limit))}`,
+      );
+      const cols = res.schema.fields.map((f: any) => f.name as string);
+      const rows = res.toArray() as any[];
+      const esc = (v: unknown) => {
+        if (v == null) return "";
+        let s: string;
+        if (typeof v === "bigint") s = v.toString();
+        else if (v instanceof Date) s = v.toISOString();
+        else if (typeof v === "object") s = JSON.stringify(v);
+        else s = String(v);
+        if (/[",\n\r]/.test(s)) s = `"${s.replace(/"/g, '""')}"`;
+        return s;
+      };
+      const lines = [cols.join(",")];
+      for (const r of rows) lines.push(cols.map((c) => esc((r as any)[c])).join(","));
+      return lines.join("\n");
+    } finally {
+      await conn.close();
+    }
+  }
+
   reset() {
     this.tables = [];
     this.emit();
   }
+
 
   /** Run a read-only SQL statement. Throws if the statement is unsafe. */
   async runQuery(sql: string, maxRows = 500): Promise<RunResult> {
