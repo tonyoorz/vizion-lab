@@ -184,9 +184,12 @@ function ToolBlock({
             <Play className="h-3 w-3" />
           ) : toolName === "profile_table" ? (
             <TableIcon className="h-3 w-3" />
+          ) : toolName === "run_python" ? (
+            <Terminal className="h-3 w-3" />
           ) : (
             <Wrench className="h-3 w-3" />
           )}
+
         </div>
         <p className="text-xs font-semibold text-foreground">{label}</p>
         {target && (
