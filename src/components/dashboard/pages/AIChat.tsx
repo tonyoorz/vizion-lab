@@ -27,6 +27,8 @@ import SlashMenu, { SLASH_COMMANDS, SlashCommand } from "../chat/SlashMenu";
 import { segmentsToPlainText, parseAgentStream, extractToolCalls } from "../chat/agentParser";
 import { duckdbManager, isDuckdbFile, TableInfo } from "@/lib/duckdb/client";
 import { profileTable, riskScan, summarizeSchemaForPrompt } from "@/lib/duckdb/profile";
+import { pyodideManager } from "@/lib/pyodide/client";
+
 
 type Role = "user" | "assistant";
 interface Attachment {
@@ -423,9 +425,22 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
         rows: data.rows.slice(0, 50),
       };
     }
+    // run_python: strip base64 figures from model payload (keep only metadata)
+    if (data && typeof data === "object" && "stdout" in data && "figures" in data) {
+      return {
+        ok: data.ok,
+        stdout: typeof data.stdout === "string" ? data.stdout.slice(0, 4000) : "",
+        value: data.value,
+        figuresCount: Array.isArray(data.figures) ? data.figures.length : 0,
+        tablesLoaded: data.tablesLoaded,
+        ms: data.ms,
+        error: data.error,
+      };
+    }
     if (Array.isArray(data)) return data.slice(0, 50);
     return data;
   };
+
 
   const runStream = async (history: Msg[], assistantMsgId: string, round = 0) => {
     setStreaming(true);
@@ -612,11 +627,26 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
         const res = await riskScan(t);
         return { ok: true, ms: Math.round(performance.now() - start), data: res };
       }
+      if (name === "run_python") {
+        const code = payload;
+        const tablesArg = (args?.tables || "").trim();
+        const tables = tablesArg
+          ? tablesArg.split(/[,\s]+/).filter(Boolean)
+          : undefined;
+        const res = await pyodideManager.run(code, tables);
+        return {
+          ok: res.ok,
+          ms: res.ms,
+          data: res,
+          error: res.ok ? undefined : res.error,
+        };
+      }
       return { ok: false, error: `未知工具: ${name}` };
     } catch (e: any) {
       return { ok: false, error: e?.message || String(e), ms: Math.round(performance.now() - start) };
     }
   };
+
 
 
   const generateTitle = async (userQ: string, asstA: string) => {

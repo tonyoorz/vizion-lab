@@ -15,6 +15,8 @@ import {
   AlertTriangle,
   Table as TableIcon,
   Play,
+  Terminal,
+
 } from "lucide-react";
 import {
   Area,
@@ -146,8 +148,10 @@ function ToolBlock({
     profile_table: "数据画像",
     list_tables: "列出表",
     risk_scan: "风险扫描",
+    run_python: "Python 代码",
   };
   const label = labelMap[toolName] || toolName;
+
   const status = !closed
     ? "writing"
     : !result
@@ -180,9 +184,12 @@ function ToolBlock({
             <Play className="h-3 w-3" />
           ) : toolName === "profile_table" ? (
             <TableIcon className="h-3 w-3" />
+          ) : toolName === "run_python" ? (
+            <Terminal className="h-3 w-3" />
           ) : (
             <Wrench className="h-3 w-3" />
           )}
+
         </div>
         <p className="text-xs font-semibold text-foreground">{label}</p>
         {target && (
@@ -195,9 +202,13 @@ function ToolBlock({
           {status === "ok" && result?.data?.rowCount != null && (
             <span>{result.data.rowCount} 行</span>
           )}
+          {status === "ok" && toolName === "run_python" && Array.isArray(result?.data?.figures) && result.data.figures.length > 0 && (
+            <span>{result.data.figures.length} 图</span>
+          )}
           {status === "error" && <span className="text-destructive">失败</span>}
           {status === "writing" && <span>生成中</span>}
           {status === "running" && <span>执行中</span>}
+
           <ChevronDown className={`h-3 w-3 transition-transform ${open ? "rotate-180" : ""}`} />
         </span>
       </button>
@@ -228,7 +239,49 @@ function ToolBlock({
 }
 
 function ToolResultPreview({ name, data }: { name: string; data: any }) {
+  if (name === "run_python") {
+    return (
+      <div className="space-y-2 px-3 py-2">
+        {data.stdout && (
+          <pre className="overflow-x-auto whitespace-pre-wrap rounded-md bg-background px-2 py-1.5 font-mono text-[11px] leading-relaxed text-foreground">
+            {data.stdout.slice(0, 4000)}
+          </pre>
+        )}
+        {data.value && (
+          <div>
+            <p className="mb-1 text-[10px] uppercase tracking-wider text-muted-foreground">返回值</p>
+            <pre className="overflow-x-auto whitespace-pre-wrap rounded-md bg-background px-2 py-1.5 font-mono text-[11px] leading-relaxed text-muted-foreground">
+              {data.value}
+            </pre>
+          </div>
+        )}
+        {Array.isArray(data.figures) && data.figures.length > 0 && (
+          <div className="grid gap-2">
+            {data.figures.map((b64: string, i: number) => (
+              <img
+                key={i}
+                src={`data:image/png;base64,${b64}`}
+                alt={`figure ${i + 1}`}
+                className="w-full rounded-md border border-border"
+              />
+            ))}
+          </div>
+        )}
+        {data.error && (
+          <pre className="overflow-x-auto whitespace-pre-wrap rounded-md bg-destructive/10 px-2 py-1.5 font-mono text-[11px] leading-relaxed text-destructive">
+            {data.error}
+          </pre>
+        )}
+        {Array.isArray(data.tablesLoaded) && data.tablesLoaded.length > 0 && (
+          <p className="text-[10px] text-muted-foreground">
+            注入 DataFrame: {data.tablesLoaded.join(", ")}
+          </p>
+        )}
+      </div>
+    );
+  }
   if (name === "query_sql" && Array.isArray(data.rows)) {
+
     const rows = data.rows.slice(0, 8);
     const cols: string[] = data.columns || (rows[0] ? Object.keys(rows[0]) : []);
     if (!rows.length) return <p className="px-3 py-2 text-xs text-muted-foreground">空结果</p>;
