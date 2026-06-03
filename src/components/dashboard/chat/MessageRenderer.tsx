@@ -148,8 +148,10 @@ function ToolBlock({
     profile_table: "数据画像",
     list_tables: "列出表",
     risk_scan: "风险扫描",
+    run_python: "Python 代码",
   };
   const label = labelMap[toolName] || toolName;
+
   const status = !closed
     ? "writing"
     : !result
