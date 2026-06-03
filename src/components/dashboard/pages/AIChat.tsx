@@ -627,11 +627,26 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
         const res = await riskScan(t);
         return { ok: true, ms: Math.round(performance.now() - start), data: res };
       }
+      if (name === "run_python") {
+        const code = payload;
+        const tablesArg = (args?.tables || "").trim();
+        const tables = tablesArg
+          ? tablesArg.split(/[,\s]+/).filter(Boolean)
+          : undefined;
+        const res = await pyodideManager.run(code, tables);
+        return {
+          ok: res.ok,
+          ms: res.ms,
+          data: res,
+          error: res.ok ? undefined : res.error,
+        };
+      }
       return { ok: false, error: `未知工具: ${name}` };
     } catch (e: any) {
       return { ok: false, error: e?.message || String(e), ms: Math.round(performance.now() - start) };
     }
   };
+
 
 
   const generateTitle = async (userQ: string, asstA: string) => {
