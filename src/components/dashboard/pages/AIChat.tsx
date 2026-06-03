@@ -425,9 +425,22 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
         rows: data.rows.slice(0, 50),
       };
     }
+    // run_python: strip base64 figures from model payload (keep only metadata)
+    if (data && typeof data === "object" && "stdout" in data && "figures" in data) {
+      return {
+        ok: data.ok,
+        stdout: typeof data.stdout === "string" ? data.stdout.slice(0, 4000) : "",
+        value: data.value,
+        figuresCount: Array.isArray(data.figures) ? data.figures.length : 0,
+        tablesLoaded: data.tablesLoaded,
+        ms: data.ms,
+        error: data.error,
+      };
+    }
     if (Array.isArray(data)) return data.slice(0, 50);
     return data;
   };
+
 
   const runStream = async (history: Msg[], assistantMsgId: string, round = 0) => {
     setStreaming(true);
