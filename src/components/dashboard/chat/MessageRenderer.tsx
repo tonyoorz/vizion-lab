@@ -15,6 +15,8 @@ import {
   AlertTriangle,
   Table as TableIcon,
   Play,
+  Terminal,
+
 } from "lucide-react";
 import {
   Area,
