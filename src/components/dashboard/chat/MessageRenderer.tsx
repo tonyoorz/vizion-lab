@@ -239,7 +239,49 @@ function ToolBlock({
 }
 
 function ToolResultPreview({ name, data }: { name: string; data: any }) {
+  if (name === "run_python") {
+    return (
+      <div className="space-y-2 px-3 py-2">
+        {data.stdout && (
+          <pre className="overflow-x-auto whitespace-pre-wrap rounded-md bg-background px-2 py-1.5 font-mono text-[11px] leading-relaxed text-foreground">
+            {data.stdout.slice(0, 4000)}
+          </pre>
+        )}
+        {data.value && (
+          <div>
+            <p className="mb-1 text-[10px] uppercase tracking-wider text-muted-foreground">返回值</p>
+            <pre className="overflow-x-auto whitespace-pre-wrap rounded-md bg-background px-2 py-1.5 font-mono text-[11px] leading-relaxed text-muted-foreground">
+              {data.value}
+            </pre>
+          </div>
+        )}
+        {Array.isArray(data.figures) && data.figures.length > 0 && (
+          <div className="grid gap-2">
+            {data.figures.map((b64: string, i: number) => (
+              <img
+                key={i}
+                src={`data:image/png;base64,${b64}`}
+                alt={`figure ${i + 1}`}
+                className="w-full rounded-md border border-border"
+              />
+            ))}
+          </div>
+        )}
+        {data.error && (
+          <pre className="overflow-x-auto whitespace-pre-wrap rounded-md bg-destructive/10 px-2 py-1.5 font-mono text-[11px] leading-relaxed text-destructive">
+            {data.error}
+          </pre>
+        )}
+        {Array.isArray(data.tablesLoaded) && data.tablesLoaded.length > 0 && (
+          <p className="text-[10px] text-muted-foreground">
+            注入 DataFrame: {data.tablesLoaded.join(", ")}
+          </p>
+        )}
+      </div>
+    );
+  }
   if (name === "query_sql" && Array.isArray(data.rows)) {
+
     const rows = data.rows.slice(0, 8);
     const cols: string[] = data.columns || (rows[0] ? Object.keys(rows[0]) : []);
     if (!rows.length) return <p className="px-3 py-2 text-xs text-muted-foreground">空结果</p>;
