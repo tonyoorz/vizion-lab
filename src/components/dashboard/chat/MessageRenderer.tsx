@@ -202,9 +202,13 @@ function ToolBlock({
           {status === "ok" && result?.data?.rowCount != null && (
             <span>{result.data.rowCount} 行</span>
           )}
+          {status === "ok" && toolName === "run_python" && Array.isArray(result?.data?.figures) && result.data.figures.length > 0 && (
+            <span>{result.data.figures.length} 图</span>
+          )}
           {status === "error" && <span className="text-destructive">失败</span>}
           {status === "writing" && <span>生成中</span>}
           {status === "running" && <span>执行中</span>}
+
           <ChevronDown className={`h-3 w-3 transition-transform ${open ? "rotate-180" : ""}`} />
         </span>
       </button>
