@@ -27,6 +27,8 @@ import SlashMenu, { SLASH_COMMANDS, SlashCommand } from "../chat/SlashMenu";
 import { segmentsToPlainText, parseAgentStream, extractToolCalls } from "../chat/agentParser";
 import { duckdbManager, isDuckdbFile, TableInfo } from "@/lib/duckdb/client";
 import { profileTable, riskScan, summarizeSchemaForPrompt } from "@/lib/duckdb/profile";
+import { pyodideManager } from "@/lib/pyodide/client";
+
 
 type Role = "user" | "assistant";
 interface Attachment {
