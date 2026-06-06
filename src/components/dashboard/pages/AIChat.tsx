@@ -57,8 +57,10 @@ interface Msg {
   content: string;
   attachments?: Attachment[];
   meta?: { ms?: number; chars?: number; model?: string };
-  hidden?: boolean; // tool_result messages — sent to model, not shown
+  hidden?: boolean; // tool results — sent to model, not shown
   toolResults?: Record<string, ToolResult>;
+  toolCalls?: ToolCallRecord[];   // assistant msg: native tool_calls
+  toolMessages?: ToolRoleMsg[];   // hidden carrier: tool-role replies
 }
 interface Conversation {
   id: string;
