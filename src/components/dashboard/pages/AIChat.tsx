@@ -130,6 +130,7 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
   const [transcribing, setTranscribing] = useState(false);
   const [dbTables, setDbTables] = useState<TableInfo[]>(duckdbManager.listTables());
   const [dbLoading, setDbLoading] = useState(false);
+  const [canvasArtifact, setCanvasArtifact] = useState<Artifact | null>(null);
 
   useEffect(() => {
     const unsub = duckdbManager.subscribe(() => setDbTables(duckdbManager.listTables()));
