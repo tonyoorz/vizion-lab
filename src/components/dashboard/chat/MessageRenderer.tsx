@@ -16,6 +16,7 @@ import {
   Table as TableIcon,
   Play,
   Terminal,
+  PanelRightOpen,
 
 } from "lucide-react";
 import {
