@@ -598,11 +598,13 @@ function ChartBlock({
   title,
   text,
   closed,
+  onOpenCanvas,
 }: {
   chartType: "line" | "bar" | "area" | "pie";
   title?: string;
   text: string;
   closed: boolean;
+  onOpenCanvas?: (a: import("./ArtifactCanvas").Artifact) => void;
 }) {
   const spec = useMemo(() => {
     if (!closed) return null;
