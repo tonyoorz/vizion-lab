@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import MessageRenderer, { ToolResult } from "../chat/MessageRenderer";
+import DataHud from "../chat/DataHud";
 import SlashMenu, { SLASH_COMMANDS, SlashCommand } from "../chat/SlashMenu";
 import { segmentsToPlainText, parseAgentStream } from "../chat/agentParser";
 import { duckdbManager, isDuckdbFile, TableInfo } from "@/lib/duckdb/client";
@@ -1042,32 +1043,7 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            {(dbTables.length > 0 || dbLoading) && (
-              <div className="flex items-center gap-1.5 rounded-md border border-border bg-card px-2 py-1 text-[11px]">
-                {dbLoading ? (
-                  <Loader2 className="h-3 w-3 animate-spin text-primary" />
-                ) : (
-                  <span className="relative flex h-1.5 w-1.5">
-                    <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-500 opacity-60" />
-                    <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-500" />
-                  </span>
-                )}
-                <Database className="h-3 w-3 text-muted-foreground" />
-                <span className="font-medium text-foreground">DuckDB</span>
-                <span className="text-muted-foreground">
-                  {dbTables.length} 表 · {dbTables.reduce((s, t) => s + t.rows, 0).toLocaleString()} 行
-                </span>
-                <button
-                  onClick={() => {
-                    if (confirm("断开本地 DuckDB 数据？")) duckdbManager.reset();
-                  }}
-                  className="ml-1 rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
-                  title="断开"
-                >
-                  <X className="h-3 w-3" />
-                </button>
-              </div>
-            )}
+            <DataHud tables={dbTables} loading={dbLoading} />
             <select
               value={model}
               onChange={(e) => setModel(e.target.value)}
