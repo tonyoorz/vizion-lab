@@ -664,6 +664,15 @@ function ChartBlock({
         <p className="text-xs font-semibold text-foreground">
           {title || "数据图表"}
         </p>
+        {onOpenCanvas && (
+          <button
+            onClick={() => onOpenCanvas({ kind: "chart", title, chartType, spec })}
+            title="在画布中打开"
+            className="ml-auto inline-flex items-center gap-1 rounded-md border border-border bg-background px-1.5 py-0.5 text-[10px] text-foreground hover:border-primary/40 hover:text-primary"
+          >
+            <PanelRightOpen className="h-3 w-3" /> 画布
+          </button>
+        )}
       </div>
       <div className="h-64 w-full p-3">
         <ResponsiveContainer width="100%" height="100%">
