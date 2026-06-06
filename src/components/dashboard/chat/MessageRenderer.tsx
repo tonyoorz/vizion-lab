@@ -149,6 +149,9 @@ function ToolBlock({
     list_tables: "列出表",
     risk_scan: "风险扫描",
     run_python: "Python 代码",
+    forecast: "时序预测",
+    detect_anomaly: "异常检测",
+    web_search: "联网搜索",
   };
   const label = labelMap[toolName] || toolName;
 
