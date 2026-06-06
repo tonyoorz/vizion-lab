@@ -139,6 +139,7 @@ function ToolBlock({
   text,
   closed,
   result,
+  onOpenCanvas,
 }: {
   toolName: string;
   toolId: string;
@@ -146,6 +147,7 @@ function ToolBlock({
   text: string;
   closed: boolean;
   result?: ToolResult;
+  onOpenCanvas?: (a: import("./ArtifactCanvas").Artifact) => void;
 }) {
   const [open, setOpen] = useState(false);
   const labelMap: Record<string, string> = {
