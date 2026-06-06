@@ -171,6 +171,33 @@ function ToolBlock({
         : "error";
   const target = args?.table || args?.name;
 
+  const canCanvas =
+    onOpenCanvas && status === "ok" &&
+    ((toolName === "query_sql" && Array.isArray(result?.data?.rows)) ||
+     (toolName === "run_python"));
+  const openCanvas = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!onOpenCanvas || !result?.ok) return;
+    if (toolName === "query_sql") {
+      onOpenCanvas({
+        kind: "sql",
+        title: args?.table ? `查询 · ${args.table}` : "SQL 查询",
+        sql: text.trim() || "",
+        columns: result.data.columns || [],
+        rows: result.data.rows || [],
+        rowCount: result.data.rowCount ?? result.data.rows?.length ?? 0,
+      });
+    } else if (toolName === "run_python") {
+      onOpenCanvas({
+        kind: "python",
+        title: "Python 执行",
+        stdout: result.data?.stdout,
+        value: result.data?.value,
+        figures: result.data?.figures,
+      });
+    }
+  };
+
   return (
     <div className="overflow-hidden rounded-xl border border-border bg-card">
       <button
