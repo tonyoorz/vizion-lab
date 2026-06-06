@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import MessageRenderer, { ToolResult } from "../chat/MessageRenderer";
+import ArtifactCanvas, { Artifact } from "../chat/ArtifactCanvas";
 import DataHud from "../chat/DataHud";
 import SlashMenu, { SLASH_COMMANDS, SlashCommand } from "../chat/SlashMenu";
 import { segmentsToPlainText, parseAgentStream } from "../chat/agentParser";
