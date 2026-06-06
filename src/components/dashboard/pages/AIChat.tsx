@@ -651,6 +651,7 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
       }));
 
       // ----- Tool execution loop (native function calling) -----
+      // Update UI after EACH tool so cards visibly transition running → ok/error.
       if (collectedCalls.length && round < MAX_TOOL_ROUNDS && !controller.signal.aborted) {
         const results: Record<string, ToolResult> = {};
         const toolMessages: ToolRoleMsg[] = [];
@@ -661,13 +662,17 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
             ? JSON.stringify(truncateResultForModel(r.data))
             : JSON.stringify({ error: r.error });
           toolMessages.push({ tool_call_id: tc.id, content: payload });
+          // ⚡ incremental render — single-result update
+          updateActive((c) => ({
+            ...c,
+            messages: c.messages.map((m) =>
+              m.id === assistantMsgId
+                ? { ...m, toolResults: { ...(m.toolResults || {}), [tc.id]: r } }
+                : m,
+            ),
+            updatedAt: Date.now(),
+          }));
         }
-        updateActive((c) => ({
-          ...c,
-          messages: c.messages.map((m) =>
-            m.id === assistantMsgId ? { ...m, toolResults: { ...(m.toolResults || {}), ...results } } : m,
-          ),
-        }));
 
         const hiddenMsg: Msg = {
           id: newId(),
