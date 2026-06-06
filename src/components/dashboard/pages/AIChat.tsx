@@ -399,12 +399,41 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
   };
 
   // ----- core send -----
-  const buildGatewayMessages = (history: Msg[]) =>
-    history.map((m) => {
-      if (m.role !== "user" || !m.attachments?.length) {
-        return { role: m.role, content: m.content };
+  // Strip our display-only XML tags so the model only sees clean text + structured tool_calls.
+  const stripDisplayTags = (s: string) =>
+    s
+      .replace(/<tool\b[^>]*>[\s\S]*?<\/tool>/gi, "")
+      .replace(/<tool_result\b[^>]*>[\s\S]*?<\/tool_result>/gi, "")
+      .trim();
+
+  const buildGatewayMessages = (history: Msg[]) => {
+    const out: any[] = [];
+    for (const m of history) {
+      // Hidden carrier for tool-role replies → emit one OpenAI {role:"tool"} per result.
+      if (m.hidden && m.toolMessages?.length) {
+        for (const tm of m.toolMessages) {
+          out.push({ role: "tool", tool_call_id: tm.tool_call_id, content: tm.content });
+        }
+        continue;
       }
-      // Build text prefix from extracted file contents
+      if (m.role === "assistant") {
+        const cleaned = stripDisplayTags(m.content || "");
+        const msg: any = { role: "assistant", content: cleaned || null };
+        if (m.toolCalls?.length) {
+          msg.tool_calls = m.toolCalls.map((tc) => ({
+            id: tc.id,
+            type: "function",
+            function: { name: tc.name, arguments: tc.arguments || "{}" },
+          }));
+        }
+        out.push(msg);
+        continue;
+      }
+      // User message
+      if (!m.attachments?.length) {
+        out.push({ role: "user", content: m.content });
+        continue;
+      }
       const fileBlocks: string[] = [];
       for (const a of m.attachments) {
         if (a.kind === "file" && a.extractedText) {
@@ -417,7 +446,8 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
       const textBody = [fileBlocks.join("\n\n"), m.content].filter(Boolean).join("\n\n");
       const hasImage = m.attachments.some((a) => a.kind === "image" && a.dataUrl);
       if (!hasImage) {
-        return { role: "user", content: textBody || "(附件)" };
+        out.push({ role: "user", content: textBody || "(附件)" });
+        continue;
       }
       const parts: any[] = [{ type: "text", text: textBody || "(图片)" }];
       for (const a of m.attachments) {
@@ -425,8 +455,10 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
           parts.push({ type: "image_url", image_url: { url: a.dataUrl } });
         }
       }
-      return { role: "user", content: parts };
-    });
+      out.push({ role: "user", content: parts });
+    }
+    return out;
+  };
 
   // Truncate tool data before sending back to the model (keep token budget sane).
   const truncateResultForModel = (data: any): any => {
@@ -440,7 +472,6 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
         rows: data.rows.slice(0, 50),
       };
     }
-    // run_python: strip base64 figures from model payload (keep only metadata)
     if (data && typeof data === "object" && "stdout" in data && "figures" in data) {
       return {
         ok: data.ok,
@@ -456,6 +487,25 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
     return data;
   };
 
+  // Render a synthetic <tool> tag into assistant content so the existing UI block renders.
+  // Includes id + name + key arg attrs so ToolBlock can show a meaningful label.
+  const synthesizeToolTag = (tc: ToolCallRecord): string => {
+    let parsed: Record<string, any> = {};
+    try { parsed = JSON.parse(tc.arguments || "{}"); } catch {}
+    const attrs: string[] = [`name="${tc.name}"`, `id="${tc.id}"`];
+    if (parsed.table) attrs.push(`table="${escapeAttr(String(parsed.table))}"`);
+    if (parsed.query) attrs.push(`query="${escapeAttr(String(parsed.query).slice(0, 60))}"`);
+    if (typeof parsed.horizon === "number") attrs.push(`horizon="${parsed.horizon}"`);
+    let body = "";
+    if (tc.name === "query_sql" && typeof parsed.sql === "string") body = parsed.sql;
+    else if (tc.name === "run_python" && typeof parsed.code === "string") body = parsed.code;
+    else body = "";
+    return `\n<tool ${attrs.join(" ")}>${escapeXml(body)}</tool>\n`;
+  };
+
+  const escapeAttr = (s: string) => s.replace(/"/g, "&quot;").replace(/[<>&]/g, "");
+  const escapeXml = (s: string) =>
+    s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
   const runStream = async (history: Msg[], assistantMsgId: string, round = 0) => {
     setStreaming(true);
@@ -472,6 +522,11 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
     const schema = summarizeSchemaForPrompt();
     if (schema) ctxParts.push(schema);
     const contextStr = ctxParts.join("\n\n") || undefined;
+    const hasData = duckdbManager.listTables().length > 0;
+
+    // Accumulate streaming tool_calls deltas by index.
+    const toolAcc: Record<number, { id: string; name: string; arguments: string }> = {};
+    let acc = "";
 
     try {
       const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/chat`;
@@ -485,6 +540,8 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
           messages: buildGatewayMessages(history),
           model,
           context: contextStr,
+          // Only advertise tools when there's something to operate on (web_search always works).
+          tools: TOOL_SCHEMAS,
         }),
         signal: controller.signal,
       });
@@ -505,7 +562,6 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
       const reader = resp.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
-      let acc = "";
       let done = false;
 
       while (!done) {
@@ -519,13 +575,12 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
           if (line.endsWith("\r")) line = line.slice(0, -1);
           if (!line.startsWith("data: ")) continue;
           const json = line.slice(6).trim();
-          if (json === "[DONE]") {
-            done = true;
-            break;
-          }
+          if (json === "[DONE]") { done = true; break; }
           try {
             const parsed = JSON.parse(json);
-            const chunk = parsed.choices?.[0]?.delta?.content as string | undefined;
+            const delta = parsed.choices?.[0]?.delta;
+            if (!delta) continue;
+            const chunk = delta.content as string | undefined;
             if (chunk) {
               acc += chunk;
               updateActive((c) => ({
@@ -535,6 +590,16 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
                 ),
                 updatedAt: Date.now(),
               }));
+            }
+            const tcs = delta.tool_calls as Array<any> | undefined;
+            if (tcs) {
+              for (const tc of tcs) {
+                const idx = tc.index ?? 0;
+                if (!toolAcc[idx]) toolAcc[idx] = { id: "", name: "", arguments: "" };
+                if (tc.id) toolAcc[idx].id = tc.id;
+                if (tc.function?.name) toolAcc[idx].name = tc.function.name;
+                if (tc.function?.arguments) toolAcc[idx].arguments += tc.function.arguments;
+              }
             }
           } catch {
             buffer = line + "\n" + buffer;
@@ -555,47 +620,60 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
       setStreaming(false);
       abortRef.current = null;
       const ms = Math.round(performance.now() - startedAt);
-      let finalContent = "";
-      updateActive((c) => {
-        const msgs = c.messages.map((m) => {
-          if (m.id === assistantMsgId) {
-            finalContent = m.content || "";
-            return { ...m, meta: { ms, chars: finalContent.length, model: usedModel } };
-          }
-          return m;
-        });
-        return { ...c, messages: msgs };
-      });
 
-      // ----- Tool execution loop (DuckDB) -----
-      const toolCalls = extractToolCalls(finalContent);
-      if (toolCalls.length && round < 4 && !controller.signal.aborted) {
+      const collectedCalls: ToolCallRecord[] = Object.values(toolAcc)
+        .filter((c) => c.name)
+        .map((c, i) => ({
+          id: c.id || `call_${Date.now()}_${i}`,
+          name: c.name,
+          arguments: c.arguments || "{}",
+        }));
+
+      // Append synthetic <tool> tags to the assistant content so the existing UI renders them.
+      let finalContent = acc;
+      if (collectedCalls.length) {
+        finalContent = acc + collectedCalls.map(synthesizeToolTag).join("");
+      }
+
+      updateActive((c) => ({
+        ...c,
+        messages: c.messages.map((m) =>
+          m.id === assistantMsgId
+            ? {
+                ...m,
+                content: finalContent,
+                toolCalls: collectedCalls.length ? collectedCalls : undefined,
+                meta: { ms, chars: finalContent.length, model: usedModel },
+              }
+            : m,
+        ),
+      }));
+
+      // ----- Tool execution loop (native function calling) -----
+      if (collectedCalls.length && round < MAX_TOOL_ROUNDS && !controller.signal.aborted) {
         const results: Record<string, ToolResult> = {};
-        for (const tc of toolCalls) {
-          results[tc.toolId] = await executeTool(tc.toolName, tc.text, tc.args);
+        const toolMessages: ToolRoleMsg[] = [];
+        for (const tc of collectedCalls) {
+          const r = await executeTool(tc.name, tc.arguments);
+          results[tc.id] = r;
+          const payload = r.ok
+            ? JSON.stringify(truncateResultForModel(r.data))
+            : JSON.stringify({ error: r.error });
+          toolMessages.push({ tool_call_id: tc.id, content: payload });
         }
-        // Attach results to the assistant message for UI rendering
         updateActive((c) => ({
           ...c,
           messages: c.messages.map((m) =>
             m.id === assistantMsgId ? { ...m, toolResults: { ...(m.toolResults || {}), ...results } } : m,
           ),
         }));
-        // Build hidden tool_result message for next model turn
-        const toolResultText = toolCalls
-          .map((tc) => {
-            const r = results[tc.toolId];
-            const payload = r.ok
-              ? JSON.stringify(truncateResultForModel(r.data))
-              : JSON.stringify({ error: r.error });
-            return `<tool_result id="${tc.toolId}" name="${tc.toolName}" ok="${r.ok}">${payload}</tool_result>`;
-          })
-          .join("\n");
+
         const hiddenMsg: Msg = {
           id: newId(),
           role: "user",
-          content: toolResultText,
+          content: "",
           hidden: true,
+          toolMessages,
         };
         const nextAsst: Msg = { id: newId(), role: "assistant", content: "" };
         updateActive((c) => ({
@@ -603,12 +681,18 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
           messages: [...c.messages, hiddenMsg, nextAsst],
           updatedAt: Date.now(),
         }));
-        const nextHistory = [...history, { ...(active.messages.find((m) => m.id === assistantMsgId)!), content: finalContent }, hiddenMsg];
+
+        const updatedAssistant: Msg = {
+          id: assistantMsgId,
+          role: "assistant",
+          content: finalContent,
+          toolCalls: collectedCalls,
+        };
+        const nextHistory = [...history, updatedAssistant, hiddenMsg];
         await runStream(nextHistory, nextAsst.id, round + 1);
         return;
       }
 
-      // Auto-generate a concise title after first round
       const conv = conversations.find((c) => c.id === activeId);
       const isFirstRound =
         conv &&
@@ -621,46 +705,78 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
     }
   };
 
-  const executeTool = async (name: string, payload: string, args?: Record<string, string>): Promise<ToolResult> => {
+  // Execute a tool by name. Arguments come as a JSON string per OpenAI function-calling spec.
+  const executeTool = async (name: string, argsJson: string): Promise<ToolResult> => {
     const start = performance.now();
+    let args: any = {};
+    try { args = JSON.parse(argsJson || "{}"); } catch {
+      return { ok: false, error: `工具参数解析失败: ${argsJson?.slice(0, 100)}` };
+    }
     try {
       if (name === "list_tables") {
         return { ok: true, ms: Math.round(performance.now() - start), data: duckdbManager.listTables() };
       }
       if (name === "query_sql") {
-        const sql = payload.trim();
+        const sql = String(args.sql || "").trim();
+        if (!sql) return { ok: false, error: "sql is required" };
         const res = await duckdbManager.runQuery(sql, 200);
         return { ok: true, ms: res.ms, data: res };
       }
       if (name === "profile_table") {
-        const t = (args?.table || payload).trim();
+        const t = String(args.table || "").trim();
+        if (!t) return { ok: false, error: "table is required" };
         const res = await profileTable(t);
         return { ok: true, ms: Math.round(performance.now() - start), data: res };
       }
       if (name === "risk_scan") {
-        const t = (args?.table || payload).trim() || undefined;
+        const t = args.table ? String(args.table).trim() : undefined;
         const res = await riskScan(t);
         return { ok: true, ms: Math.round(performance.now() - start), data: res };
       }
       if (name === "run_python") {
-        const code = payload;
-        const tablesArg = (args?.tables || "").trim();
-        const tables = tablesArg
-          ? tablesArg.split(/[,\s]+/).filter(Boolean)
-          : undefined;
+        const code = String(args.code || "");
+        const tables = Array.isArray(args.tables) ? args.tables.map(String) : undefined;
         const res = await pyodideManager.run(code, tables);
-        return {
-          ok: res.ok,
-          ms: res.ms,
-          data: res,
-          error: res.ok ? undefined : res.error,
-        };
+        return { ok: res.ok, ms: res.ms, data: res, error: res.ok ? undefined : res.error };
+      }
+      if (name === "forecast") {
+        const series = Array.isArray(args.series) ? args.series.map(Number) : [];
+        const horizon = Number(args.horizon) || 6;
+        const labels = Array.isArray(args.labels) ? args.labels.map(String) : undefined;
+        const res = forecastSeries(series, horizon, labels);
+        return { ok: true, ms: Math.round(performance.now() - start), data: res };
+      }
+      if (name === "detect_anomaly") {
+        const series = Array.isArray(args.series) ? args.series.map(Number) : [];
+        const labels = Array.isArray(args.labels) ? args.labels.map(String) : undefined;
+        const res = detectAnomalies(series, labels);
+        return { ok: true, ms: Math.round(performance.now() - start), data: res };
+      }
+      if (name === "web_search") {
+        const query = String(args.query || "").trim();
+        if (!query) return { ok: false, error: "query is required" };
+        const resp = await fetch(
+          `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/web-search`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
+            },
+            body: JSON.stringify({ query }),
+          },
+        );
+        const data = await resp.json();
+        if (!resp.ok) return { ok: false, error: data?.error || `web_search ${resp.status}` };
+        return { ok: true, ms: Math.round(performance.now() - start), data };
       }
       return { ok: false, error: `未知工具: ${name}` };
     } catch (e: any) {
       return { ok: false, error: e?.message || String(e), ms: Math.round(performance.now() - start) };
     }
   };
+
+
 
 
 
