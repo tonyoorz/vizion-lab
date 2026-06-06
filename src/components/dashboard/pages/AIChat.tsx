@@ -1407,6 +1407,7 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
           </div>
         </div>
       </div>
+      <ArtifactCanvas artifact={canvasArtifact} onClose={() => setCanvasArtifact(null)} />
     </div>
   );
 };
