@@ -1189,6 +1189,7 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
                               streaming={streaming && isLastAsst}
                               onPickFollowup={isLastAsst && !streaming ? (q) => send(q) : undefined}
                               toolResults={m.toolResults}
+                              onOpenCanvas={setCanvasArtifact}
                             />
                             {m.meta && !(streaming && isLastAsst) && (
                               <MessageStats meta={m.meta} />
