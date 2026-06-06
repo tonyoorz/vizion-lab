@@ -37,6 +37,7 @@ import {
   YAxis,
 } from "recharts";
 import { AgentSegment, parseAgentStream } from "./agentParser";
+import type { Artifact } from "./ArtifactCanvas";
 
 export interface ToolResult {
   ok: boolean;
@@ -50,6 +51,7 @@ interface Props {
   streaming: boolean;
   onPickFollowup?: (q: string) => void;
   toolResults?: Record<string, ToolResult>;
+  onOpenCanvas?: (a: Artifact) => void;
 }
 
 // Replaces <cite source="x">label</cite> in markdown with a custom token,
