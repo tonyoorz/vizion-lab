@@ -16,6 +16,7 @@ import {
   Table as TableIcon,
   Play,
   Terminal,
+  PanelRightOpen,
 
 } from "lucide-react";
 import {
@@ -36,6 +37,7 @@ import {
   YAxis,
 } from "recharts";
 import { AgentSegment, parseAgentStream } from "./agentParser";
+import type { Artifact } from "./ArtifactCanvas";
 
 export interface ToolResult {
   ok: boolean;
@@ -49,6 +51,7 @@ interface Props {
   streaming: boolean;
   onPickFollowup?: (q: string) => void;
   toolResults?: Record<string, ToolResult>;
+  onOpenCanvas?: (a: Artifact) => void;
 }
 
 // Replaces <cite source="x">label</cite> in markdown with a custom token,
@@ -61,7 +64,7 @@ function preprocessCitations(md: string) {
   );
 }
 
-export default function MessageRenderer({ content, streaming, onPickFollowup, toolResults }: Props) {
+export default function MessageRenderer({ content, streaming, onPickFollowup, toolResults, onOpenCanvas }: Props) {
   const segs = parseAgentStream(content);
   const completedSteps = segs.filter((s) => s.kind === "step" && s.closed).length;
   return (
@@ -97,6 +100,7 @@ export default function MessageRenderer({ content, streaming, onPickFollowup, to
               title={s.title}
               text={s.text}
               closed={s.closed}
+              onOpenCanvas={onOpenCanvas}
             />
           );
         if (s.kind === "tool")
@@ -109,6 +113,7 @@ export default function MessageRenderer({ content, streaming, onPickFollowup, to
               text={s.text}
               closed={s.closed}
               result={toolResults?.[s.toolId]}
+              onOpenCanvas={onOpenCanvas}
             />
           );
         if (s.kind === "followup")
@@ -134,6 +139,7 @@ function ToolBlock({
   text,
   closed,
   result,
+  onOpenCanvas,
 }: {
   toolName: string;
   toolId: string;
@@ -141,6 +147,7 @@ function ToolBlock({
   text: string;
   closed: boolean;
   result?: ToolResult;
+  onOpenCanvas?: (a: import("./ArtifactCanvas").Artifact) => void;
 }) {
   const [open, setOpen] = useState(false);
   const labelMap: Record<string, string> = {
@@ -163,6 +170,33 @@ function ToolBlock({
         ? "ok"
         : "error";
   const target = args?.table || args?.name;
+
+  const canCanvas =
+    onOpenCanvas && status === "ok" &&
+    ((toolName === "query_sql" && Array.isArray(result?.data?.rows)) ||
+     (toolName === "run_python"));
+  const openCanvas = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!onOpenCanvas || !result?.ok) return;
+    if (toolName === "query_sql") {
+      onOpenCanvas({
+        kind: "sql",
+        title: args?.table ? `查询 · ${args.table}` : "SQL 查询",
+        sql: text.trim() || "",
+        columns: result.data.columns || [],
+        rows: result.data.rows || [],
+        rowCount: result.data.rowCount ?? result.data.rows?.length ?? 0,
+      });
+    } else if (toolName === "run_python") {
+      onOpenCanvas({
+        kind: "python",
+        title: "Python 执行",
+        stdout: result.data?.stdout,
+        value: result.data?.value,
+        figures: result.data?.figures,
+      });
+    }
+  };
 
   return (
     <div className="overflow-hidden rounded-xl border border-border bg-card">
@@ -212,6 +246,16 @@ function ToolBlock({
           {status === "writing" && <span>生成中</span>}
           {status === "running" && <span>执行中</span>}
 
+          {canCanvas && (
+            <span
+              role="button"
+              onClick={openCanvas}
+              title="在画布中打开"
+              className="inline-flex items-center gap-1 rounded-md border border-border bg-background px-1.5 py-0.5 text-foreground hover:border-primary/40 hover:text-primary"
+            >
+              <PanelRightOpen className="h-3 w-3" /> 画布
+            </span>
+          )}
           <ChevronDown className={`h-3 w-3 transition-transform ${open ? "rotate-180" : ""}`} />
         </span>
       </button>
@@ -554,11 +598,13 @@ function ChartBlock({
   title,
   text,
   closed,
+  onOpenCanvas,
 }: {
   chartType: "line" | "bar" | "area" | "pie";
   title?: string;
   text: string;
   closed: boolean;
+  onOpenCanvas?: (a: import("./ArtifactCanvas").Artifact) => void;
 }) {
   const spec = useMemo(() => {
     if (!closed) return null;
@@ -618,6 +664,15 @@ function ChartBlock({
         <p className="text-xs font-semibold text-foreground">
           {title || "数据图表"}
         </p>
+        {onOpenCanvas && (
+          <button
+            onClick={() => onOpenCanvas({ kind: "chart", title, chartType, spec })}
+            title="在画布中打开"
+            className="ml-auto inline-flex items-center gap-1 rounded-md border border-border bg-background px-1.5 py-0.5 text-[10px] text-foreground hover:border-primary/40 hover:text-primary"
+          >
+            <PanelRightOpen className="h-3 w-3" /> 画布
+          </button>
+        )}
       </div>
       <div className="h-64 w-full p-3">
         <ResponsiveContainer width="100%" height="100%">

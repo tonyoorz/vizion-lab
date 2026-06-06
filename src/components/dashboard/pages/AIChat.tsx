@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import MessageRenderer, { ToolResult } from "../chat/MessageRenderer";
+import ArtifactCanvas, { Artifact } from "../chat/ArtifactCanvas";
 import DataHud from "../chat/DataHud";
 import SlashMenu, { SLASH_COMMANDS, SlashCommand } from "../chat/SlashMenu";
 import { segmentsToPlainText, parseAgentStream } from "../chat/agentParser";
@@ -129,6 +130,7 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
   const [transcribing, setTranscribing] = useState(false);
   const [dbTables, setDbTables] = useState<TableInfo[]>(duckdbManager.listTables());
   const [dbLoading, setDbLoading] = useState(false);
+  const [canvasArtifact, setCanvasArtifact] = useState<Artifact | null>(null);
 
   useEffect(() => {
     const unsub = duckdbManager.subscribe(() => setDbTables(duckdbManager.listTables()));
@@ -1187,6 +1189,7 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
                               streaming={streaming && isLastAsst}
                               onPickFollowup={isLastAsst && !streaming ? (q) => send(q) : undefined}
                               toolResults={m.toolResults}
+                              onOpenCanvas={setCanvasArtifact}
                             />
                             {m.meta && !(streaming && isLastAsst) && (
                               <MessageStats meta={m.meta} />
@@ -1404,6 +1407,7 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
           </div>
         </div>
       </div>
+      <ArtifactCanvas artifact={canvasArtifact} onClose={() => setCanvasArtifact(null)} />
     </div>
   );
 };
