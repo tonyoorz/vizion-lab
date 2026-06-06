@@ -24,10 +24,17 @@ import {
 import { motion, AnimatePresence } from "framer-motion";
 import MessageRenderer, { ToolResult } from "../chat/MessageRenderer";
 import SlashMenu, { SLASH_COMMANDS, SlashCommand } from "../chat/SlashMenu";
-import { segmentsToPlainText, parseAgentStream, extractToolCalls } from "../chat/agentParser";
+import { segmentsToPlainText, parseAgentStream } from "../chat/agentParser";
 import { duckdbManager, isDuckdbFile, TableInfo } from "@/lib/duckdb/client";
 import { profileTable, riskScan, summarizeSchemaForPrompt } from "@/lib/duckdb/profile";
 import { pyodideManager } from "@/lib/pyodide/client";
+import { TOOL_SCHEMAS } from "@/lib/tools/schemas";
+import { forecastSeries } from "@/lib/tools/forecast";
+import { detectAnomalies } from "@/lib/tools/anomaly";
+
+interface ToolCallRecord { id: string; name: string; arguments: string }
+interface ToolRoleMsg { tool_call_id: string; content: string }
+const MAX_TOOL_ROUNDS = 10;
 
 
 type Role = "user" | "assistant";
