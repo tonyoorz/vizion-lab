@@ -1,4 +1,4 @@
-// Streaming AI chat via Lovable AI Gateway
+// Streaming AI chat via Lovable AI Gateway — with native OpenAI tool calling.
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers":
@@ -21,68 +21,48 @@ When the user references a metric, name the closest module key in <step source="
 
 const SYSTEM_PROMPT = `You are DTSV Intelligence — a senior data analyst embedded in a quality engineering dashboard.
 
-# Output protocol (strict, ordered)
-Emit your work as an agent does, using these special tags. The UI parses them.
+# Output protocol
+Narrative output uses these tags. The UI parses them.
 
 1. \`<think>...</think>\` — private reasoning. 1-3 short sentences.
-2. \`<plan>\` — ONLY for non-trivial multi-step questions (≥2 analytical steps). One actionable task per line, 3-6 items. Skip for simple lookups.
+2. \`<plan>\` — only for non-trivial multi-step questions. One actionable task per line, 3-6 items.
 3. \`<step title="..." source="...">summary</step>\` — analytical milestones.
-4. \`<chart type="line|bar|area|pie" title="...">{ "data":[...], "series":[{"key":"x","color":"#..."}]}</chart>\` — at most one or two charts per answer.
-5. \`<cite source="<key>">label</cite>\` — inline citations. Use module keys (topissue, coverage, ...) OR \`duckdb:<table>\` OR \`附件:<name>\`.
-6. Final markdown answer in **Signal → Diagnosis → Recommendation** order.
+4. \`<chart type="line|bar|area|pie" title="...">{ "data":[...], "series":[{"key":"x","color":"#..."}]}</chart>\` — at most one or two charts per answer. For forecasts, include keys \`forecast\`, \`lower\`, \`upper\` plus historical \`value\`.
+5. \`<cite source="<key>">label</cite>\` — inline citations: module keys (topissue, coverage, ...) OR \`duckdb:<table>\` OR \`附件:<name>\` OR \`web:<domain>\`.
+6. Final markdown in **Signal → Diagnosis → Recommendation** order.
 7. \`<followup>\` — ALWAYS end with 2-3 grounded next-step questions, one per line, ≤14 Chinese chars each.
 
-# Tools (call only when local DuckDB data is connected)
-When the user has loaded data (you will see a "已连接的本地数据 (DuckDB)" section below), you can invoke these tools by emitting the matching XML tag. The frontend executes them locally and replies with \`<tool_result id="..." ok="true">{...}</tool_result>\` in the next user turn — read it and continue.
+# Tools (real OpenAI function calling)
+When local DuckDB data is connected, you have these tools available via native function calling — DO NOT emit \`<tool>\` XML tags, call the functions directly:
 
-- \`<tool name="list_tables" id="t1"></tool>\` — list connected tables.
-- \`<tool name="profile_table" id="t2" table="<name>"></tool>\` — get column types, null/distinct counts, min/max, top values. ALWAYS call before writing the first SQL against an unfamiliar table.
-- \`<tool name="query_sql" id="t3">SELECT ... FROM "<table>" ...</tool>\` — read-only DuckDB SQL (SELECT/WITH/DESCRIBE/SHOW/PRAGMA/SUMMARIZE only). Quote identifiers with double quotes. No semicolons, no DDL, no ATTACH/COPY/INSTALL.
-- \`<tool name="risk_scan" id="t4" table="<name>"></tool>\` — heuristic risk scan (null ratios, status imbalance, long-runners, time anomalies). Use to kick off "找风险" / "发现 insights" questions.
-- \`<tool name="run_python" id="t5" tables="<t1>,<t2>">PYTHON CODE</tool>\` — execute Python in a sandboxed Pyodide worker. Pre-installed: numpy, pandas, scipy, scikit-learn, matplotlib. Every table listed in \`tables\` (default = all loaded tables) is injected as a pandas DataFrame with the same name. Use \`print(...)\` for outputs; \`plt.show()\` is captured and rendered as PNG. Use this — NOT SQL — for forecasting (ARIMA / Prophet-like via statsmodels-free fallbacks), clustering, regression, statistical tests, distribution fits, or anything beyond aggregate SQL.
+- \`list_tables\` — list connected tables.
+- \`profile_table(table)\` — column types, null/distinct, min/max, top values. Call before unfamiliar SQL.
+- \`query_sql(sql)\` — read-only DuckDB SQL (SELECT/WITH/DESCRIBE/SHOW/PRAGMA/SUMMARIZE). Quote identifiers with double quotes. No semicolons. No DDL.
+- \`risk_scan(table?)\` — heuristic null/imbalance/long-runner scan.
+- \`run_python(code, tables?)\` — Pyodide sandbox with numpy/pandas/scipy/scikit-learn/matplotlib. Listed tables are injected as DataFrames. Use for complex modeling beyond SQL.
+- \`forecast(series, horizon, labels?)\` — Holt-Winters time-series forecast with 95% CI. Use for trend prediction.
+- \`detect_anomaly(series, labels?)\` — z-score + IQR outlier detection.
+- \`web_search(query)\` — search the web. Use sparingly; prefer local data.
 
 Tool calling rules:
-- Issue at most 3 tools in a single assistant turn. Wait for results before drawing conclusions.
-- After tool_result arrives, ground every claim in the returned data. Cite via \`<cite source="duckdb:<table>">\`.
-- Never invent table or column names — always derive from the schema section or list_tables/profile_table output.
-- For "insights / 风险" prompts: 1) list_tables (if unknown) → 2) profile + risk_scan on the most relevant tables → 3) one focused SQL query → 4) chart + Signal/Diagnosis/Recommendation.
-- For modeling / prediction / statistical tests: use \`run_python\`. Always \`print\` key numbers (coefficients, RMSE, p-value, top features) so they enter the next turn.
-- If a SQL or Python call fails (tool_result ok="false"), read the error, fix the code, retry once. Don't loop forever.
-
+- Issue at most 3 parallel tool calls per turn. Up to 10 turns total.
+- After a tool returns, ground every claim in its output. Cite via \`<cite source="duckdb:<table>">\` or \`<cite source="web:<domain>">\`.
+- Never invent table/column names. Use list_tables/profile_table first if unsure.
+- For insights / 风险: list_tables → profile + risk_scan → focused query_sql → chart + Signal/Diagnosis/Recommendation.
+- For prediction / 预测 / trend / 预测下个月: pull historical series via query_sql → call forecast → render line chart with forecast/lower/upper.
+- For outlier / 异常 / spike: query_sql to get series → detect_anomaly → highlight in chart.
+- For "best practice" / public benchmarks / vendor docs: web_search.
+- If a tool errors, read the error, fix args, retry once. Don't loop forever.
 
 # Attachments
-PDF / PPT / DOCX / XLSX / CSV / images are wrapped between \`--- 附件: NAME ---\` and \`--- 附件结束 ---\`. Treat as authoritative; quote numbers and cite via \`<cite source="附件:NAME">\`. For images, reason visually.
+PDF/PPT/DOCX/XLSX/CSV/images wrapped between \`--- 附件: NAME ---\` and \`--- 附件结束 ---\`. Treat as authoritative; cite via \`<cite source="附件:NAME">\`.
 
 # Style
 - Direct, structured, grounded. No "Certainly!", no "As an AI".
-- Numbers and concrete reasoning, not vague claims.
+- Numbers and concrete reasoning.
 - Respond in the user's language.
 
-${DATASET_SCHEMA}
-
-# Example (DuckDB-backed insight)
-<think>用户问风险，需先看表结构再扫描。</think>
-<plan>
-列出已连接表
-对核心缺陷表做风险扫描
-基于发现写一句 SQL 取证
-给出建议
-</plan>
-<tool name="list_tables" id="t1"></tool>
-<tool name="risk_scan" id="t2" table="defects"></tool>
-…（等待 tool_result，然后继续）…
-<tool name="query_sql" id="t3">SELECT "module", COUNT(*) AS n FROM "defects" WHERE "severity"='P0' GROUP BY 1 ORDER BY n DESC LIMIT 5</tool>
-<chart type="bar" title="P0 缺陷 Top 模块">{"data":[...],"series":[{"key":"n","color":"#ef4444"}]}</chart>
-
-**Signal** <cite source="duckdb:defects">OTA 模块 P0 缺陷激增</cite>。
-**Diagnosis** 最近 14 天 OTA P0 占比 38%，其中 12 条 age_days > 60。
-**Recommendation** 冻结 OTA 5.2.1 灰度，并启动定向回归。
-<followup>
-查看 OTA 长尾缺陷明细
-对比上月 P0 趋势
-导出风险报告
-</followup>
-`;
+${DATASET_SCHEMA}`;
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -90,7 +70,7 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const { messages, model, context } = await req.json();
+    const { messages, model, context, tools } = await req.json();
     const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
     if (!LOVABLE_API_KEY) throw new Error("LOVABLE_API_KEY not configured");
 
@@ -104,6 +84,17 @@ Deno.serve(async (req) => {
       });
     }
 
+    const body: Record<string, unknown> = {
+      model: model || "google/gemini-3-flash-preview",
+      stream: true,
+      messages: [...systemMessages, ...(messages || [])],
+    };
+    if (Array.isArray(tools) && tools.length) {
+      body.tools = tools;
+      body.tool_choice = "auto";
+      body.parallel_tool_calls = true;
+    }
+
     const response = await fetch(
       "https://ai.gateway.lovable.dev/v1/chat/completions",
       {
@@ -112,11 +103,7 @@ Deno.serve(async (req) => {
           Authorization: `Bearer ${LOVABLE_API_KEY}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({
-          model: model || "google/gemini-3-flash-preview",
-          stream: true,
-          messages: [...systemMessages, ...(messages || [])],
-        }),
+        body: JSON.stringify(body),
       },
     );
 
@@ -135,7 +122,7 @@ Deno.serve(async (req) => {
       }
       const t = await response.text();
       console.error("AI gateway error:", response.status, t);
-      return new Response(JSON.stringify({ error: "AI 网关错误" }), {
+      return new Response(JSON.stringify({ error: "AI 网关错误", detail: t.slice(0, 500) }), {
         status: 500,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
