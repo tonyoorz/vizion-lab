@@ -64,7 +64,7 @@ function preprocessCitations(md: string) {
   );
 }
 
-export default function MessageRenderer({ content, streaming, onPickFollowup, toolResults }: Props) {
+export default function MessageRenderer({ content, streaming, onPickFollowup, toolResults, onOpenCanvas }: Props) {
   const segs = parseAgentStream(content);
   const completedSteps = segs.filter((s) => s.kind === "step" && s.closed).length;
   return (
@@ -100,6 +100,7 @@ export default function MessageRenderer({ content, streaming, onPickFollowup, to
               title={s.title}
               text={s.text}
               closed={s.closed}
+              onOpenCanvas={onOpenCanvas}
             />
           );
         if (s.kind === "tool")
@@ -112,6 +113,7 @@ export default function MessageRenderer({ content, streaming, onPickFollowup, to
               text={s.text}
               closed={s.closed}
               result={toolResults?.[s.toolId]}
+              onOpenCanvas={onOpenCanvas}
             />
           );
         if (s.kind === "followup")
