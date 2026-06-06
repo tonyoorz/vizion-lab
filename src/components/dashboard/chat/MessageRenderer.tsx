@@ -246,6 +246,16 @@ function ToolBlock({
           {status === "writing" && <span>生成中</span>}
           {status === "running" && <span>执行中</span>}
 
+          {canCanvas && (
+            <span
+              role="button"
+              onClick={openCanvas}
+              title="在画布中打开"
+              className="inline-flex items-center gap-1 rounded-md border border-border bg-background px-1.5 py-0.5 text-foreground hover:border-primary/40 hover:text-primary"
+            >
+              <PanelRightOpen className="h-3 w-3" /> 画布
+            </span>
+          )}
           <ChevronDown className={`h-3 w-3 transition-transform ${open ? "rotate-180" : ""}`} />
         </span>
       </button>
