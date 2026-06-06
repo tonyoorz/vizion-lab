@@ -122,6 +122,12 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
 
   useEffect(() => {
     const unsub = duckdbManager.subscribe(() => setDbTables(duckdbManager.listTables()));
+    // Auto-load files declared in /public/database/manifest.json (real local DB connection).
+    setDbLoading(true);
+    duckdbManager
+      .autoloadManifest()
+      .catch((e) => console.warn("[duckdb] manifest autoload error", e))
+      .finally(() => setDbLoading(false));
     return () => { unsub(); };
   }, []);
 

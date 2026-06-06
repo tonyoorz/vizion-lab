@@ -193,6 +193,45 @@ class DuckDBManager {
     this.emit();
   }
 
+  /** Fetch a remote/public file and register it. Used by manifest auto-loader. */
+  async registerFromUrl(url: string, displayName?: string): Promise<TableInfo[]> {
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error(`fetch ${url} → ${resp.status}`);
+    const blob = await resp.blob();
+    const name = displayName || url.split("/").pop() || "remote";
+    const file = new File([blob], name);
+    if (name.toLowerCase().endsWith(".duckdb")) {
+      return this.registerDuckdbFile(file);
+    }
+    const info = await this.registerTabular(file);
+    return [info];
+  }
+
+  private autoloaded = false;
+  /** Load every file listed in /database/manifest.json. Idempotent. */
+  async autoloadManifest(base = "/database"): Promise<TableInfo[]> {
+    if (this.autoloaded) return [];
+    this.autoloaded = true;
+    try {
+      const resp = await fetch(`${base}/manifest.json`, { cache: "no-cache" });
+      if (!resp.ok) return [];
+      const json = await resp.json();
+      const files: string[] = Array.isArray(json?.files) ? json.files : [];
+      const added: TableInfo[] = [];
+      for (const f of files) {
+        try {
+          const infos = await this.registerFromUrl(`${base}/${f}`, f);
+          added.push(...infos);
+        } catch (e) {
+          console.warn("[duckdb] autoload failed:", f, e);
+        }
+      }
+      return added;
+    } catch {
+      return [];
+    }
+  }
+
 
   /** Run a read-only SQL statement. Throws if the statement is unsafe. */
   async runQuery(sql: string, maxRows = 500): Promise<RunResult> {
