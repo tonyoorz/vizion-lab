@@ -9,6 +9,7 @@ import {
   LineChart,
   ShieldAlert,
   TrendingUp,
+  ClipboardList,
 } from "lucide-react";
 
 export interface SlashCommand {
