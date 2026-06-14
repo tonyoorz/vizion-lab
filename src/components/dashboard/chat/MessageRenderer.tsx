@@ -17,7 +17,10 @@ import {
   Play,
   Terminal,
   PanelRightOpen,
-
+  ClipboardList,
+  Download,
+  Bug,
+  FileText,
 } from "lucide-react";
 import {
   Area,
