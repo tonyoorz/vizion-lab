@@ -136,6 +136,16 @@ export function parseAgentStream(raw: string): AgentSegment[] {
           text: inner,
           closed,
         });
+      } else if (openName === "testcases") {
+        const items = parseTestCases(inner);
+        out.push({
+          kind: "testcases",
+          module: getAttr(attrs, "module"),
+          title: getAttr(attrs, "title"),
+          items,
+          raw: inner,
+          closed,
+        });
       } else {
         out.push({
           kind: "step",
@@ -152,6 +162,47 @@ export function parseAgentStream(raw: string): AgentSegment[] {
   }
 
   return out;
+}
+
+function parseTestCases(raw: string): TestCaseItem[] {
+  const trimmed = raw.trim();
+  if (!trimmed) return [];
+  // Try JSON array first
+  try {
+    const start = trimmed.indexOf("[");
+    const end = trimmed.lastIndexOf("]");
+    if (start >= 0 && end > start) {
+      const parsed = JSON.parse(trimmed.slice(start, end + 1));
+      if (Array.isArray(parsed)) {
+        return parsed
+          .filter((x) => x && typeof x === "object")
+          .map((x, i) => ({
+            id: String(x.id ?? `TC-${i + 1}`),
+            title: String(x.title ?? "未命名用例"),
+            priority: x.priority ? String(x.priority) : undefined,
+            type: x.type ? String(x.type) : undefined,
+            preconditions: toStringArray(x.preconditions),
+            steps: toStringArray(x.steps),
+            expected: toStringArray(x.expected),
+            data: x.data ? String(x.data) : undefined,
+            linked_defect: x.linked_defect ? String(x.linked_defect) : undefined,
+            linked_req: x.linked_req ? String(x.linked_req) : undefined,
+            rationale: x.rationale ? String(x.rationale) : undefined,
+            tags: toStringArray(x.tags),
+          }));
+      }
+    }
+  } catch {
+    /* fall through */
+  }
+  return [];
+}
+
+function toStringArray(v: unknown): string[] | undefined {
+  if (!v) return undefined;
+  if (Array.isArray(v)) return v.map((x) => String(x));
+  if (typeof v === "string") return [v];
+  return undefined;
 }
 
 function pushText(out: AgentSegment[], text: string) {
