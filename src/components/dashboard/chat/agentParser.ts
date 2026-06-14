@@ -9,6 +9,21 @@
 //   <followup>question</followup>  suggested next questions (one per line)
 // Anything else is treated as final markdown body text.
 
+export interface TestCaseItem {
+  id: string;
+  title: string;
+  priority?: string;
+  type?: string;
+  preconditions?: string[];
+  steps?: string[];
+  expected?: string[];
+  data?: string;
+  linked_defect?: string;
+  linked_req?: string;
+  rationale?: string;
+  tags?: string[];
+}
+
 export type AgentSegment =
   | { kind: "think"; text: string; closed: boolean }
   | { kind: "plan"; items: string[]; closed: boolean }
@@ -34,11 +49,19 @@ export type AgentSegment =
       text: string;
       closed: boolean;
     }
+  | {
+      kind: "testcases";
+      module?: string;
+      title?: string;
+      items: TestCaseItem[];
+      raw: string;
+      closed: boolean;
+    }
   | { kind: "followup"; items: string[]; closed: boolean }
   | { kind: "text"; text: string };
 
 const TAG_RE =
-  /<(think|plan|step|chart|tool|followup)(\s[^>]*)?>|<\/(think|plan|step|chart|tool|followup)>/i;
+  /<(think|plan|step|chart|tool|testcases|followup)(\s[^>]*)?>|<\/(think|plan|step|chart|tool|testcases|followup)>/i;
 
 function getAttr(attrs: string | undefined, name: string): string | undefined {
   if (!attrs) return undefined;
