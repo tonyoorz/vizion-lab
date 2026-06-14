@@ -39,7 +39,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { AgentSegment, parseAgentStream } from "./agentParser";
+import { AgentSegment, parseAgentStream, type TestCaseItem } from "./agentParser";
 import type { Artifact } from "./ArtifactCanvas";
 
 export interface ToolResult {
