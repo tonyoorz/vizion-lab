@@ -17,7 +17,10 @@ import {
   Play,
   Terminal,
   PanelRightOpen,
-
+  ClipboardList,
+  Download,
+  Bug,
+  FileText,
 } from "lucide-react";
 import {
   Area,
@@ -36,7 +39,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { AgentSegment, parseAgentStream } from "./agentParser";
+import { AgentSegment, parseAgentStream, type TestCaseItem } from "./agentParser";
 import type { Artifact } from "./ArtifactCanvas";
 
 export interface ToolResult {
@@ -124,6 +127,17 @@ export default function MessageRenderer({ content, streaming, onPickFollowup, to
               closed={s.closed}
               streaming={streaming}
               onPick={onPickFollowup}
+            />
+          );
+        if (s.kind === "testcases")
+          return (
+            <TestCasesBlock
+              key={i}
+              module={s.module}
+              title={s.title}
+              items={s.items}
+              raw={s.raw}
+              closed={s.closed}
             />
           );
         return <TextBlock key={i} text={s.text} />;
@@ -819,6 +833,307 @@ function CodeBlock({ children }: { children: any }) {
       <pre className="!my-0 !bg-transparent overflow-x-auto p-4 text-[12.5px] leading-relaxed text-white/90">
         {children}
       </pre>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// Test Cases — grounded, multi-agent generated test case wall
+// ─────────────────────────────────────────────────────────────
+
+function priorityTone(p?: string): { bg: string; fg: string; ring: string } {
+  const k = (p || "").toUpperCase();
+  if (k === "P0" || k === "CRITICAL" || k === "高")
+    return { bg: "bg-red-500/10", fg: "text-red-600 dark:text-red-400", ring: "ring-red-500/30" };
+  if (k === "P1" || k === "HIGH")
+    return { bg: "bg-orange-500/10", fg: "text-orange-600 dark:text-orange-400", ring: "ring-orange-500/30" };
+  if (k === "P2" || k === "MED" || k === "MEDIUM" || k === "中")
+    return { bg: "bg-amber-500/10", fg: "text-amber-600 dark:text-amber-400", ring: "ring-amber-500/30" };
+  return { bg: "bg-muted", fg: "text-muted-foreground", ring: "ring-border" };
+}
+
+function typeTone(t?: string): string {
+  const k = (t || "").toLowerCase();
+  if (k.includes("异常") || k.includes("negative") || k.includes("错误"))
+    return "bg-rose-500/10 text-rose-600 dark:text-rose-400";
+  if (k.includes("边界") || k.includes("boundary"))
+    return "bg-violet-500/10 text-violet-600 dark:text-violet-400";
+  if (k.includes("回归") || k.includes("regression"))
+    return "bg-sky-500/10 text-sky-600 dark:text-sky-400";
+  if (k.includes("性能") || k.includes("perf"))
+    return "bg-cyan-500/10 text-cyan-600 dark:text-cyan-400";
+  if (k.includes("安全") || k.includes("security"))
+    return "bg-pink-500/10 text-pink-600 dark:text-pink-400";
+  return "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400";
+}
+
+function csvEscape(v: string): string {
+  if (v == null) return "";
+  const s = String(v);
+  if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
+
+function toCSV(items: TestCaseItem[]): string {
+  const headers = [
+    "ID",
+    "Title",
+    "Priority",
+    "Type",
+    "Preconditions",
+    "Steps",
+    "Expected",
+    "Data",
+    "Linked Defect",
+    "Linked Req",
+    "Rationale",
+    "Tags",
+  ];
+  const lines = [headers.join(",")];
+  for (const it of items) {
+    lines.push(
+      [
+        it.id,
+        it.title,
+        it.priority || "",
+        it.type || "",
+        (it.preconditions || []).join(" | "),
+        (it.steps || []).map((s, i) => `${i + 1}. ${s}`).join(" | "),
+        (it.expected || []).map((s, i) => `${i + 1}. ${s}`).join(" | "),
+        it.data || "",
+        it.linked_defect || "",
+        it.linked_req || "",
+        it.rationale || "",
+        (it.tags || []).join(";"),
+      ]
+        .map(csvEscape)
+        .join(","),
+    );
+  }
+  return "\ufeff" + lines.join("\n");
+}
+
+function toMarkdown(items: TestCaseItem[]): string {
+  return items
+    .map((it) => {
+      const lines: string[] = [];
+      lines.push(`### ${it.id} · ${it.title}`);
+      const meta = [it.priority && `**${it.priority}**`, it.type && `_${it.type}_`].filter(Boolean).join(" · ");
+      if (meta) lines.push(meta);
+      if (it.rationale) lines.push(`> 依据：${it.rationale}`);
+      if (it.preconditions?.length) {
+        lines.push("**前置条件**");
+        it.preconditions.forEach((s) => lines.push(`- ${s}`));
+      }
+      if (it.steps?.length) {
+        lines.push("**操作步骤**");
+        it.steps.forEach((s, i) => lines.push(`${i + 1}. ${s}`));
+      }
+      if (it.expected?.length) {
+        lines.push("**预期结果**");
+        it.expected.forEach((s, i) => lines.push(`${i + 1}. ${s}`));
+      }
+      if (it.data) lines.push(`**测试数据**：${it.data}`);
+      const refs = [
+        it.linked_req && `需求 ${it.linked_req}`,
+        it.linked_defect && `缺陷 ${it.linked_defect}`,
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      if (refs) lines.push(`_${refs}_`);
+      return lines.join("\n");
+    })
+    .join("\n\n---\n\n");
+}
+
+function TestCasesBlock({
+  module,
+  title,
+  items,
+  raw,
+  closed,
+}: {
+  module?: string;
+  title?: string;
+  items: TestCaseItem[];
+  raw: string;
+  closed: boolean;
+}) {
+  const [copied, setCopied] = useState<"csv" | "md" | null>(null);
+
+  if (!closed && items.length === 0) {
+    return (
+      <div className="flex items-center gap-2 rounded-xl border border-dashed border-border bg-card/40 px-3 py-3 text-xs text-muted-foreground">
+        <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+        正在综合历史缺陷与覆盖率缺口，生成测试用例…
+      </div>
+    );
+  }
+  if (items.length === 0) {
+    return (
+      <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">
+        测试用例解析失败，原始内容：
+        <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap font-mono text-[10px]">
+          {raw.slice(0, 600)}
+        </pre>
+      </div>
+    );
+  }
+
+  const downloadCSV = () => {
+    const csv = toCSV(items);
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `testcases_${module || "module"}_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+    setCopied("csv");
+    setTimeout(() => setCopied(null), 1400);
+  };
+
+  const copyMD = async () => {
+    await navigator.clipboard.writeText(toMarkdown(items));
+    setCopied("md");
+    setTimeout(() => setCopied(null), 1400);
+  };
+
+  return (
+    <div className="overflow-hidden rounded-xl border border-border bg-gradient-to-b from-card to-card/60">
+      <div className="flex items-center gap-2 border-b border-border/60 bg-muted/30 px-3 py-2">
+        <div className="flex h-6 w-6 items-center justify-center rounded-md bg-primary/10 text-primary">
+          <ClipboardList className="h-3.5 w-3.5" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-xs font-semibold text-foreground">
+            {title || "生成测试用例"}
+            {module && (
+              <span className="ml-2 rounded-full bg-primary/10 px-1.5 py-0.5 font-mono text-[10px] font-medium text-primary">
+                {module}
+              </span>
+            )}
+          </p>
+          <p className="text-[10px] text-muted-foreground">
+            共 {items.length} 条 · 已与历史缺陷 / 需求 / 覆盖率缺口接地
+          </p>
+        </div>
+        <button
+          onClick={copyMD}
+          className="inline-flex items-center gap-1 rounded-md border border-border bg-background px-2 py-1 text-[10px] text-foreground transition-colors hover:border-primary/40 hover:text-primary"
+        >
+          {copied === "md" ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+          Markdown
+        </button>
+        <button
+          onClick={downloadCSV}
+          className="inline-flex items-center gap-1 rounded-md border border-border bg-background px-2 py-1 text-[10px] text-foreground transition-colors hover:border-primary/40 hover:text-primary"
+        >
+          {copied === "csv" ? <Check className="h-3 w-3" /> : <Download className="h-3 w-3" />}
+          CSV
+        </button>
+      </div>
+      <div className="grid gap-2 p-2 sm:grid-cols-2">
+        {items.map((tc) => {
+          const tone = priorityTone(tc.priority);
+          return (
+            <div
+              key={tc.id}
+              className={`group/tc relative flex flex-col gap-2 rounded-lg border border-border bg-background p-3 ring-1 ring-transparent transition-all hover:border-primary/40 hover:ring-primary/10`}
+            >
+              <div className="flex items-start gap-2">
+                <span className="font-mono text-[10px] font-medium text-muted-foreground">{tc.id}</span>
+                {tc.priority && (
+                  <span
+                    className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold ring-1 ${tone.bg} ${tone.fg} ${tone.ring}`}
+                  >
+                    {tc.priority}
+                  </span>
+                )}
+                {tc.type && (
+                  <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-medium ${typeTone(tc.type)}`}>
+                    {tc.type}
+                  </span>
+                )}
+              </div>
+              <p className="text-sm font-semibold leading-snug text-foreground">{tc.title}</p>
+              {tc.rationale && (
+                <p className="rounded-md border-l-2 border-primary/40 bg-primary/5 px-2 py-1 text-[11px] leading-relaxed text-muted-foreground">
+                  <span className="mr-1 font-medium text-primary">依据</span>
+                  {tc.rationale}
+                </p>
+              )}
+              {tc.preconditions?.length ? (
+                <div>
+                  <p className="mb-0.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">前置</p>
+                  <ul className="space-y-0.5 text-[11px] text-foreground">
+                    {tc.preconditions.map((s, i) => (
+                      <li key={i} className="flex gap-1.5">
+                        <span className="text-muted-foreground">·</span>
+                        <span>{s}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+              {tc.steps?.length ? (
+                <div>
+                  <p className="mb-0.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">步骤</p>
+                  <ol className="space-y-0.5 text-[11px] text-foreground">
+                    {tc.steps.map((s, i) => (
+                      <li key={i} className="flex gap-1.5">
+                        <span className="mt-0.5 inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full bg-muted text-[9px] font-medium text-muted-foreground">
+                          {i + 1}
+                        </span>
+                        <span>{s}</span>
+                      </li>
+                    ))}
+                  </ol>
+                </div>
+              ) : null}
+              {tc.expected?.length ? (
+                <div>
+                  <p className="mb-0.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">预期</p>
+                  <ul className="space-y-0.5 text-[11px] text-foreground">
+                    {tc.expected.map((s, i) => (
+                      <li key={i} className="flex gap-1.5">
+                        <Check className="mt-0.5 h-3 w-3 shrink-0 text-emerald-500" />
+                        <span>{s}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+              {tc.data && (
+                <p className="rounded-md bg-muted/40 px-2 py-1 font-mono text-[10px] text-muted-foreground">
+                  数据 · {tc.data}
+                </p>
+              )}
+              {(tc.linked_defect || tc.linked_req || tc.tags?.length) && (
+                <div className="mt-auto flex flex-wrap items-center gap-1 border-t border-border/60 pt-2">
+                  {tc.linked_req && (
+                    <span className="inline-flex items-center gap-1 rounded-md bg-sky-500/10 px-1.5 py-0.5 text-[10px] text-sky-600 dark:text-sky-400">
+                      <FileText className="h-2.5 w-2.5" />
+                      {tc.linked_req}
+                    </span>
+                  )}
+                  {tc.linked_defect && (
+                    <span className="inline-flex items-center gap-1 rounded-md bg-rose-500/10 px-1.5 py-0.5 text-[10px] text-rose-600 dark:text-rose-400">
+                      <Bug className="h-2.5 w-2.5" />
+                      {tc.linked_defect}
+                    </span>
+                  )}
+                  {tc.tags?.map((t) => (
+                    <span key={t} className="rounded-md bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                      #{t}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }

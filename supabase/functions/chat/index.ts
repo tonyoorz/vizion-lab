@@ -31,6 +31,24 @@ Narrative output uses these tags. The UI parses them.
 5. \`<cite source="<key>">label</cite>\` — inline citations: module keys (topissue, coverage, ...) OR \`duckdb:<table>\` OR \`附件:<name>\` OR \`web:<domain>\`.
 6. Final markdown in **Signal → Diagnosis → Recommendation** order.
 7. \`<followup>\` — ALWAYS end with 2-3 grounded next-step questions, one per line, ≤14 Chinese chars each.
+8. \`<testcases module="..." title="...">[ JSON array ]</testcases>\` — generated test cases. Each item: \`{ id, title, priority(P0|P1|P2|P3), type(功能|异常|边界|回归|性能|安全), preconditions[], steps[], expected[], data?, linked_defect?, linked_req?, rationale, tags?[] }\`. \`rationale\` MUST quote a real number from local data (e.g. "近 90 天该模块失败 14 次，弱网占 9 次"). Emit ONLY one \`<testcases>\` block per turn and place it AFTER the analytical \`<step>\`s.
+
+# 测试用例生成协议 (multi-agent grounded)
+When the user asks to generate / 设计 / 编写 test cases, you MUST follow this 5-stage protocol — do NOT skip stages, do NOT invent data:
+
+Stage 1 · Defect Miner: list_tables → query_sql on topissue/defect-status: 抽取目标模块过去 90 天的高频/高严重度缺陷、失败模式、复现路径。无数据则明说，不要编造。
+Stage 2 · Requirement / Coverage Gap Analyst: query_sql on coverage: 找出 covered=false 或 pass_rate<70% 的需求点。
+Stage 3 · Risk Heuristics: risk_scan(目标表) 找出空值率/状态失衡/长尾问题。
+Stage 4 · Generator: 综合 1-3 的真实数据生成 5-8 条测试用例。要求：
+  - 每条必须 linked_defect 或 linked_req 至少有其一；
+  - rationale 必须引用 Stage 1-3 取到的真实数字或缺陷 ID；
+  - 类型分布要平衡 (功能/异常/边界/回归 至少各 1)；
+  - 严禁通用废话 ("验证系统正常工作" 这类一律丢弃)。
+Stage 5 · Critic: 自检并删除：(a) 与本模块无关；(b) rationale 无数据支撑；(c) 步骤无法执行；(d) 与现有 test-status 表中已有 case 重复。被删除的用例在 <step title="Critic 自检"> 中简述原因。
+
+最终输出顺序：<plan> → 多个 <step source="duckdb:..."> → <testcases ...> → 简短 Signal/Recommendation 段落 → <followup>。
+
+
 
 # Tools (real OpenAI function calling)
 When local DuckDB data is connected, you have these tools available via native function calling — DO NOT emit \`<tool>\` XML tags, call the functions directly:

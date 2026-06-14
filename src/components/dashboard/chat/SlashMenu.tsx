@@ -9,6 +9,7 @@ import {
   LineChart,
   ShieldAlert,
   TrendingUp,
+  ClipboardList,
 } from "lucide-react";
 
 export interface SlashCommand {
@@ -20,6 +21,14 @@ export interface SlashCommand {
 }
 
 export const SLASH_COMMANDS: SlashCommand[] = [
+  {
+    id: "gen-testcases",
+    label: "/生成测试用例",
+    hint: "多智能体接地：历史缺陷 + 覆盖率缺口 + 自批判，产出可落地用例",
+    prompt:
+      "请按【测试用例生成协议】为我生成测试用例。我感兴趣的模块/需求是：__（请补充，例如 OTA、CAN-BMS、REQ-12 或某条缺陷 ID）__。务必先调用 list_tables 与 profile_table 确认现有数据，然后从 topissue 抽取该模块近 90 天高频/高严重度的真实缺陷与失败模式，再从 coverage 找出未覆盖的需求点，最后产出 5-8 条用例并以 <testcases module=\"...\"> JSON 数组形式返回，每条用例必须 linked_defect 或 linked_req 至少有其一，rationale 必须引用真实数字。最后用 Critic 角色自检并丢弃任何似是而非、与业务无关的用例。",
+    icon: ClipboardList,
+  },
   {
     id: "risk-scan",
     label: "/数据风险扫描",
