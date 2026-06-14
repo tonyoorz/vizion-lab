@@ -126,6 +126,17 @@ export default function MessageRenderer({ content, streaming, onPickFollowup, to
               onPick={onPickFollowup}
             />
           );
+        if (s.kind === "testcases")
+          return (
+            <TestCasesBlock
+              key={i}
+              module={s.module}
+              title={s.title}
+              items={s.items}
+              raw={s.raw}
+              closed={s.closed}
+            />
+          );
         return <TextBlock key={i} text={s.text} />;
       })}
     </div>
