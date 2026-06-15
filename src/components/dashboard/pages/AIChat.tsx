@@ -1085,6 +1085,15 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
                   输入 <kbd className="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px]">/</kbd> 调用预设命令，或直接提问。
                 </p>
               </motion.div>
+              <motion.div
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.05 }}
+                className="mb-5 w-full"
+              >
+                <MissionLauncher onLaunch={(p) => send(p.prompt)} />
+              </motion.div>
+
               <div className="grid w-full gap-2 sm:grid-cols-2">
                 {SLASH_COMMANDS.slice(0, 4).map((s, i) => (
                   <motion.button
