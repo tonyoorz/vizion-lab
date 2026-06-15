@@ -1319,7 +1319,11 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
               </div>
             )}
 
+            <div className="mb-2">
+              <MissionLauncher onLaunch={(p) => send(p.prompt)} compact />
+            </div>
             <div className="relative flex items-end gap-2 rounded-2xl border border-border bg-card px-3 py-2 shadow-sm transition-colors focus-within:border-primary/50 focus-within:shadow-md">
+
               {slashOpen && (
                 <SlashMenu
                   query={slashQuery}
