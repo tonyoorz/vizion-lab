@@ -26,6 +26,7 @@ import MessageRenderer, { ToolResult } from "../chat/MessageRenderer";
 import ArtifactCanvas, { Artifact } from "../chat/ArtifactCanvas";
 import DataHud from "../chat/DataHud";
 import SlashMenu, { SLASH_COMMANDS, SlashCommand } from "../chat/SlashMenu";
+import MissionLauncher from "../chat/MissionLauncher";
 import { segmentsToPlainText, parseAgentStream } from "../chat/agentParser";
 import { duckdbManager, isDuckdbFile, TableInfo } from "@/lib/duckdb/client";
 import { profileTable, riskScan, summarizeSchemaForPrompt } from "@/lib/duckdb/profile";
