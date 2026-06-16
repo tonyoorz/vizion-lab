@@ -944,7 +944,163 @@ function toMarkdown(items: TestCaseItem[]): string {
       if (it.expected?.length) {
         lines.push("**预期结果**");
         it.expected.forEach((s, i) => lines.push(`${i + 1}. ${s}`));
-      }
+}
+
+function toXLSX(items: TestCaseItem[], module?: string, title?: string): ArrayBuffer {
+  const headers = [
+    "ID", "标题", "优先级", "类型", "前置条件", "操作步骤", "预期结果",
+    "测试数据", "关联缺陷", "关联需求", "生成依据", "标签",
+  ];
+  const rows = items.map((it) => [
+    it.id, it.title, it.priority || "", it.type || "",
+    (it.preconditions || []).join("\n"),
+    (it.steps || []).map((s, i) => `${i + 1}. ${s}`).join("\n"),
+    (it.expected || []).map((s, i) => `${i + 1}. ${s}`).join("\n"),
+    it.data || "", it.linked_defect || "", it.linked_req || "",
+    it.rationale || "", (it.tags || []).join("; "),
+  ]);
+  const ws = XLSX.utils.aoa_to_sheet([headers, ...rows]);
+  ws["!cols"] = [
+    { wch: 10 }, { wch: 36 }, { wch: 8 }, { wch: 10 }, { wch: 28 },
+    { wch: 40 }, { wch: 36 }, { wch: 22 }, { wch: 14 }, { wch: 14 },
+    { wch: 42 }, { wch: 16 },
+  ];
+  // Enable wrap text on body rows
+  const range = XLSX.utils.decode_range(ws["!ref"] || "A1");
+  for (let R = 1; R <= range.e.r; ++R) {
+    for (let C = 0; C <= range.e.c; ++C) {
+      const addr = XLSX.utils.encode_cell({ r: R, c: C });
+      if (ws[addr]) ws[addr].s = { alignment: { wrapText: true, vertical: "top" } };
+    }
+  }
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "TestCases");
+  // Summary sheet
+  const summary = [
+    ["报告标题", title || "测试用例报告"],
+    ["关联模块", module || "-"],
+    ["用例总数", items.length],
+    ["生成时间", new Date().toLocaleString("zh-CN")],
+    [],
+    ["优先级分布", ""],
+    ...Object.entries(
+      items.reduce<Record<string, number>>((acc, it) => {
+        const k = it.priority || "未标注"; acc[k] = (acc[k] || 0) + 1; return acc;
+      }, {})
+    ),
+    [],
+    ["类型分布", ""],
+    ...Object.entries(
+      items.reduce<Record<string, number>>((acc, it) => {
+        const k = it.type || "未标注"; acc[k] = (acc[k] || 0) + 1; return acc;
+      }, {})
+    ),
+  ];
+  const wsSum = XLSX.utils.aoa_to_sheet(summary);
+  wsSum["!cols"] = [{ wch: 20 }, { wch: 32 }];
+  XLSX.utils.book_append_sheet(wb, wsSum, "Summary");
+  return XLSX.write(wb, { bookType: "xlsx", type: "array" });
+}
+
+function toPDF(items: TestCaseItem[], module?: string, title?: string): Blob {
+  const doc = new jsPDF({ unit: "pt", format: "a4" });
+  const pageW = doc.internal.pageSize.getWidth();
+  const now = new Date().toLocaleString("zh-CN");
+
+  // Header
+  doc.setFillColor(15, 23, 42);
+  doc.rect(0, 0, pageW, 64, "F");
+  doc.setTextColor(255, 255, 255);
+  doc.setFontSize(16);
+  doc.text(title || "Test Case Report", 40, 30);
+  doc.setFontSize(9);
+  doc.setTextColor(200, 210, 230);
+  doc.text(
+    `Module: ${module || "-"}   |   Total: ${items.length}   |   Generated: ${now}`,
+    40, 50,
+  );
+
+  // Summary block
+  doc.setTextColor(15, 23, 42);
+  doc.setFontSize(11);
+  doc.text("Summary", 40, 92);
+  const prioCount = items.reduce<Record<string, number>>((a, it) => {
+    const k = it.priority || "N/A"; a[k] = (a[k] || 0) + 1; return a;
+  }, {});
+  const typeCount = items.reduce<Record<string, number>>((a, it) => {
+    const k = it.type || "N/A"; a[k] = (a[k] || 0) + 1; return a;
+  }, {});
+  doc.setFontSize(9);
+  doc.setTextColor(60, 70, 90);
+  doc.text(
+    `Priority: ${Object.entries(prioCount).map(([k, v]) => `${k}=${v}`).join("  ")}`,
+    40, 108,
+  );
+  doc.text(
+    `Type: ${Object.entries(typeCount).map(([k, v]) => `${k}=${v}`).join("  ")}`,
+    40, 122,
+  );
+
+  // Table of cases
+  autoTable(doc, {
+    startY: 140,
+    head: [["ID", "Title", "Priority", "Type", "Rationale"]],
+    body: items.map((it) => [
+      it.id, it.title, it.priority || "", it.type || "", it.rationale || "",
+    ]),
+    styles: { fontSize: 8, cellPadding: 4, valign: "top" },
+    headStyles: { fillColor: [30, 41, 59], textColor: 255 },
+    alternateRowStyles: { fillColor: [248, 250, 252] },
+    columnStyles: {
+      0: { cellWidth: 60 }, 1: { cellWidth: 150 },
+      2: { cellWidth: 50 }, 3: { cellWidth: 50 }, 4: { cellWidth: 200 },
+    },
+    margin: { left: 40, right: 40 },
+  });
+
+  // Per-case detail cards
+  items.forEach((it) => {
+    doc.addPage();
+    let y = 50;
+    doc.setFillColor(241, 245, 249);
+    doc.rect(40, y - 30, pageW - 80, 44, "F");
+    doc.setFontSize(13);
+    doc.setTextColor(15, 23, 42);
+    doc.text(`${it.id}  ${it.title}`, 50, y - 10);
+    doc.setFontSize(9);
+    doc.setTextColor(80, 90, 110);
+    doc.text(
+      [it.priority && `Priority: ${it.priority}`, it.type && `Type: ${it.type}`,
+       it.linked_req && `Req: ${it.linked_req}`, it.linked_defect && `Defect: ${it.linked_defect}`]
+        .filter(Boolean).join("   |   "),
+      50, y + 6,
+    );
+    y += 30;
+
+    const section = (label: string, lines: string[]) => {
+      if (!lines.length) return;
+      doc.setFontSize(10);
+      doc.setTextColor(15, 23, 42);
+      doc.text(label, 40, y); y += 14;
+      doc.setFontSize(9);
+      doc.setTextColor(50, 60, 80);
+      lines.forEach((l) => {
+        const wrapped = doc.splitTextToSize(l, pageW - 100);
+        doc.text(wrapped, 50, y);
+        y += wrapped.length * 12;
+      });
+      y += 6;
+    };
+
+    if (it.rationale) section("Rationale (生成依据)", [it.rationale]);
+    if (it.preconditions?.length) section("Preconditions", it.preconditions);
+    if (it.steps?.length) section("Steps", it.steps.map((s, i) => `${i + 1}. ${s}`));
+    if (it.expected?.length) section("Expected", it.expected.map((s, i) => `${i + 1}. ${s}`));
+    if (it.data) section("Test Data", [it.data]);
+    if (it.tags?.length) section("Tags", [it.tags.join(", ")]);
+  });
+
+  return doc.output("blob");
       if (it.data) lines.push(`**测试数据**：${it.data}`);
       const refs = [
         it.linked_req && `需求 ${it.linked_req}`,
