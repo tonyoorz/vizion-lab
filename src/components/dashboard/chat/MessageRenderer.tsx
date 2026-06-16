@@ -944,7 +944,19 @@ function toMarkdown(items: TestCaseItem[]): string {
       if (it.expected?.length) {
         lines.push("**预期结果**");
         it.expected.forEach((s, i) => lines.push(`${i + 1}. ${s}`));
+      }
+      if (it.data) lines.push(`**测试数据**：${it.data}`);
+      const refs = [
+        it.linked_req && `需求 ${it.linked_req}`,
+        it.linked_defect && `缺陷 ${it.linked_defect}`,
+      ].filter(Boolean).join(" · ");
+      if (refs) lines.push(`_${refs}_`);
+      return lines.join("\n");
+    })
+    .join("\n\n---\n\n");
 }
+
+
 
 function toXLSX(items: TestCaseItem[], module?: string, title?: string): ArrayBuffer {
   const headers = [
