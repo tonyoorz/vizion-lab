@@ -1129,7 +1129,8 @@ function TestCasesBlock({
   raw: string;
   closed: boolean;
 }) {
-  const [copied, setCopied] = useState<"csv" | "md" | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
+  const flash = (k: string) => { setCopied(k); setTimeout(() => setCopied(null), 1400); };
 
   if (!closed && items.length === 0) {
     return (
@@ -1150,23 +1151,31 @@ function TestCasesBlock({
     );
   }
 
-  const downloadCSV = () => {
-    const csv = toCSV(items);
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const stamp = new Date().toISOString().slice(0, 10);
+  const fname = (ext: string) => `testcases_${module || "module"}_${stamp}.${ext}`;
+  const saveBlob = (blob: Blob, ext: string) => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = url;
-    a.download = `testcases_${module || "module"}_${new Date().toISOString().slice(0, 10)}.csv`;
-    a.click();
+    a.href = url; a.download = fname(ext); a.click();
     URL.revokeObjectURL(url);
-    setCopied("csv");
-    setTimeout(() => setCopied(null), 1400);
   };
 
+  const exportCSV = () => {
+    saveBlob(new Blob([toCSV(items)], { type: "text/csv;charset=utf-8;" }), "csv");
+    flash("csv");
+  };
+  const exportXLSX = () => {
+    const buf = toXLSX(items, module, title);
+    saveBlob(new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }), "xlsx");
+    flash("xlsx");
+  };
+  const exportPDF = () => {
+    saveBlob(toPDF(items, module, title), "pdf");
+    flash("pdf");
+  };
   const copyMD = async () => {
     await navigator.clipboard.writeText(toMarkdown(items));
-    setCopied("md");
-    setTimeout(() => setCopied(null), 1400);
+    flash("md");
   };
 
   return (
@@ -1195,13 +1204,41 @@ function TestCasesBlock({
           {copied === "md" ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
           Markdown
         </button>
-        <button
-          onClick={downloadCSV}
-          className="inline-flex items-center gap-1 rounded-md border border-border bg-background px-2 py-1 text-[10px] text-foreground transition-colors hover:border-primary/40 hover:text-primary"
-        >
-          {copied === "csv" ? <Check className="h-3 w-3" /> : <Download className="h-3 w-3" />}
-          CSV
-        </button>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button className="inline-flex items-center gap-1 rounded-md border border-border bg-background px-2 py-1 text-[10px] text-foreground transition-colors hover:border-primary/40 hover:text-primary">
+              {copied && copied !== "md" ? <Check className="h-3 w-3" /> : <Download className="h-3 w-3" />}
+              导出
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-56">
+            <DropdownMenuLabel className="text-[10px] text-muted-foreground">
+              导出 {items.length} 条用例
+            </DropdownMenuLabel>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={exportCSV} className="gap-2 text-xs">
+              <FileText className="h-3.5 w-3.5 text-muted-foreground" />
+              <div className="flex flex-col">
+                <span>CSV</span>
+                <span className="text-[10px] text-muted-foreground">原始数据 · UTF-8 BOM</span>
+              </div>
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={exportXLSX} className="gap-2 text-xs">
+              <FileSpreadsheet className="h-3.5 w-3.5 text-emerald-600" />
+              <div className="flex flex-col">
+                <span>Excel (XLSX)</span>
+                <span className="text-[10px] text-muted-foreground">含摘要表 · 自动换行</span>
+              </div>
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={exportPDF} className="gap-2 text-xs">
+              <FileText className="h-3.5 w-3.5 text-rose-600" />
+              <div className="flex flex-col">
+                <span>PDF 报告</span>
+                <span className="text-[10px] text-muted-foreground">摘要 + 用例卡片含依据</span>
+              </div>
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
       <div className="grid gap-2 p-2 sm:grid-cols-2">
         {items.map((tc) => {
