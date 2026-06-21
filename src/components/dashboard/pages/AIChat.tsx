@@ -918,7 +918,7 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
     <div className="-m-6 flex h-[calc(100vh-64px)] overflow-hidden">
       {/* Conversation list */}
       <aside className="hidden w-[260px] flex-col border-r border-border bg-muted/30 lg:flex">
-        <div className="p-3">
+        <div className="space-y-2 p-3">
           <button
             onClick={handleNew}
             className="flex w-full items-center justify-between rounded-lg border border-border bg-card px-3 py-2.5 text-sm font-medium text-foreground shadow-sm transition-colors hover:bg-secondary"
@@ -929,6 +929,17 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
             <kbd className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
               ⌘N
             </kbd>
+          </button>
+          <button
+            onClick={() => setAgentOpen(true)}
+            className="group flex w-full items-center justify-between rounded-lg border border-primary/40 bg-gradient-to-r from-primary/10 to-primary/5 px-3 py-2.5 text-sm font-medium text-foreground shadow-sm transition-colors hover:from-primary/20 hover:to-primary/10"
+          >
+            <span className="flex items-center gap-2">
+              <Sparkle className="h-4 w-4 text-primary" /> 智能问数
+            </span>
+            <span className="rounded bg-primary/20 px-1.5 py-0.5 text-[10px] font-semibold text-primary">
+              Multi-Agent
+            </span>
           </button>
         </div>
         <div className="px-3 pb-2">
