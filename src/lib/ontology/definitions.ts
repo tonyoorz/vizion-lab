@@ -1,0 +1,137 @@
+import type { Ontology } from "./schema";
+
+// Seed ontology for the DTSV testing domain.
+// Mirrors physical tables exposed via DuckDB-WASM.
+export const ONTOLOGY: Ontology = {
+  version: "0.1.0",
+  entities: [
+    {
+      name: "Defect",
+      label: "缺陷",
+      table: "defects",
+      primaryKey: "defect_id",
+      synonyms: ["缺陷", "bug", "问题", "故障", "issue", "defect"],
+      attributes: [
+        {
+          name: "severity",
+          label: "严重度",
+          type: "enum",
+          values: ["P0", "P1", "P2", "P3"],
+          synonyms: ["严重度", "优先级", "等级", "严重程度", "priority", "severity"],
+        },
+        {
+          name: "status",
+          label: "状态",
+          type: "enum",
+          values: ["Open", "InProgress", "Fixed", "Verified", "Closed", "Reopened"],
+          synonyms: ["状态", "缺陷状态", "处理状态"],
+        },
+        { name: "module", label: "模块", type: "string", synonyms: ["模块", "组件", "ECU", "子系统"] },
+        { name: "owner_team", label: "负责团队", type: "string", synonyms: ["团队", "负责人", "owner"] },
+        { name: "open_date", label: "提单日期", type: "date", synonyms: ["创建时间", "提单时间", "open"] },
+        { name: "age_days", label: "存活天数", type: "number", synonyms: ["存活", "积压天数"] },
+        { name: "recurrence_count", label: "复现次数", type: "number", synonyms: ["复现", "重复次数", "occur"] },
+      ],
+      relations: [
+        { name: "found_in_run", target: "TestRun", via: "run_id", cardinality: "many" },
+        { name: "blocks_case", target: "TestCase", via: "blocked_case_id", cardinality: "many" },
+      ],
+    },
+    {
+      name: "TestCase",
+      label: "测试用例",
+      table: "test_cases",
+      primaryKey: "case_id",
+      synonyms: ["用例", "测试用例", "test case", "case"],
+      attributes: [
+        { name: "suite", label: "套件", type: "string", synonyms: ["套件", "suite", "测试集"] },
+        {
+          name: "type",
+          label: "类型",
+          type: "enum",
+          values: ["功能", "异常", "边界", "回归", "性能", "安全"],
+          synonyms: ["类型", "用例类型"],
+        },
+        {
+          name: "priority",
+          label: "优先级",
+          type: "enum",
+          values: ["P0", "P1", "P2", "P3"],
+          synonyms: ["优先级", "等级"],
+        },
+        { name: "module", label: "模块", type: "string", synonyms: ["模块", "组件"] },
+        { name: "covered_requirement", label: "覆盖需求", type: "string", synonyms: ["覆盖需求", "需求"] },
+      ],
+    },
+    {
+      name: "TestRun",
+      label: "测试执行",
+      table: "test_runs",
+      primaryKey: "run_id",
+      synonyms: ["执行", "测试执行", "运行", "test run"],
+      attributes: [
+        {
+          name: "result",
+          label: "结果",
+          type: "enum",
+          values: ["Pass", "Fail", "Block", "Skip"],
+          synonyms: ["结果", "通过状态", "result"],
+        },
+        { name: "case_id", label: "用例ID", type: "string", synonyms: ["用例ID"] },
+        { name: "executed_at", label: "执行时间", type: "date", synonyms: ["执行时间", "运行时间"] },
+        { name: "duration_ms", label: "耗时", type: "number", synonyms: ["耗时", "时长", "duration"] },
+        { name: "ecu_target", label: "目标ECU", type: "string", synonyms: ["ECU", "目标"] },
+        { name: "environment", label: "环境", type: "string", synonyms: ["环境", "env"] },
+      ],
+      relations: [{ name: "covers_case", target: "TestCase", via: "case_id", cardinality: "one" }],
+    },
+  ],
+  metrics: [
+    {
+      name: "高频缺陷率",
+      label: "高频缺陷率",
+      description: "近期复现 ≥ 3 次的缺陷占比",
+      synonyms: ["高频缺陷", "复发率", "重复缺陷比例", "频发缺陷"],
+      baseEntity: "Defect",
+      dimensions: ["module", "severity", "owner_team"],
+      formula:
+        "SUM(CASE WHEN recurrence_count >= 3 THEN 1 ELSE 0 END) * 1.0 / NULLIF(COUNT(*), 0)",
+    },
+    {
+      name: "缺陷积压量",
+      label: "缺陷积压量",
+      description: "未关闭缺陷数量",
+      synonyms: ["积压", "未关闭", "open 缺陷", "backlog"],
+      baseEntity: "Defect",
+      dimensions: ["module", "severity", "owner_team"],
+      formula: "SUM(CASE WHEN status NOT IN ('Closed','Verified') THEN 1 ELSE 0 END)",
+    },
+    {
+      name: "测试通过率",
+      label: "测试通过率",
+      description: "通过用例数占总执行数比例",
+      synonyms: ["通过率", "pass rate", "执行通过率"],
+      baseEntity: "TestRun",
+      dimensions: ["ecu_target", "environment", "case_id"],
+      formula: "SUM(CASE WHEN result='Pass' THEN 1 ELSE 0 END) * 1.0 / NULLIF(COUNT(*), 0)",
+    },
+    {
+      name: "平均执行耗时",
+      label: "平均执行耗时(ms)",
+      description: "测试执行平均耗时",
+      synonyms: ["平均耗时", "执行时长", "avg duration"],
+      baseEntity: "TestRun",
+      dimensions: ["ecu_target", "environment"],
+      formula: "AVG(duration_ms)",
+    },
+    {
+      name: "长尾缺陷率",
+      label: "长尾缺陷率",
+      description: "存活 > 30 天的缺陷占比",
+      synonyms: ["长尾", "老缺陷", "积压老化"],
+      baseEntity: "Defect",
+      dimensions: ["module", "owner_team"],
+      formula: "SUM(CASE WHEN age_days > 30 THEN 1 ELSE 0 END) * 1.0 / NULLIF(COUNT(*), 0)",
+    },
+  ],
+};
