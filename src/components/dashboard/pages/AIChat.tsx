@@ -27,6 +27,7 @@ import ArtifactCanvas, { Artifact } from "../chat/ArtifactCanvas";
 import DataHud from "../chat/DataHud";
 import SlashMenu, { SLASH_COMMANDS, SlashCommand } from "../chat/SlashMenu";
 import MissionLauncher from "../chat/MissionLauncher";
+import AgentOrchestrator from "../chat/AgentOrchestrator";
 import { segmentsToPlainText, parseAgentStream } from "../chat/agentParser";
 import { duckdbManager, isDuckdbFile, TableInfo } from "@/lib/duckdb/client";
 import { profileTable, riskScan, summarizeSchemaForPrompt } from "@/lib/duckdb/profile";
@@ -132,6 +133,7 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
   const [dbTables, setDbTables] = useState<TableInfo[]>(duckdbManager.listTables());
   const [dbLoading, setDbLoading] = useState(false);
   const [canvasArtifact, setCanvasArtifact] = useState<Artifact | null>(null);
+  const [agentOpen, setAgentOpen] = useState(false);
 
   useEffect(() => {
     const unsub = duckdbManager.subscribe(() => setDbTables(duckdbManager.listTables()));
