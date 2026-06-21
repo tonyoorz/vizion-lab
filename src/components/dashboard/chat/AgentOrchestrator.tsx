@@ -191,8 +191,8 @@ ${matchSummary}`;
       const sql = extractSQL(sqlRaw);
       const safe = isSafeReadOnlySql(sql);
       updateStep("sql", {
-        status: safe.ok ? "done" : "error",
-        error: safe.ok ? undefined : `安全校验失败: ${safe.reason}`,
+        status: safe ? "done" : "error",
+        error: safe ? undefined : "安全校验失败：仅允许只读 SQL（SELECT/WITH/…）",
         summary: sql.split("\n")[0].slice(0, 80) + (sql.length > 80 ? "…" : ""),
         durationMs: Math.round(performance.now() - t3),
         detail: (
@@ -201,7 +201,7 @@ ${matchSummary}`;
           </pre>
         ),
       });
-      if (!safe.ok) throw new Error(safe.reason);
+      if (!safe) throw new Error("SQL 未通过只读安全校验");
 
       // ---------- 5. Executor ----------
       const t4 = performance.now();
