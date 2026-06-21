@@ -1,113 +1,150 @@
-# 本地 DuckDB 接入 AI Agent · 实施方案
-
 ## 目标
-让用户把本地 `.duckdb` 文件（或 CSV/Parquet）直接拖进 DTSV Chat，AI 能用 SQL 探查、自动生成 insights、识别测试过程中的风险与异常，全程数据不出浏览器。
+
+为 DTSV 项目构建工程化的智能问数 Agent，核心是 **Ontology 语义层**（消除 LLM 幻觉）+ **显式多 Agent 编排面板**（过程可见可纠错），覆盖 Defect / TestCase / TestRun 三大业务实体。
 
 ---
 
-## 技术选型（对标 ChatGPT Advanced Data Analysis / Hex Magic / Julius AI）
+## 一、Ontology 语义层（Phase 1）
 
-| 关注点 | 选择 | 理由 |
+### 1.1 文件结构
+
+```text
+src/lib/ontology/
+├── schema.ts              Zod 定义：Entity / Attribute / Relation / Metric
+├── loader.ts              加载 YAML → 内存图，提供查询 API
+├── resolver.ts            自然语言 → 本体概念（同义词、模糊匹配）
+├── graph.ts               关系图遍历（BFS 找 JOIN 路径）
+└── definitions/
+    ├── defect.yaml        缺陷实体 + 严重度/状态/模块
+    ├── testcase.yaml      用例实体 + 类型/优先级/覆盖
+    ├── testrun.yaml       执行实体 + 通过率/耗时/环境
+    └── metrics.yaml       业务指标：高频缺陷率、回归覆盖率、长尾率等
+```
+
+### 1.2 Ontology DSL 示例
+
+```yaml
+entity: Defect
+table: defects
+synonyms: [缺陷, bug, 问题, 故障]
+attributes:
+  severity:
+    type: enum
+    values: [P0, P1, P2, P3]
+    synonyms: [严重度, 优先级, 等级]
+  status:
+    type: enum
+    values: [open, fixed, closed, reopened]
+relations:
+  - name: belongs_to_module
+    target: Module
+    via: module_id
+  - name: found_in_run
+    target: TestRun
+    via: run_id
+
+metrics:
+  - name: 高频缺陷率
+    synonyms: [复发率, 重复缺陷比例]
+    formula: |
+      COUNT(DISTINCT CASE WHEN occur_count >= 3 THEN id END) * 1.0
+      / NULLIF(COUNT(DISTINCT id), 0)
+    dimensions: [module, time_range, severity]
+```
+
+### 1.3 关键能力
+
+- **概念解析**：用户问「上周 P0 的高频缺陷」→ 命中 `severity=P0` + metric「高频缺陷率」+ 时间维度
+- **JOIN 路径自动推导**：BFS 在关系图上找 Defect→Module→TestCase 的最短路径
+- **字段白名单**：SQL 生成器只能引用 Ontology 中声明的字段，杜绝幻觉字段
+- **指标复用**：业务公式集中维护，AI 直接调用，不重写聚合逻辑
+
+---
+
+## 二、多 Agent 编排（Phase 2）
+
+### 2.1 Agent 角色（Orchestrator-Worker 模式）
+
+| Agent | 职责 | 模型 |
 |---|---|---|
-| 本地数据库引擎 | **DuckDB-WASM** (`@duckdb/duckdb-wasm`) | 浏览器原生跑 .duckdb / CSV / Parquet，零后端、数据不出端 |
-| SQL 生成 | **Lovable AI Gateway + Tool Calling** (`query_sql` / `profile_table` / `detect_anomaly`) | OpenAI 兼容，多步 agent loop |
-| 自动洞察 | **schema profiling + 启发式风险规则 + LLM 总结** | 业界共识：先 profile 再让 LLM 看摘要而非原始数据 |
-| 图表 | 复用现有 `<chart>` Recharts 渲染 | 一致性 |
-| 大文件加载 | OPFS（Origin Private File System）持久化 | Hex/Mode 同款方案 |
-| 安全 | **只读连接 + SQL AST 校验**（禁止 ATTACH/INSTALL/COPY TO/写操作） | 防止 prompt injection 改本地数据 |
+| **Planner** | 拆解用户问题为子任务，决定调用哪些 Worker | `google/gemini-3-flash-preview` |
+| **Ontologist** | 把自然语言映射到 Ontology 概念/指标/维度 | `google/gemini-3-flash-preview` |
+| **SQL Writer** | 基于 Ontology 上下文生成受约束的 DuckDB SQL | `google/gemini-3.5-flash` |
+| **Executor** | 在 DuckDB-WASM 跑 SQL，返回结果 + Schema | （无模型，纯工具）|
+| **Critic** | 校验结果合理性，必要时回炉重写 | `google/gemini-3-flash-preview` |
+| **Presenter** | 生成图表配置 + 自然语言摘要 | `google/gemini-3-flash-preview` |
 
----
+通过 AI SDK 的 `tool` + `stepCountIs(50)` 实现，Planner 作为 Orchestrator 调用其他 Agent 作为 tools。
 
-## 架构
+### 2.2 后端
+
+新增 `supabase/functions/data-agent/index.ts`：
+- 接收 `{ question, conversationId, ontologyVersion }`
+- Planner Agent 流式输出步骤 → 调用 Worker tools → 通过 `toUIMessageStreamResponse` 把每个 Agent 的状态/输出作为 `tool` parts 推到前端
+
+### 2.3 前端：显式多 Agent 面板
+
+新增 `src/components/dashboard/chat/AgentOrchestrator.tsx`，UI 形态：
+
+```text
+┌─────────────────────────────────────────────────────────┐
+│ 💬 问：上周 P0 高频缺陷集中在哪个模块？                  │
+├─────────────────────────────────────────────────────────┤
+│ ┌─ Agent 工作流 ────────────────────────────────────┐  │
+│ │ ✅ Planner       识别为「指标查询 + 维度下钻」      │  │
+│ │ ✅ Ontologist    匹配: 高频缺陷率 / severity=P0    │  │
+│ │ ✅ SQL Writer    生成 SQL [查看] [编辑]            │  │
+│ │ ⏳ Executor      执行中... (DuckDB)                │  │
+│ │ ⚪ Critic        待启动                             │  │
+│ │ ⚪ Presenter     待启动                             │  │
+│ └────────────────────────────────────────────────────┘  │
+│ ┌─ 答案 ────────────────────────────────────────────┐  │
+│ │ 📊 [图表]  上周 P0 高频缺陷共 18 个，集中在...    │  │
+│ │ 🔍 数据来源：3 张表，置信度 92%                   │  │
+│ └────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────┘
 ```
-浏览器
- ├─ DuckDBProvider (单例 Worker)
- │   ├─ 加载 .duckdb / .csv / .parquet → 注册为表
- │   └─ 暴露 runQuery(sql) / listTables() / describeTable()
- ├─ AIChat
- │   ├─ 文件区识别 .duckdb/.csv/.parquet → 走 DuckDB 而非 extract-file
- │   ├─ 把 schema 摘要注入 system prompt
- │   └─ 收到 <tool name="query_sql"> → 本地执行 → 结果回灌 → 继续流
- └─ Insights 面板（可选）：右侧 Canvas 展示 profiling 卡片
-Edge Function `chat`
- └─ 新增工具协议（XML 标签）：
-    <tool name="query_sql">SELECT ...</tool>
-    <tool name="profile_table">table_name</tool>
-    <tool name="detect_anomaly" col="x" table="y" />
-```
 
-> 说明：保持现有 SSE + XML 标签风格（不引入 AI SDK 重构），把"工具调用"做成模型输出 `<tool .../>` → 前端拦截执行 → 把 `<tool_result name="..." id="...">JSON</tool_result>` 追加到 messages → 再发一轮。最小侵入。
+- 每个 Agent 节点：状态图标 + 名称 + 一句话输出 + 「展开/编辑」按钮
+- 用户可在任意节点暂停、修改 Ontology 映射或 SQL，再继续
+- 折叠态显示进度条，展开态显示完整链路（避免插件感，与现有 Stripe/Linear 极简风一致）
+
+### 2.4 UI 组件清单
+
+- `AgentOrchestrator.tsx` — 主面板
+- `AgentStepCard.tsx` — 单个 Agent 步骤卡片
+- `OntologyMatchPanel.tsx` — Ontologist 输出（命中的实体/指标/同义词）
+- `SQLPreview.tsx` — 带语法高亮 + Ontology 字段着色
+- 集成到现有 `AIChat.tsx`：增加「智能问数」模式切换按钮
 
 ---
 
-## 实施步骤（一轮 PR）
+## 三、技术细节（给工程参考）
 
-### Step 1 · DuckDB-WASM 接入
-- `bun add @duckdb/duckdb-wasm apache-arrow`
-- 新文件 `src/lib/duckdb/client.ts`：单例初始化 Worker、CDN bundle、`registerFileBuffer` 加载用户文件、`runQuery` 返回 Arrow → JSON。
-- 新文件 `src/lib/duckdb/safety.ts`：SQL 白名单校验（只允许 SELECT/WITH/PRAGMA show_tables、describe；拒绝 ATTACH/INSTALL/LOAD/COPY/INSERT/UPDATE/DELETE/CREATE/DROP）。
-
-### Step 2 · 文件上传识别
-- `AIChat.tsx` `handleFiles` 分流：
-  - `.duckdb` → `db.registerDatabase(file)`（用 `ATTACH ... (READ_ONLY)` 内部受控调用）
-  - `.csv/.parquet` → `db.registerTable(file)`
-  - 其他保持现有 `extract-file`
-- Attachment chip 显示表数 + 总行数。
-
-### Step 3 · Schema 摘要 + 风险 profiling
-- `src/lib/duckdb/profile.ts`：对每张表跑 `SUMMARIZE`、`SELECT COUNT(*)、null率、distinct率、min/max/p50/p95`；对时间列做月度聚合；对枚举列 top-K。
-- 摘要 → markdown 注入 system prompt（替代/追加 DATASET_SCHEMA）。
-
-### Step 4 · Tool calling 协议
-- `agentParser.ts` 增加 `tool` 段类型：`<tool name="query_sql" id="t1">SQL</tool>`。
-- `MessageRenderer.tsx` 渲染工具卡片（运行中 / 结果摘要 / 可展开原始表）。
-- `AIChat.tsx` 在流结束（或检测到 `<tool .../>` 闭合）后：
-  1. 本地执行（DuckDB / profile / anomaly）
-  2. 把 `<tool_result id="t1">{rows, cols, truncated}</tool_result>` 作为 user/system 消息追加
-  3. 重新调用 chat edge function 让模型继续
-  - 用 `stopWhen` 等价的循环上限：最多 5 轮工具调用。
-
-### Step 5 · 风险发现内置规则
-`detect_anomaly` 工具的内置策略：
-- 时间序列：z-score > 3 / IQR 离群 / 突变点（PELT 简版）
-- 类别失衡：某 status 占比突增 > 30%
-- 缺陷长尾：`age_days > P95` 数量环比涨
-- 覆盖回退：覆盖率环比降 > 5pp
-返回结构化 finding 让 LLM 转成自然语言。
-
-### Step 6 · System prompt 升级（`chat/index.ts`）
-新增段落：
-- 描述新工具集 + JSON schema
-- 强制"先 `<tool name="profile_table">` 再写 SQL"
-- 明确"只生成 DuckDB 方言 SQL，禁止写操作"
-- 引用规则：`<cite source="duckdb:tableName">`
-
-### Step 7 · UI 细节
-- 顶部状态条：🟢 已连接 DuckDB · 3 表 · 12.4 万行
-- Slash 命令新增：`/explore <table>` `/risk-scan` `/sql ...`
-- 工具卡片：DuckDB SVG 图标 + 行数/耗时
+- **Ontology 加载**：构建期用 Vite `import.meta.glob` 把 YAML 全部预编译为 JSON 注入 bundle，前端零运行时解析开销
+- **同义词匹配**：先精确 → 再编辑距离（Levenshtein）→ 最后 LLM 兜底
+- **SQL 安全**：复用 `src/lib/duckdb/safety.ts`，新增 Ontology 字段白名单校验
+- **流式协议**：AI SDK UIMessage `parts`，每个 Agent 用 `tool-call` + `tool-result` 表达，前端按 `toolName` 渲染对应卡片
+- **可观测**：每次问答记录 `{question, ontology_matches, sql, latency, agent_steps}` 到 localStorage（Phase 4 再上 Supabase）
 
 ---
 
-## 安全 & 隐私
-- 所有数据停留在浏览器 OPFS，不上传后端
-- SQL 校验在执行前 + DuckDB 端 `SET enable_external_access=false; SET lock_configuration=true`
-- 工具结果回传给 LLM 时**采样**（默认 top 200 行 + 全量聚合统计），避免泄漏明细 & 控 token
+## 四、本次交付范围（Phase 1+2）
+
+1. ✅ Ontology 骨架：schema / loader / resolver / graph + 3 个种子 YAML（defect/testcase/testrun）+ metrics.yaml
+2. ✅ 后端 Edge Function `data-agent`：6 个 Agent 角色，AI SDK tool 编排
+3. ✅ 前端显式多 Agent 面板：`AgentOrchestrator` + 4 个子组件
+4. ✅ 集成进 `AIChat.tsx`：保留现有 Mission Launcher + Slash 命令，新增「问数」入口
+5. ⏭️ Phase 3（下个 PR）：pgvector + Hybrid RAG
+6. ⏭️ Phase 4（下个 PR）：本体可视化编辑器
 
 ---
 
-## 不在本轮范围（建议下轮）
-- Canvas/Artifact 模式（右侧可编辑 SQL/图表）
-- Python 沙箱（Pyodide）做预测 / Prophet
-- 持久化会话到 Lovable Cloud（要先做登录）
-- 多文件 JOIN 向导 UI
+## 五、风险与取舍
 
----
-
-## 交付物（本轮 PR 改动）
-- 新增 `src/lib/duckdb/{client,safety,profile}.ts`
-- 修改 `AIChat.tsx`、`MessageRenderer.tsx`、`agentParser.ts`、`SlashMenu.tsx`
-- 修改 `supabase/functions/chat/index.ts`（system prompt + 工具协议说明）
-- `package.json` 新增 2 个依赖
-
-确认后我直接开干。
+| 风险 | 缓解 |
+|---|---|
+| YAML 维护成本 | Phase 4 提供可视化编辑器；当前先用代码 + Git review |
+| 多 Agent 延迟叠加 | Planner 决定是否跳过 Critic（简单查询直出） |
+| DuckDB 数据未到位 | Executor 在数据缺失时降级为 Mock，并提示用户上传 |
+| UI 信息密度过高 | 默认折叠 Agent 面板，仅显示进度条；点击展开 |
