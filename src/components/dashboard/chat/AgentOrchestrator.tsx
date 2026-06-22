@@ -74,6 +74,7 @@ const AgentOrchestrator = ({ open, onClose, initialQuestion = "" }: Props) => {
   const [steps, setSteps] = useState<AgentStep[]>(initialSteps());
   const [answer, setAnswer] = useState<string>("");
   const [chartSpec, setChartSpec] = useState<unknown>(null);
+  const [kbOpen, setKbOpen] = useState(false);
 
   const updateStep = (key: string, patch: Partial<AgentStep>) =>
     setSteps((prev) => prev.map((s) => (s.key === key ? { ...s, ...patch } : s)));
