@@ -447,6 +447,7 @@ ${matchSummary}`;
           )}
         </div>
       </div>
+      <KnowledgeIngestionPanel open={kbOpen} onClose={() => setKbOpen(false)} />
     </div>
   );
 };
