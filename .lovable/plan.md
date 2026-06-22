@@ -1,150 +1,103 @@
+
+# Phase 3：pgvector + Hybrid RAG
+
+为本体多 Agent 系统接入「向量检索 + 关键词检索」融合的知识层，让 Agent 能在生成 SQL / 解释结果之前，先召回相似的缺陷、用例、历史问答、本体说明，显著提升复杂业务问题的准确率。
+
 ## 目标
 
-为 DTSV 项目构建工程化的智能问数 Agent，核心是 **Ontology 语义层**（消除 LLM 幻觉）+ **显式多 Agent 编排面板**（过程可见可纠错），覆盖 Defect / TestCase / TestRun 三大业务实体。
+1. **语义召回**：用 Gemini Embedding 把缺陷标题/描述、用例步骤、本体说明、历史问答向量化，存入 Lovable Cloud 的 pgvector。
+2. **混合检索**：向量相似度 + Postgres 全文检索 (`tsvector` / BM25 风格) → RRF (Reciprocal Rank Fusion) 融合。
+3. **接入多 Agent**：在 Planner 之后、Ontologist 之前插入一个 **Retriever Agent**，召回的 chunk 作为上下文喂给后续 Agent。
+4. **UI 可观测**：在 `AgentOrchestrator` 显示 Retriever 步骤卡，展示 Top-K 片段、来源、向量分/关键词分/RRF 分。
 
----
-
-## 一、Ontology 语义层（Phase 1）
-
-### 1.1 文件结构
+## 技术架构
 
 ```text
-src/lib/ontology/
-├── schema.ts              Zod 定义：Entity / Attribute / Relation / Metric
-├── loader.ts              加载 YAML → 内存图，提供查询 API
-├── resolver.ts            自然语言 → 本体概念（同义词、模糊匹配）
-├── graph.ts               关系图遍历（BFS 找 JOIN 路径）
-└── definitions/
-    ├── defect.yaml        缺陷实体 + 严重度/状态/模块
-    ├── testcase.yaml      用例实体 + 类型/优先级/覆盖
-    ├── testrun.yaml       执行实体 + 通过率/耗时/环境
-    └── metrics.yaml       业务指标：高频缺陷率、回归覆盖率、长尾率等
+用户问句
+   │
+   ▼
+[Planner] ──► [Retriever (Hybrid RAG)] ──► [Ontologist] ──► [SQL Writer]
+                     │  ▲                        │
+                     │  │                        ▼
+                     │  └── pgvector + tsvector  [Executor → Critic → Presenter]
+                     │
+                     └── 召回: 本体说明 / 历史问答 / 缺陷样本 / 用例样本
 ```
 
-### 1.2 Ontology DSL 示例
+## 数据库设计（Lovable Cloud / pgvector）
 
-```yaml
-entity: Defect
-table: defects
-synonyms: [缺陷, bug, 问题, 故障]
-attributes:
-  severity:
-    type: enum
-    values: [P0, P1, P2, P3]
-    synonyms: [严重度, 优先级, 等级]
-  status:
-    type: enum
-    values: [open, fixed, closed, reopened]
-relations:
-  - name: belongs_to_module
-    target: Module
-    via: module_id
-  - name: found_in_run
-    target: TestRun
-    via: run_id
+`knowledge_chunks` 表：
 
-metrics:
-  - name: 高频缺陷率
-    synonyms: [复发率, 重复缺陷比例]
-    formula: |
-      COUNT(DISTINCT CASE WHEN occur_count >= 3 THEN id END) * 1.0
-      / NULLIF(COUNT(DISTINCT id), 0)
-    dimensions: [module, time_range, severity]
-```
-
-### 1.3 关键能力
-
-- **概念解析**：用户问「上周 P0 的高频缺陷」→ 命中 `severity=P0` + metric「高频缺陷率」+ 时间维度
-- **JOIN 路径自动推导**：BFS 在关系图上找 Defect→Module→TestCase 的最短路径
-- **字段白名单**：SQL 生成器只能引用 Ontology 中声明的字段，杜绝幻觉字段
-- **指标复用**：业务公式集中维护，AI 直接调用，不重写聚合逻辑
-
----
-
-## 二、多 Agent 编排（Phase 2）
-
-### 2.1 Agent 角色（Orchestrator-Worker 模式）
-
-| Agent | 职责 | 模型 |
+| 字段 | 类型 | 说明 |
 |---|---|---|
-| **Planner** | 拆解用户问题为子任务，决定调用哪些 Worker | `google/gemini-3-flash-preview` |
-| **Ontologist** | 把自然语言映射到 Ontology 概念/指标/维度 | `google/gemini-3-flash-preview` |
-| **SQL Writer** | 基于 Ontology 上下文生成受约束的 DuckDB SQL | `google/gemini-3.5-flash` |
-| **Executor** | 在 DuckDB-WASM 跑 SQL，返回结果 + Schema | （无模型，纯工具）|
-| **Critic** | 校验结果合理性，必要时回炉重写 | `google/gemini-3-flash-preview` |
-| **Presenter** | 生成图表配置 + 自然语言摘要 | `google/gemini-3-flash-preview` |
+| id | uuid PK | |
+| source_type | text | `ontology` / `defect` / `testcase` / `qa_history` |
+| source_id | text | 业务侧 ID（缺陷号/用例号/本体 entity 名） |
+| title | text | 短标题，用于展示 |
+| content | text | 入库正文 |
+| content_tsv | tsvector | 由 content 自动生成 (GIN 索引) |
+| embedding | vector(1536) | Gemini Embedding，显式 dimensions=1536（HNSW 友好） |
+| metadata | jsonb | 模块、优先级、时间等过滤维度 |
+| model_version | text | embedding 模型标记，方便未来重嵌入 |
 
-通过 AI SDK 的 `tool` + `stepCountIs(50)` 实现，Planner 作为 Orchestrator 调用其他 Agent 作为 tools。
+索引：
+- `HNSW (embedding vector_cosine_ops)`
+- `GIN (content_tsv)`
+- `btree (source_type)`, `GIN (metadata jsonb_path_ops)`
 
-### 2.2 后端
+RPC：
+- `match_knowledge(query_embedding, query_text, match_count, filter jsonb)` → 返回 `id, content, metadata, vec_score, kw_score, rrf_score`，服务端做 RRF 融合。
 
-新增 `supabase/functions/data-agent/index.ts`：
-- 接收 `{ question, conversationId, ontologyVersion }`
-- Planner Agent 流式输出步骤 → 调用 Worker tools → 通过 `toUIMessageStreamResponse` 把每个 Agent 的状态/输出作为 `tool` parts 推到前端
+RLS：当前应用单租户使用，先 `authenticated` 可读写；后续若多租户再细化。
 
-### 2.3 前端：显式多 Agent 面板
+## 后端 Edge Functions
 
-新增 `src/components/dashboard/chat/AgentOrchestrator.tsx`，UI 形态：
+1. **`embed-knowledge`**（POST）
+   - 入参：`{ items: [{ source_type, source_id, title, content, metadata }] }`
+   - 逻辑：批量调用 `https://ai.gateway.lovable.dev/v1/embeddings`（`google/gemini-embedding-001`, `dimensions: 1536`），upsert 到 `knowledge_chunks`。
+   - 自动分块：>1200 字符按段落切分，附 `chunk_index`。
 
-```text
-┌─────────────────────────────────────────────────────────┐
-│ 💬 问：上周 P0 高频缺陷集中在哪个模块？                  │
-├─────────────────────────────────────────────────────────┤
-│ ┌─ Agent 工作流 ────────────────────────────────────┐  │
-│ │ ✅ Planner       识别为「指标查询 + 维度下钻」      │  │
-│ │ ✅ Ontologist    匹配: 高频缺陷率 / severity=P0    │  │
-│ │ ✅ SQL Writer    生成 SQL [查看] [编辑]            │  │
-│ │ ⏳ Executor      执行中... (DuckDB)                │  │
-│ │ ⚪ Critic        待启动                             │  │
-│ │ ⚪ Presenter     待启动                             │  │
-│ └────────────────────────────────────────────────────┘  │
-│ ┌─ 答案 ────────────────────────────────────────────┐  │
-│ │ 📊 [图表]  上周 P0 高频缺陷共 18 个，集中在...    │  │
-│ │ 🔍 数据来源：3 张表，置信度 92%                   │  │
-│ └────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────┘
-```
+2. **`hybrid-search`**（POST）
+   - 入参：`{ query: string, top_k?: number=8, filter?: jsonb, source_types?: string[] }`
+   - 逻辑：embed query → 调用 `match_knowledge` RPC → 返回融合后的 Top-K + 分数。
+   - 同时返回 `latency_ms` 与各路得分，便于 UI 调试。
 
-- 每个 Agent 节点：状态图标 + 名称 + 一句话输出 + 「展开/编辑」按钮
-- 用户可在任意节点暂停、修改 Ontology 映射或 SQL，再继续
-- 折叠态显示进度条，展开态显示完整链路（避免插件感，与现有 Stripe/Linear 极简风一致）
+3. **`seed-ontology-knowledge`**（POST，一次性）
+   - 把 `src/lib/ontology/definitions.ts` 中的 entity/metric 文档+同义词序列化为 chunk 灌入。
 
-### 2.4 UI 组件清单
+## 前端改动
 
-- `AgentOrchestrator.tsx` — 主面板
-- `AgentStepCard.tsx` — 单个 Agent 步骤卡片
-- `OntologyMatchPanel.tsx` — Ontologist 输出（命中的实体/指标/同义词）
-- `SQLPreview.tsx` — 带语法高亮 + Ontology 字段着色
-- 集成到现有 `AIChat.tsx`：增加「智能问数」模式切换按钮
+1. **`src/lib/rag/client.ts`**（新建）
+   - `searchKnowledge(query, opts)`, `ingestKnowledge(items)` 简单封装。
 
----
+2. **`AgentOrchestrator.tsx`**（编辑）
+   - 在 Planner 之后插入 Retriever 步骤：调用 `hybrid-search`，把 Top-K 注入后续 Agent 的 prompt 上下文。
+   - 失败优雅降级：检索为空时继续走原链路并提示「无召回」。
 
-## 三、技术细节（给工程参考）
+3. **`RetrievalStepCard.tsx`**（新建）
+   - 展示召回片段：来源类型 chip、标题、metadata、三栏分数条（vector / keyword / rrf）、原文 expand。
 
-- **Ontology 加载**：构建期用 Vite `import.meta.glob` 把 YAML 全部预编译为 JSON 注入 bundle，前端零运行时解析开销
-- **同义词匹配**：先精确 → 再编辑距离（Levenshtein）→ 最后 LLM 兜底
-- **SQL 安全**：复用 `src/lib/duckdb/safety.ts`，新增 Ontology 字段白名单校验
-- **流式协议**：AI SDK UIMessage `parts`，每个 Agent 用 `tool-call` + `tool-result` 表达，前端按 `toolName` 渲染对应卡片
-- **可观测**：每次问答记录 `{question, ontology_matches, sql, latency, agent_steps}` 到 localStorage（Phase 4 再上 Supabase）
+4. **`KnowledgeIngestionPanel.tsx`**（新建，挂在「智能问数」侧栏次级入口）
+   - 三个按钮：「灌入本体说明」「从当前 DuckDB 缺陷表抽样灌入」「从历史问答灌入」。
+   - 显示已入库 chunk 数 / 模型版本。
 
----
+## 风险与降级
 
-## 四、本次交付范围（Phase 1+2）
+- **Embedding 配额**：批量入库限流 50/秒，UI 显示进度。
+- **dims 不匹配**：固定 `dimensions: 1536`；若以后换模型，`model_version` 字段允许并存与渐进重嵌入。
+- **召回噪声**：Retriever 输出由 Critic 校验，且 SQL Writer 仍受本体字段白名单约束，幻觉风险可控。
+- **冷启动**：未灌数据时 Retriever 步骤显示「知识库为空，跳过」并不阻塞主链路。
 
-1. ✅ Ontology 骨架：schema / loader / resolver / graph + 3 个种子 YAML（defect/testcase/testrun）+ metrics.yaml
-2. ✅ 后端 Edge Function `data-agent`：6 个 Agent 角色，AI SDK tool 编排
-3. ✅ 前端显式多 Agent 面板：`AgentOrchestrator` + 4 个子组件
-4. ✅ 集成进 `AIChat.tsx`：保留现有 Mission Launcher + Slash 命令，新增「问数」入口
-5. ⏭️ Phase 3（下个 PR）：pgvector + Hybrid RAG
-6. ⏭️ Phase 4（下个 PR）：本体可视化编辑器
+## 交付清单
 
----
+- [ ] DB migration：pgvector + `knowledge_chunks` + 索引 + `match_knowledge` RPC + RLS + GRANT
+- [ ] `supabase/functions/embed-knowledge/index.ts`
+- [ ] `supabase/functions/hybrid-search/index.ts`
+- [ ] `supabase/functions/seed-ontology-knowledge/index.ts`
+- [ ] `src/lib/rag/client.ts`
+- [ ] `AgentOrchestrator.tsx` 集成 Retriever
+- [ ] `RetrievalStepCard.tsx`
+- [ ] `KnowledgeIngestionPanel.tsx`
+- [ ] 更新 `.lovable/plan.md`
 
-## 五、风险与取舍
-
-| 风险 | 缓解 |
-|---|---|
-| YAML 维护成本 | Phase 4 提供可视化编辑器；当前先用代码 + Git review |
-| 多 Agent 延迟叠加 | Planner 决定是否跳过 Critic（简单查询直出） |
-| DuckDB 数据未到位 | Executor 在数据缺失时降级为 Mock，并提示用户上传 |
-| UI 信息密度过高 | 默认折叠 Agent 面板，仅显示进度条；点击展开 |
+确认后我会一次性提交 migration 并并行落地三个 Edge Function 与前端组件。

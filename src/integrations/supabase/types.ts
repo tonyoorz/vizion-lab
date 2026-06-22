@@ -14,13 +14,76 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      knowledge_chunks: {
+        Row: {
+          chunk_index: number
+          content: string
+          content_tsv: unknown
+          created_at: string
+          embedding: string | null
+          id: string
+          metadata: Json
+          model_version: string
+          source_id: string
+          source_type: string
+          title: string | null
+          updated_at: string
+        }
+        Insert: {
+          chunk_index?: number
+          content: string
+          content_tsv?: unknown
+          created_at?: string
+          embedding?: string | null
+          id?: string
+          metadata?: Json
+          model_version?: string
+          source_id: string
+          source_type: string
+          title?: string | null
+          updated_at?: string
+        }
+        Update: {
+          chunk_index?: number
+          content?: string
+          content_tsv?: unknown
+          created_at?: string
+          embedding?: string | null
+          id?: string
+          metadata?: Json
+          model_version?: string
+          source_id?: string
+          source_type?: string
+          title?: string | null
+          updated_at?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
     }
     Functions: {
-      [_ in never]: never
+      match_knowledge: {
+        Args: {
+          filter?: Json
+          match_count?: number
+          query_embedding: string
+          query_text: string
+          source_types?: string[]
+        }
+        Returns: {
+          content: string
+          id: string
+          kw_score: number
+          metadata: Json
+          rrf_score: number
+          source_id: string
+          source_type: string
+          title: string
+          vec_score: number
+        }[]
+      }
     }
     Enums: {
       [_ in never]: never

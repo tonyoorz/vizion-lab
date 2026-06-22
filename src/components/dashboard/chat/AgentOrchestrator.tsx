@@ -1,9 +1,12 @@
 import { useState } from "react";
-import { Sparkle, Send, X, BarChart3 } from "lucide-react";
+import { Sparkle, Send, X, BarChart3, Database } from "lucide-react";
 import AgentStepCard, { AgentStep } from "./AgentStepCard";
+import RetrievalStepCard from "./RetrievalStepCard";
+import KnowledgeIngestionPanel from "./KnowledgeIngestionPanel";
 import { ONTOLOGY, resolveQuestion, summarizeMatchForPrompt, listAllowedFields } from "@/lib/ontology";
 import { duckdbManager } from "@/lib/duckdb/client";
 import { isSafeReadOnlySql } from "@/lib/duckdb/safety";
+import { searchKnowledge, summarizeHitsForPrompt, type KnowledgeHit } from "@/lib/rag/client";
 
 interface Props {
   open: boolean;
@@ -57,6 +60,7 @@ const extractSQL = (raw: string): string => {
 const initialSteps = (): AgentStep[] => [
   { key: "ontology", name: "Ontology Resolver", hint: "本体匹配", status: "pending" },
   { key: "planner", name: "Planner", hint: "任务拆解", status: "pending" },
+  { key: "retriever", name: "Retriever", hint: "Hybrid RAG 召回", status: "pending" },
   { key: "ontologist", name: "Ontologist", hint: "语义映射", status: "pending" },
   { key: "sql", name: "SQL Writer", hint: "受约束SQL生成", status: "pending" },
   { key: "exec", name: "Executor", hint: "DuckDB 本地执行", status: "pending" },
@@ -70,6 +74,7 @@ const AgentOrchestrator = ({ open, onClose, initialQuestion = "" }: Props) => {
   const [steps, setSteps] = useState<AgentStep[]>(initialSteps());
   const [answer, setAnswer] = useState<string>("");
   const [chartSpec, setChartSpec] = useState<unknown>(null);
+  const [kbOpen, setKbOpen] = useState(false);
 
   const updateStep = (key: string, patch: Partial<AgentStep>) =>
     setSteps((prev) => prev.map((s) => (s.key === key ? { ...s, ...patch } : s)));
@@ -143,12 +148,38 @@ ${matchSummary}`;
         ),
       });
 
-      // ---------- 3. Ontologist ----------
+      // ---------- 3. Retriever (Hybrid RAG) ----------
+      const tR = performance.now();
+      updateStep("retriever", { status: "running" });
+      let hits: KnowledgeHit[] = [];
+      let retrievalContext = "(知识库无召回)";
+      try {
+        const r = await searchKnowledge(question, { topK: 6 });
+        hits = r.hits ?? [];
+        retrievalContext = summarizeHitsForPrompt(hits);
+        updateStep("retriever", {
+          status: "done",
+          summary: hits.length
+            ? `${hits.length} 命中 · embed ${r.embed_ms}ms · search ${r.search_ms}ms`
+            : "知识库为空，跳过",
+          durationMs: Math.round(performance.now() - tR),
+          detail: <RetrievalStepCard hits={hits} />,
+        });
+      } catch (err) {
+        updateStep("retriever", {
+          status: "error",
+          error: (err as Error).message,
+          summary: "检索失败，继续主链路",
+          durationMs: Math.round(performance.now() - tR),
+        });
+      }
+
+      // ---------- 4. Ontologist ----------
       const t2 = performance.now();
       updateStep("ontologist", { status: "running" });
       const mapRaw = await callAgentStep(
         "ontologist",
-        `你是 Ontologist。基于提供的本体与用户问题，输出最终业务概念映射 JSON:
+        `你是 Ontologist。基于提供的本体、用户问题和知识库召回，输出最终业务概念映射 JSON:
 {
   "entities": ["..."],
   "metrics": ["..."],
@@ -157,7 +188,7 @@ ${matchSummary}`;
   "time_range_days": 7
 }
 只能引用本体中存在的实体/字段/指标。`,
-        ontologyContext,
+        `${ontologyContext}\n\n# Retrieved knowledge\n${retrievalContext}`,
         { jsonMode: true },
       );
       let mapping: any = {};
@@ -185,7 +216,7 @@ ${matchSummary}`;
 - 只能用本体中声明的表与字段；
 - 限制 LIMIT 500；
 - 仅输出 \`\`\`sql 代码块，无其他文字。`,
-        `${ontologyContext}\n\n# Mapping\n${JSON.stringify(mapping)}\n\n# Allowed fields\n${allowed}`,
+        `${ontologyContext}\n\n# Mapping\n${JSON.stringify(mapping)}\n\n# Allowed fields\n${allowed}\n\n# Retrieved knowledge\n${retrievalContext}`,
         { model: "google/gemini-3.5-flash" },
       );
       const sql = extractSQL(sqlRaw);
@@ -329,12 +360,22 @@ ${matchSummary}`;
               Ontology v{ONTOLOGY.version}
             </span>
           </div>
-          <button
-            onClick={onClose}
-            className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
-          >
-            <X className="h-4 w-4" />
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => setKbOpen(true)}
+              className="flex items-center gap-1 rounded border border-border px-2 py-1 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+              title="管理知识库 (Hybrid RAG)"
+            >
+              <Database className="h-3 w-3" />
+              知识库
+            </button>
+            <button
+              onClick={onClose}
+              className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
         </div>
 
         {/* Body */}
@@ -406,6 +447,7 @@ ${matchSummary}`;
           )}
         </div>
       </div>
+      <KnowledgeIngestionPanel open={kbOpen} onClose={() => setKbOpen(false)} />
     </div>
   );
 };
