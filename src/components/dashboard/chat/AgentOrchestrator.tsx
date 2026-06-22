@@ -1,9 +1,12 @@
 import { useState } from "react";
-import { Sparkle, Send, X, BarChart3 } from "lucide-react";
+import { Sparkle, Send, X, BarChart3, Database } from "lucide-react";
 import AgentStepCard, { AgentStep } from "./AgentStepCard";
+import RetrievalStepCard from "./RetrievalStepCard";
+import KnowledgeIngestionPanel from "./KnowledgeIngestionPanel";
 import { ONTOLOGY, resolveQuestion, summarizeMatchForPrompt, listAllowedFields } from "@/lib/ontology";
 import { duckdbManager } from "@/lib/duckdb/client";
 import { isSafeReadOnlySql } from "@/lib/duckdb/safety";
+import { searchKnowledge, summarizeHitsForPrompt, type KnowledgeHit } from "@/lib/rag/client";
 
 interface Props {
   open: boolean;
