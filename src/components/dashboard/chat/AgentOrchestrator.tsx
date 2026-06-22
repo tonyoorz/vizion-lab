@@ -360,12 +360,22 @@ ${matchSummary}`;
               Ontology v{ONTOLOGY.version}
             </span>
           </div>
-          <button
-            onClick={onClose}
-            className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
-          >
-            <X className="h-4 w-4" />
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => setKbOpen(true)}
+              className="flex items-center gap-1 rounded border border-border px-2 py-1 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+              title="管理知识库 (Hybrid RAG)"
+            >
+              <Database className="h-3 w-3" />
+              知识库
+            </button>
+            <button
+              onClick={onClose}
+              className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
         </div>
 
         {/* Body */}
