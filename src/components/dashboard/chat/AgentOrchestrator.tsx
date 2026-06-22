@@ -148,12 +148,38 @@ ${matchSummary}`;
         ),
       });
 
-      // ---------- 3. Ontologist ----------
+      // ---------- 3. Retriever (Hybrid RAG) ----------
+      const tR = performance.now();
+      updateStep("retriever", { status: "running" });
+      let hits: KnowledgeHit[] = [];
+      let retrievalContext = "(知识库无召回)";
+      try {
+        const r = await searchKnowledge(question, { topK: 6 });
+        hits = r.hits ?? [];
+        retrievalContext = summarizeHitsForPrompt(hits);
+        updateStep("retriever", {
+          status: "done",
+          summary: hits.length
+            ? `${hits.length} 命中 · embed ${r.embed_ms}ms · search ${r.search_ms}ms`
+            : "知识库为空，跳过",
+          durationMs: Math.round(performance.now() - tR),
+          detail: <RetrievalStepCard hits={hits} />,
+        });
+      } catch (err) {
+        updateStep("retriever", {
+          status: "error",
+          error: (err as Error).message,
+          summary: "检索失败，继续主链路",
+          durationMs: Math.round(performance.now() - tR),
+        });
+      }
+
+      // ---------- 4. Ontologist ----------
       const t2 = performance.now();
       updateStep("ontologist", { status: "running" });
       const mapRaw = await callAgentStep(
         "ontologist",
-        `你是 Ontologist。基于提供的本体与用户问题，输出最终业务概念映射 JSON:
+        `你是 Ontologist。基于提供的本体、用户问题和知识库召回，输出最终业务概念映射 JSON:
 {
   "entities": ["..."],
   "metrics": ["..."],
@@ -162,7 +188,7 @@ ${matchSummary}`;
   "time_range_days": 7
 }
 只能引用本体中存在的实体/字段/指标。`,
-        ontologyContext,
+        `${ontologyContext}\n\n# Retrieved knowledge\n${retrievalContext}`,
         { jsonMode: true },
       );
       let mapping: any = {};
