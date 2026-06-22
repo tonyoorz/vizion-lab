@@ -216,7 +216,7 @@ ${matchSummary}`;
 - 只能用本体中声明的表与字段；
 - 限制 LIMIT 500；
 - 仅输出 \`\`\`sql 代码块，无其他文字。`,
-        `${ontologyContext}\n\n# Mapping\n${JSON.stringify(mapping)}\n\n# Allowed fields\n${allowed}`,
+        `${ontologyContext}\n\n# Mapping\n${JSON.stringify(mapping)}\n\n# Allowed fields\n${allowed}\n\n# Retrieved knowledge\n${retrievalContext}`,
         { model: "google/gemini-3.5-flash" },
       );
       const sql = extractSQL(sqlRaw);
