@@ -60,6 +60,7 @@ const extractSQL = (raw: string): string => {
 const initialSteps = (): AgentStep[] => [
   { key: "ontology", name: "Ontology Resolver", hint: "本体匹配", status: "pending" },
   { key: "planner", name: "Planner", hint: "任务拆解", status: "pending" },
+  { key: "retriever", name: "Retriever", hint: "Hybrid RAG 召回", status: "pending" },
   { key: "ontologist", name: "Ontologist", hint: "语义映射", status: "pending" },
   { key: "sql", name: "SQL Writer", hint: "受约束SQL生成", status: "pending" },
   { key: "exec", name: "Executor", hint: "DuckDB 本地执行", status: "pending" },
