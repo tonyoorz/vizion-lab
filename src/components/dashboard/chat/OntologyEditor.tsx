@@ -28,7 +28,7 @@ const OntologyEditor = ({ open, onClose }: Props) => {
   const [editingMetric, setEditingMetric] = useState<Metric | null>(null);
   const [editingMetricOriginalName, setEditingMetricOriginalName] = useState<string | null>(null);
 
-  useEffect(() => subscribeOntology(() => setSnap(getOntologySnapshot())) as unknown as () => void, []);
+  useEffect(() => subscribeOntology(() => setSnap(getOntologySnapshot())), []);
 
   if (!open) return null;
 

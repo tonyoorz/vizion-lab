@@ -12,9 +12,11 @@ const BASELINE: Ontology = JSON.parse(JSON.stringify(ONTOLOGY));
 type Listener = () => void;
 const listeners = new Set<Listener>();
 
-export const subscribeOntology = (fn: Listener) => {
+export const subscribeOntology = (fn: Listener): (() => void) => {
   listeners.add(fn);
-  return () => listeners.delete(fn);
+  return () => {
+    listeners.delete(fn);
+  };
 };
 const emit = () => listeners.forEach((l) => l());
 
