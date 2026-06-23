@@ -365,6 +365,14 @@ ${matchSummary}`;
           </div>
           <div className="flex items-center gap-1">
             <button
+              onClick={() => setEditorOpen(true)}
+              className="flex items-center gap-1 rounded border border-border px-2 py-1 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+              title="编辑本体（实体/字段/指标）"
+            >
+              <Settings2 className="h-3 w-3" />
+              本体
+            </button>
+            <button
               onClick={() => setKbOpen(true)}
               className="flex items-center gap-1 rounded border border-border px-2 py-1 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
               title="管理知识库 (Hybrid RAG)"
