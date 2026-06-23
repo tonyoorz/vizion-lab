@@ -2,6 +2,9 @@ import type { Ontology } from "./schema";
 
 // Seed ontology for the DTSV testing domain.
 // Mirrors physical tables exposed via DuckDB-WASM.
+// NOTE: mutable export — Ontology Editor overrides mutate this object in-place
+// via `applyOntologyOverrides` so existing `import { ONTOLOGY }` references
+// continue to see the latest version without refactoring downstream callers.
 export const ONTOLOGY: Ontology = {
   version: "0.1.0",
   entities: [

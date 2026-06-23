@@ -1,9 +1,11 @@
 import { useState } from "react";
-import { Sparkle, Send, X, BarChart3, Database } from "lucide-react";
+import { Sparkle, Send, X, BarChart3, Database, Settings2 } from "lucide-react";
 import AgentStepCard, { AgentStep } from "./AgentStepCard";
 import RetrievalStepCard from "./RetrievalStepCard";
 import KnowledgeIngestionPanel from "./KnowledgeIngestionPanel";
+import OntologyEditor from "./OntologyEditor";
 import { ONTOLOGY, resolveQuestion, summarizeMatchForPrompt, listAllowedFields } from "@/lib/ontology";
+import "@/lib/ontology/store"; // hydrate localStorage overrides at boot
 import { duckdbManager } from "@/lib/duckdb/client";
 import { isSafeReadOnlySql } from "@/lib/duckdb/safety";
 import { searchKnowledge, summarizeHitsForPrompt, type KnowledgeHit } from "@/lib/rag/client";
@@ -75,6 +77,7 @@ const AgentOrchestrator = ({ open, onClose, initialQuestion = "" }: Props) => {
   const [answer, setAnswer] = useState<string>("");
   const [chartSpec, setChartSpec] = useState<unknown>(null);
   const [kbOpen, setKbOpen] = useState(false);
+  const [editorOpen, setEditorOpen] = useState(false);
 
   const updateStep = (key: string, patch: Partial<AgentStep>) =>
     setSteps((prev) => prev.map((s) => (s.key === key ? { ...s, ...patch } : s)));
@@ -362,6 +365,14 @@ ${matchSummary}`;
           </div>
           <div className="flex items-center gap-1">
             <button
+              onClick={() => setEditorOpen(true)}
+              className="flex items-center gap-1 rounded border border-border px-2 py-1 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+              title="编辑本体（实体/字段/指标）"
+            >
+              <Settings2 className="h-3 w-3" />
+              本体
+            </button>
+            <button
               onClick={() => setKbOpen(true)}
               className="flex items-center gap-1 rounded border border-border px-2 py-1 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
               title="管理知识库 (Hybrid RAG)"
@@ -448,6 +459,7 @@ ${matchSummary}`;
         </div>
       </div>
       <KnowledgeIngestionPanel open={kbOpen} onClose={() => setKbOpen(false)} />
+      <OntologyEditor open={editorOpen} onClose={() => setEditorOpen(false)} />
     </div>
   );
 };
