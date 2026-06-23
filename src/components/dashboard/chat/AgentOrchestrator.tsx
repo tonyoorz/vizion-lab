@@ -459,6 +459,7 @@ ${matchSummary}`;
         </div>
       </div>
       <KnowledgeIngestionPanel open={kbOpen} onClose={() => setKbOpen(false)} />
+      <OntologyEditor open={editorOpen} onClose={() => setEditorOpen(false)} />
     </div>
   );
 };
