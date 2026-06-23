@@ -1,9 +1,11 @@
 import { useState } from "react";
-import { Sparkle, Send, X, BarChart3, Database } from "lucide-react";
+import { Sparkle, Send, X, BarChart3, Database, Settings2 } from "lucide-react";
 import AgentStepCard, { AgentStep } from "./AgentStepCard";
 import RetrievalStepCard from "./RetrievalStepCard";
 import KnowledgeIngestionPanel from "./KnowledgeIngestionPanel";
+import OntologyEditor from "./OntologyEditor";
 import { ONTOLOGY, resolveQuestion, summarizeMatchForPrompt, listAllowedFields } from "@/lib/ontology";
+import "@/lib/ontology/store"; // hydrate localStorage overrides at boot
 import { duckdbManager } from "@/lib/duckdb/client";
 import { isSafeReadOnlySql } from "@/lib/duckdb/safety";
 import { searchKnowledge, summarizeHitsForPrompt, type KnowledgeHit } from "@/lib/rag/client";
@@ -75,6 +77,7 @@ const AgentOrchestrator = ({ open, onClose, initialQuestion = "" }: Props) => {
   const [answer, setAnswer] = useState<string>("");
   const [chartSpec, setChartSpec] = useState<unknown>(null);
   const [kbOpen, setKbOpen] = useState(false);
+  const [editorOpen, setEditorOpen] = useState(false);
 
   const updateStep = (key: string, patch: Partial<AgentStep>) =>
     setSteps((prev) => prev.map((s) => (s.key === key ? { ...s, ...patch } : s)));
