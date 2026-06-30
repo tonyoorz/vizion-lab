@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Sparkle, Send, X, BarChart3, Database, Settings2 } from "lucide-react";
+import { Sparkle, Send, X, BarChart3, Database, Settings2, ThumbsUp, ThumbsDown, Check } from "lucide-react";
 import AgentStepCard, { AgentStep } from "./AgentStepCard";
 import RetrievalStepCard from "./RetrievalStepCard";
 import KnowledgeIngestionPanel from "./KnowledgeIngestionPanel";
@@ -8,7 +8,7 @@ import { ONTOLOGY, resolveQuestion, summarizeMatchForPrompt, listAllowedFields }
 import "@/lib/ontology/store"; // hydrate localStorage overrides at boot
 import { duckdbManager } from "@/lib/duckdb/client";
 import { isSafeReadOnlySql } from "@/lib/duckdb/safety";
-import { searchKnowledge, summarizeHitsForPrompt, type KnowledgeHit } from "@/lib/rag/client";
+import { searchKnowledge, summarizeHitsForPrompt, ingestKnowledge, type KnowledgeHit } from "@/lib/rag/client";
 
 interface Props {
   open: boolean;
@@ -78,6 +78,9 @@ const AgentOrchestrator = ({ open, onClose, initialQuestion = "" }: Props) => {
   const [chartSpec, setChartSpec] = useState<unknown>(null);
   const [kbOpen, setKbOpen] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
+  const [lastRun, setLastRun] = useState<{ question: string; sql: string; rowCount: number; sampleRows: unknown[] } | null>(null);
+  const [feedback, setFeedback] = useState<null | "up" | "down" | "saving" | "saved-up" | "saved-down" | "error">(null);
+  const [feedbackNote, setFeedbackNote] = useState("");
 
   const updateStep = (key: string, patch: Partial<AgentStep>) =>
     setSteps((prev) => prev.map((s) => (s.key === key ? { ...s, ...patch } : s)));
@@ -88,6 +91,9 @@ const AgentOrchestrator = ({ open, onClose, initialQuestion = "" }: Props) => {
     setAnswer("");
     setChartSpec(null);
     setSteps(initialSteps());
+    setLastRun(null);
+    setFeedback(null);
+    setFeedbackNote("");
 
     try {
       // ---------- 1. Ontology Resolver (local, no LLM) ----------
@@ -190,7 +196,10 @@ ${matchSummary}`;
   "filters": [{"field":"defects.severity","op":"=","value":"P0"}],
   "time_range_days": 7
 }
-只能引用本体中存在的实体/字段/指标。`,
+只能引用本体中存在的实体/字段/指标。
+注意召回中的反馈信号：
+- source_type=qa_history 是历史👍答案，优先复用其字段组合与口径；
+- source_type=qa_negative 是历史👎答案，必须规避其错误（content 内通常含 REASON）。`,
         `${ontologyContext}\n\n# Retrieved knowledge\n${retrievalContext}`,
         { jsonMode: true },
       );
@@ -218,6 +227,7 @@ ${matchSummary}`;
 - 只读 SELECT (禁止 INSERT/UPDATE/DELETE/ATTACH 等)；
 - 只能用本体中声明的表与字段；
 - 限制 LIMIT 500；
+- 若 Retrieved knowledge 中存在 source_type=qa_history 的相似问题，复用其 SQL 模式；遇到 qa_negative 必须改写避免重复错误；
 - 仅输出 \`\`\`sql 代码块，无其他文字。`,
         `${ontologyContext}\n\n# Mapping\n${JSON.stringify(mapping)}\n\n# Allowed fields\n${allowed}\n\n# Retrieved knowledge\n${retrievalContext}`,
         { model: "google/gemini-3.5-flash" },
@@ -335,6 +345,12 @@ ${matchSummary}`;
       try { present = extractJSON(presentRaw); } catch { present = { markdown: presentRaw }; }
       setAnswer(present.markdown || "");
       if (present.chart) setChartSpec({ ...present.chart, rows: result.rows });
+      setLastRun({
+        question,
+        sql,
+        rowCount: result.rowCount,
+        sampleRows: result.rows.slice(0, 10),
+      });
       updateStep("presenter", {
         status: "done",
         summary: "已生成回答",
@@ -348,6 +364,73 @@ ${matchSummary}`;
       setRunning(false);
     }
   };
+
+  const submitFeedback = async (kind: "up" | "down") => {
+    if (!lastRun || !answer || feedback === "saving") return;
+    setFeedback("saving");
+    try {
+      const ts = new Date().toISOString();
+      const sourceId = `qa-${Date.now()}`;
+      if (kind === "up") {
+        // 高质量问答 → 写入 knowledge_chunks (source_type=qa_history)
+        // 未来同类问题会被 Retriever 自动召回，形成自学习闭环。
+        const content = [
+          `Q: ${lastRun.question}`,
+          `A: ${answer}`,
+          "",
+          "SQL:",
+          lastRun.sql,
+          "",
+          `ROWS: ${lastRun.rowCount}`,
+          `SAMPLE: ${JSON.stringify(lastRun.sampleRows).slice(0, 800)}`,
+          feedbackNote ? `\nNOTE: ${feedbackNote}` : "",
+        ].join("\n");
+        await ingestKnowledge([
+          {
+            source_type: "qa_history",
+            source_id: sourceId,
+            title: lastRun.question.slice(0, 120),
+            content,
+            metadata: {
+              kind: "qa_history",
+              verdict: "good",
+              ontology_version: ONTOLOGY.version,
+              row_count: lastRun.rowCount,
+              created_at: ts,
+            },
+          },
+        ]);
+        setFeedback("saved-up");
+      } else {
+        // 低质量 → 仅记录为反例，避免污染正向检索；source_type=qa_negative,
+        // Retriever 默认不召回（除非显式指定 source_types）。
+        await ingestKnowledge([
+          {
+            source_type: "qa_negative",
+            source_id: sourceId,
+            title: lastRun.question.slice(0, 120),
+            content: [
+              `Q: ${lastRun.question}`,
+              `A(bad): ${answer}`,
+              `SQL: ${lastRun.sql}`,
+              feedbackNote ? `REASON: ${feedbackNote}` : "REASON: (未填写)",
+            ].join("\n"),
+            metadata: {
+              kind: "qa_negative",
+              verdict: "bad",
+              ontology_version: ONTOLOGY.version,
+              created_at: ts,
+            },
+          },
+        ]);
+        setFeedback("saved-down");
+      }
+    } catch (e) {
+      console.error("[qa-feedback]", e);
+      setFeedback("error");
+    }
+  };
+
 
   if (!open) return null;
 
@@ -454,6 +537,54 @@ ${matchSummary}`;
                   <span className="ml-2 text-muted-foreground/60">（图表渲染将在 Phase 3 接入）</span>
                 </div>
               ) : null}
+
+              {/* Phase 5: 问答反馈闭环 */}
+              {lastRun && (
+                <div className="mt-4 border-t border-border/60 pt-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-[11px] text-muted-foreground">
+                      这个回答有用吗？<span className="ml-1 text-muted-foreground/60">👍 会被写入知识库，下次自动召回</span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        onClick={() => submitFeedback("up")}
+                        disabled={feedback === "saving" || feedback === "saved-up" || feedback === "saved-down"}
+                        className={`flex items-center gap-1 rounded border px-2 py-1 text-[11px] transition-colors disabled:opacity-50 ${
+                          feedback === "saved-up"
+                            ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                            : "border-border hover:bg-muted"
+                        }`}
+                      >
+                        {feedback === "saved-up" ? <Check className="h-3 w-3" /> : <ThumbsUp className="h-3 w-3" />}
+                        {feedback === "saved-up" ? "已入库" : "有用"}
+                      </button>
+                      <button
+                        onClick={() => submitFeedback("down")}
+                        disabled={feedback === "saving" || feedback === "saved-up" || feedback === "saved-down"}
+                        className={`flex items-center gap-1 rounded border px-2 py-1 text-[11px] transition-colors disabled:opacity-50 ${
+                          feedback === "saved-down"
+                            ? "border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400"
+                            : "border-border hover:bg-muted"
+                        }`}
+                      >
+                        {feedback === "saved-down" ? <Check className="h-3 w-3" /> : <ThumbsDown className="h-3 w-3" />}
+                        {feedback === "saved-down" ? "已记录" : "不准确"}
+                      </button>
+                    </div>
+                  </div>
+                  {feedback !== "saved-up" && feedback !== "saved-down" && (
+                    <input
+                      value={feedbackNote}
+                      onChange={(e) => setFeedbackNote(e.target.value)}
+                      placeholder="可选：补充原因 / 期望答案 / 关键洞察（会随反馈一同入库）"
+                      className="mt-2 w-full rounded border border-border bg-background px-2 py-1.5 text-[11px] outline-none placeholder:text-muted-foreground/60 focus:border-primary"
+                    />
+                  )}
+                  {feedback === "error" && (
+                    <div className="mt-2 text-[11px] text-destructive">反馈提交失败，请稍后重试。</div>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>
