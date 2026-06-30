@@ -78,6 +78,9 @@ const AgentOrchestrator = ({ open, onClose, initialQuestion = "" }: Props) => {
   const [chartSpec, setChartSpec] = useState<unknown>(null);
   const [kbOpen, setKbOpen] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
+  const [lastRun, setLastRun] = useState<{ question: string; sql: string; rowCount: number; sampleRows: unknown[] } | null>(null);
+  const [feedback, setFeedback] = useState<null | "up" | "down" | "saving" | "saved-up" | "saved-down" | "error">(null);
+  const [feedbackNote, setFeedbackNote] = useState("");
 
   const updateStep = (key: string, patch: Partial<AgentStep>) =>
     setSteps((prev) => prev.map((s) => (s.key === key ? { ...s, ...patch } : s)));
