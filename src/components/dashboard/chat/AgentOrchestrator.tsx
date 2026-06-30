@@ -361,6 +361,73 @@ ${matchSummary}`;
     }
   };
 
+  const submitFeedback = async (kind: "up" | "down") => {
+    if (!lastRun || !answer || feedback === "saving") return;
+    setFeedback("saving");
+    try {
+      const ts = new Date().toISOString();
+      const sourceId = `qa-${Date.now()}`;
+      if (kind === "up") {
+        // 高质量问答 → 写入 knowledge_chunks (source_type=qa_history)
+        // 未来同类问题会被 Retriever 自动召回，形成自学习闭环。
+        const content = [
+          `Q: ${lastRun.question}`,
+          `A: ${answer}`,
+          "",
+          "SQL:",
+          lastRun.sql,
+          "",
+          `ROWS: ${lastRun.rowCount}`,
+          `SAMPLE: ${JSON.stringify(lastRun.sampleRows).slice(0, 800)}`,
+          feedbackNote ? `\nNOTE: ${feedbackNote}` : "",
+        ].join("\n");
+        await ingestKnowledge([
+          {
+            source_type: "qa_history",
+            source_id: sourceId,
+            title: lastRun.question.slice(0, 120),
+            content,
+            metadata: {
+              kind: "qa_history",
+              verdict: "good",
+              ontology_version: ONTOLOGY.version,
+              row_count: lastRun.rowCount,
+              created_at: ts,
+            },
+          },
+        ]);
+        setFeedback("saved-up");
+      } else {
+        // 低质量 → 仅记录为反例，避免污染正向检索；source_type=qa_negative,
+        // Retriever 默认不召回（除非显式指定 source_types）。
+        await ingestKnowledge([
+          {
+            source_type: "qa_negative",
+            source_id: sourceId,
+            title: lastRun.question.slice(0, 120),
+            content: [
+              `Q: ${lastRun.question}`,
+              `A(bad): ${answer}`,
+              `SQL: ${lastRun.sql}`,
+              feedbackNote ? `REASON: ${feedbackNote}` : "REASON: (未填写)",
+            ].join("\n"),
+            metadata: {
+              kind: "qa_negative",
+              verdict: "bad",
+              ontology_version: ONTOLOGY.version,
+              created_at: ts,
+            },
+          },
+        ]);
+        setFeedback("saved-down");
+      }
+    } catch (e) {
+      console.error("[qa-feedback]", e);
+      setFeedback("error");
+    }
+  };
+
+
   if (!open) return null;
 
   return (
