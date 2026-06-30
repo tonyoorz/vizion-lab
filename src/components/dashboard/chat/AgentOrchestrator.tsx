@@ -227,6 +227,7 @@ ${matchSummary}`;
 - 只读 SELECT (禁止 INSERT/UPDATE/DELETE/ATTACH 等)；
 - 只能用本体中声明的表与字段；
 - 限制 LIMIT 500；
+- 若 Retrieved knowledge 中存在 source_type=qa_history 的相似问题，复用其 SQL 模式；遇到 qa_negative 必须改写避免重复错误；
 - 仅输出 \`\`\`sql 代码块，无其他文字。`,
         `${ontologyContext}\n\n# Mapping\n${JSON.stringify(mapping)}\n\n# Allowed fields\n${allowed}\n\n# Retrieved knowledge\n${retrievalContext}`,
         { model: "google/gemini-3.5-flash" },
