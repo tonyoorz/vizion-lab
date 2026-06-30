@@ -533,6 +533,54 @@ ${matchSummary}`;
                   <span className="ml-2 text-muted-foreground/60">（图表渲染将在 Phase 3 接入）</span>
                 </div>
               ) : null}
+
+              {/* Phase 5: 问答反馈闭环 */}
+              {lastRun && (
+                <div className="mt-4 border-t border-border/60 pt-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-[11px] text-muted-foreground">
+                      这个回答有用吗？<span className="ml-1 text-muted-foreground/60">👍 会被写入知识库，下次自动召回</span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        onClick={() => submitFeedback("up")}
+                        disabled={feedback === "saving" || feedback === "saved-up" || feedback === "saved-down"}
+                        className={`flex items-center gap-1 rounded border px-2 py-1 text-[11px] transition-colors disabled:opacity-50 ${
+                          feedback === "saved-up"
+                            ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                            : "border-border hover:bg-muted"
+                        }`}
+                      >
+                        {feedback === "saved-up" ? <Check className="h-3 w-3" /> : <ThumbsUp className="h-3 w-3" />}
+                        {feedback === "saved-up" ? "已入库" : "有用"}
+                      </button>
+                      <button
+                        onClick={() => submitFeedback("down")}
+                        disabled={feedback === "saving" || feedback === "saved-up" || feedback === "saved-down"}
+                        className={`flex items-center gap-1 rounded border px-2 py-1 text-[11px] transition-colors disabled:opacity-50 ${
+                          feedback === "saved-down"
+                            ? "border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400"
+                            : "border-border hover:bg-muted"
+                        }`}
+                      >
+                        {feedback === "saved-down" ? <Check className="h-3 w-3" /> : <ThumbsDown className="h-3 w-3" />}
+                        {feedback === "saved-down" ? "已记录" : "不准确"}
+                      </button>
+                    </div>
+                  </div>
+                  {feedback !== "saved-up" && feedback !== "saved-down" && (
+                    <input
+                      value={feedbackNote}
+                      onChange={(e) => setFeedbackNote(e.target.value)}
+                      placeholder="可选：补充原因 / 期望答案 / 关键洞察（会随反馈一同入库）"
+                      className="mt-2 w-full rounded border border-border bg-background px-2 py-1.5 text-[11px] outline-none placeholder:text-muted-foreground/60 focus:border-primary"
+                    />
+                  )}
+                  {feedback === "error" && (
+                    <div className="mt-2 text-[11px] text-destructive">反馈提交失败，请稍后重试。</div>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>
