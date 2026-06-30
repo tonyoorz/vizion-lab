@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Sparkle, Send, X, BarChart3, Database, Settings2 } from "lucide-react";
+import { Sparkle, Send, X, BarChart3, Database, Settings2, ThumbsUp, ThumbsDown, Check } from "lucide-react";
 import AgentStepCard, { AgentStep } from "./AgentStepCard";
 import RetrievalStepCard from "./RetrievalStepCard";
 import KnowledgeIngestionPanel from "./KnowledgeIngestionPanel";
@@ -8,7 +8,7 @@ import { ONTOLOGY, resolveQuestion, summarizeMatchForPrompt, listAllowedFields }
 import "@/lib/ontology/store"; // hydrate localStorage overrides at boot
 import { duckdbManager } from "@/lib/duckdb/client";
 import { isSafeReadOnlySql } from "@/lib/duckdb/safety";
-import { searchKnowledge, summarizeHitsForPrompt, type KnowledgeHit } from "@/lib/rag/client";
+import { searchKnowledge, summarizeHitsForPrompt, ingestKnowledge, type KnowledgeHit } from "@/lib/rag/client";
 
 interface Props {
   open: boolean;
