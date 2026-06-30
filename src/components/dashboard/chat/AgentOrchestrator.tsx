@@ -94,6 +94,8 @@ const AgentOrchestrator = ({ open, onClose, initialQuestion = "" }: Props) => {
     setLastRun(null);
     setFeedback(null);
     setFeedbackNote("");
+
+    try {
       // ---------- 1. Ontology Resolver (local, no LLM) ----------
       const t0 = performance.now();
       updateStep("ontology", { status: "running" });
