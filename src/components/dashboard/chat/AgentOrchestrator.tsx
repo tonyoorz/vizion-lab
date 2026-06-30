@@ -341,6 +341,12 @@ ${matchSummary}`;
       try { present = extractJSON(presentRaw); } catch { present = { markdown: presentRaw }; }
       setAnswer(present.markdown || "");
       if (present.chart) setChartSpec({ ...present.chart, rows: result.rows });
+      setLastRun({
+        question,
+        sql,
+        rowCount: result.rowCount,
+        sampleRows: result.rows.slice(0, 10),
+      });
       updateStep("presenter", {
         status: "done",
         summary: "已生成回答",
