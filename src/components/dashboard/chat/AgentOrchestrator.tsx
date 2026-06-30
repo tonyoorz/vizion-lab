@@ -196,7 +196,10 @@ ${matchSummary}`;
   "filters": [{"field":"defects.severity","op":"=","value":"P0"}],
   "time_range_days": 7
 }
-只能引用本体中存在的实体/字段/指标。`,
+只能引用本体中存在的实体/字段/指标。
+注意召回中的反馈信号：
+- source_type=qa_history 是历史👍答案，优先复用其字段组合与口径；
+- source_type=qa_negative 是历史👎答案，必须规避其错误（content 内通常含 REASON）。`,
         `${ontologyContext}\n\n# Retrieved knowledge\n${retrievalContext}`,
         { jsonMode: true },
       );
