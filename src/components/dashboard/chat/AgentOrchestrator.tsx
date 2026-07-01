@@ -171,6 +171,7 @@ ${matchSummary}`;
       try {
         const r = await searchKnowledge(question, { topK: 6 });
         hits = r.hits ?? [];
+        setRagHits(hits);
         retrievalContext = summarizeHitsForPrompt(hits);
         updateStep("retriever", {
           status: "done",
