@@ -1,10 +1,11 @@
 import { useState } from "react";
-import { Sparkle, Send, X, BarChart3, Database, Settings2, ThumbsUp, ThumbsDown, Check } from "lucide-react";
+import { Sparkle, Send, X, BarChart3, Database, Settings2, ThumbsUp, ThumbsDown, Check, BookMarked, Boxes } from "lucide-react";
 import AgentStepCard, { AgentStep } from "./AgentStepCard";
 import RetrievalStepCard from "./RetrievalStepCard";
 import KnowledgeIngestionPanel from "./KnowledgeIngestionPanel";
 import OntologyEditor from "./OntologyEditor";
 import { ONTOLOGY, resolveQuestion, summarizeMatchForPrompt, listAllowedFields } from "@/lib/ontology";
+import type { OntologyMatch } from "@/lib/ontology/schema";
 import "@/lib/ontology/store"; // hydrate localStorage overrides at boot
 import { duckdbManager } from "@/lib/duckdb/client";
 import { isSafeReadOnlySql } from "@/lib/duckdb/safety";
