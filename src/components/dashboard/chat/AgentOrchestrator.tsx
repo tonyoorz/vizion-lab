@@ -105,6 +105,7 @@ const AgentOrchestrator = ({ open, onClose, initialQuestion = "" }: Props) => {
       const t0 = performance.now();
       updateStep("ontology", { status: "running" });
       const match = resolveQuestion(question);
+      setOntoMatch(match);
       const matchSummary = summarizeMatchForPrompt(match);
       updateStep("ontology", {
         status: "done",
