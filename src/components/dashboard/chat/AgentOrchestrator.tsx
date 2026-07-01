@@ -82,6 +82,8 @@ const AgentOrchestrator = ({ open, onClose, initialQuestion = "" }: Props) => {
   const [lastRun, setLastRun] = useState<{ question: string; sql: string; rowCount: number; sampleRows: unknown[] } | null>(null);
   const [feedback, setFeedback] = useState<null | "up" | "down" | "saving" | "saved-up" | "saved-down" | "error">(null);
   const [feedbackNote, setFeedbackNote] = useState("");
+  const [ontoMatch, setOntoMatch] = useState<OntologyMatch | null>(null);
+  const [ragHits, setRagHits] = useState<KnowledgeHit[]>([]);
 
   const updateStep = (key: string, patch: Partial<AgentStep>) =>
     setSteps((prev) => prev.map((s) => (s.key === key ? { ...s, ...patch } : s)));
