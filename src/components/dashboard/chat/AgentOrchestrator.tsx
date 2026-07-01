@@ -97,6 +97,8 @@ const AgentOrchestrator = ({ open, onClose, initialQuestion = "" }: Props) => {
     setLastRun(null);
     setFeedback(null);
     setFeedbackNote("");
+    setOntoMatch(null);
+    setRagHits([]);
 
     try {
       // ---------- 1. Ontology Resolver (local, no LLM) ----------
