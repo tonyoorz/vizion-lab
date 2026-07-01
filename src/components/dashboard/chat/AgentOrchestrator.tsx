@@ -545,6 +545,105 @@ ${matchSummary}`;
                 </div>
               ) : null}
 
+              {/* 引用来源: Ontology 概念 + Knowledge 片段 */}
+              {(ontoMatch && (ontoMatch.entities.length || ontoMatch.metrics.length || ontoMatch.attributes.length)) || ragHits.length ? (
+                <div className="mt-4 border-t border-border/60 pt-3">
+                  <div className="mb-2 flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                    <BookMarked className="h-3 w-3" />
+                    参考来源
+                  </div>
+
+                  {ontoMatch && (ontoMatch.entities.length + ontoMatch.metrics.length + ontoMatch.attributes.length) > 0 && (
+                    <div className="mb-3">
+                      <div className="mb-1 flex items-center gap-1 text-[10px] uppercase tracking-wider text-muted-foreground/80">
+                        <Boxes className="h-3 w-3" />
+                        Ontology 概念 ({ontoMatch.entities.length + ontoMatch.metrics.length + ontoMatch.attributes.length})
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {ontoMatch.entities.map((e, i) => (
+                          <span
+                            key={`e-${i}`}
+                            title={`匹配同义词: ${e.matchedSynonym ?? "-"} · 表 ${e.entity.table}`}
+                            className="inline-flex items-center gap-1 rounded-full border border-primary/30 bg-primary/5 px-2 py-0.5 text-[10px] text-foreground"
+                          >
+                            <span className="text-primary/80">实体</span>
+                            <span className="font-medium">{e.entity.name}</span>
+                            <span className="text-muted-foreground/70">→ {e.entity.table}</span>
+                          </span>
+                        ))}
+                        {ontoMatch.metrics.map((m, i) => (
+                          <span
+                            key={`m-${i}`}
+                            title={`公式: ${m.metric.formula}`}
+                            className="inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/5 px-2 py-0.5 text-[10px] text-foreground"
+                          >
+                            <span className="text-emerald-600 dark:text-emerald-400">指标</span>
+                            <span className="font-medium">{m.metric.label}</span>
+                          </span>
+                        ))}
+                        {ontoMatch.attributes.map((a, i) => (
+                          <span
+                            key={`a-${i}`}
+                            title={`字段 ${a.entity.table}.${a.attribute.name}`}
+                            className="inline-flex items-center gap-1 rounded-full border border-border bg-muted/40 px-2 py-0.5 text-[10px] text-foreground"
+                          >
+                            <span className="text-muted-foreground">字段</span>
+                            <span className="font-mono">
+                              {a.entity.name}.{a.attribute.name}
+                              {a.enumValueMatched ? `=${a.enumValueMatched}` : ""}
+                            </span>
+                          </span>
+                        ))}
+                      </div>
+                      <div className="mt-1 text-[10px] text-muted-foreground/70">
+                        这些概念由 Ontology Resolver 从问题中匹配，SQL Writer 仅允许引用其中字段，确保口径一致。
+                      </div>
+                    </div>
+                  )}
+
+                  {ragHits.length > 0 && (
+                    <div>
+                      <div className="mb-1 flex items-center gap-1 text-[10px] uppercase tracking-wider text-muted-foreground/80">
+                        <Database className="h-3 w-3" />
+                        Knowledge 片段 · Top {ragHits.length}（Hybrid RAG）
+                      </div>
+                      <ol className="space-y-1.5">
+                        {ragHits.map((h, i) => (
+                          <li
+                            key={h.id}
+                            className="flex items-start gap-2 rounded border border-border/60 bg-card/40 p-2"
+                          >
+                            <span className="mt-0.5 shrink-0 rounded bg-primary/10 px-1.5 py-0.5 font-mono text-[10px] text-primary">
+                              K{i + 1}
+                            </span>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-1.5">
+                                <span className="rounded bg-muted px-1 py-0.5 text-[9px] uppercase text-muted-foreground">
+                                  {h.source_type}
+                                </span>
+                                <span className="truncate text-[11px] font-medium text-foreground">
+                                  {h.title || h.source_id}
+                                </span>
+                                <span className="ml-auto shrink-0 font-mono text-[10px] text-muted-foreground/80">
+                                  rrf {h.rrf_score.toFixed(3)}
+                                </span>
+                              </div>
+                              <p className="mt-0.5 line-clamp-2 text-[11px] text-muted-foreground">
+                                {h.content}
+                              </p>
+                            </div>
+                          </li>
+                        ))}
+                      </ol>
+                      <div className="mt-1 text-[10px] text-muted-foreground/70">
+                        片段按 RRF(向量 + 关键词) 融合分排序，Ontologist / SQL Writer 会优先复用其中 qa_history 的成功模式，规避 qa_negative 的错误。
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : null}
+
+
               {/* Phase 5: 问答反馈闭环 */}
               {lastRun && (
                 <div className="mt-4 border-t border-border/60 pt-3">
