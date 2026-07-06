@@ -1,0 +1,147 @@
+{
+  "version": 1,
+  "sdk_version": "0.20.0",
+  "path": "/mcp",
+  "auth": {
+    "type": "none"
+  },
+  "mcp": {
+    "server": {
+      "name": "dtsv-mcp",
+      "version": "0.1.0",
+      "title": "DTSV Analytics MCP"
+    },
+    "tools": [
+      {
+        "name": "list_ontology",
+        "title": "List DTSV ontology",
+        "description": "Return the DTSV testing-domain ontology: entities (with physical table names, attributes, enum values, synonyms) and derived metrics. Use to ground SQL/analysis over the DTSV schema.",
+        "annotations": {
+          "readOnlyHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false
+        },
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "entity": {
+              "type": "string",
+              "description": "Optional entity name (e.g. Defect, TestCase, TestRun) to return only one entity."
+            }
+          },
+          "additionalProperties": false,
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        },
+        "outputSchema": null
+      },
+      {
+        "name": "search_knowledge",
+        "title": "Search DTSV knowledge base",
+        "description": "Hybrid (vector + keyword) search over the DTSV knowledge base: ontology descriptions, defect/testcase samples, and Q&A history. Returns top-k chunks with scores.",
+        "annotations": {
+          "readOnlyHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false
+        },
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Natural-language query in Chinese or English."
+            },
+            "top_k": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20,
+              "default": 6
+            },
+            "source_types": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "ontology",
+                  "defect",
+                  "testcase",
+                  "qa_history",
+                  "qa_negative"
+                ]
+              },
+              "description": "Optional filter to restrict source types."
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "additionalProperties": false,
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        },
+        "outputSchema": null
+      },
+      {
+        "name": "ingest_knowledge",
+        "title": "Ingest knowledge chunks",
+        "description": "Add one or more knowledge chunks (ontology notes, defect summaries, test cases, Q&A) to the DTSV RAG index. Content is embedded and stored for future hybrid search.",
+        "annotations": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": false
+        },
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "source_type": {
+                    "type": "string",
+                    "enum": [
+                      "ontology",
+                      "defect",
+                      "testcase",
+                      "qa_history",
+                      "qa_negative"
+                    ]
+                  },
+                  "source_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "content": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "metadata": {
+                    "type": "object",
+                    "additionalProperties": {}
+                  }
+                },
+                "required": [
+                  "source_type",
+                  "source_id",
+                  "content"
+                ],
+                "additionalProperties": false
+              },
+              "minItems": 1,
+              "maxItems": 50
+            }
+          },
+          "required": [
+            "items"
+          ],
+          "additionalProperties": false,
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        },
+        "outputSchema": null
+      }
+    ]
+  }
+}
