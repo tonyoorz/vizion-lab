@@ -50,7 +50,155 @@ ${h.title ? h.title + "\n" : ""}${(h.content ?? "").slice(0, 400)}`
 // src/lib/mcp/tools/list-ontology.ts
 import { defineTool as defineTool2 } from "npm:@lovable.dev/mcp-js@0.20.0";
 import { z as z2 } from "npm:zod@^3.25.76";
-import { ONTOLOGY } from "npm:@/lib/ontology";
+
+// src/lib/ontology/definitions.ts
+var ONTOLOGY = {
+  version: "0.1.0",
+  entities: [
+    {
+      name: "Defect",
+      label: "\u7F3A\u9677",
+      table: "defects",
+      primaryKey: "defect_id",
+      synonyms: ["\u7F3A\u9677", "bug", "\u95EE\u9898", "\u6545\u969C", "issue", "defect"],
+      attributes: [
+        {
+          name: "severity",
+          label: "\u4E25\u91CD\u5EA6",
+          type: "enum",
+          values: ["P0", "P1", "P2", "P3"],
+          synonyms: ["\u4E25\u91CD\u5EA6", "\u4F18\u5148\u7EA7", "\u7B49\u7EA7", "\u4E25\u91CD\u7A0B\u5EA6", "priority", "severity"]
+        },
+        {
+          name: "status",
+          label: "\u72B6\u6001",
+          type: "enum",
+          values: ["Open", "InProgress", "Fixed", "Verified", "Closed", "Reopened"],
+          synonyms: ["\u72B6\u6001", "\u7F3A\u9677\u72B6\u6001", "\u5904\u7406\u72B6\u6001"]
+        },
+        { name: "module", label: "\u6A21\u5757", type: "string", synonyms: ["\u6A21\u5757", "\u7EC4\u4EF6", "ECU", "\u5B50\u7CFB\u7EDF"] },
+        { name: "owner_team", label: "\u8D1F\u8D23\u56E2\u961F", type: "string", synonyms: ["\u56E2\u961F", "\u8D1F\u8D23\u4EBA", "owner"] },
+        { name: "open_date", label: "\u63D0\u5355\u65E5\u671F", type: "date", synonyms: ["\u521B\u5EFA\u65F6\u95F4", "\u63D0\u5355\u65F6\u95F4", "open"] },
+        { name: "age_days", label: "\u5B58\u6D3B\u5929\u6570", type: "number", synonyms: ["\u5B58\u6D3B", "\u79EF\u538B\u5929\u6570"] },
+        { name: "recurrence_count", label: "\u590D\u73B0\u6B21\u6570", type: "number", synonyms: ["\u590D\u73B0", "\u91CD\u590D\u6B21\u6570", "occur"] }
+      ],
+      relations: [
+        { name: "found_in_run", target: "TestRun", via: "run_id", cardinality: "many" },
+        { name: "blocks_case", target: "TestCase", via: "blocked_case_id", cardinality: "many" }
+      ]
+    },
+    {
+      name: "TestCase",
+      label: "\u6D4B\u8BD5\u7528\u4F8B",
+      table: "test_cases",
+      primaryKey: "case_id",
+      synonyms: ["\u7528\u4F8B", "\u6D4B\u8BD5\u7528\u4F8B", "test case", "case"],
+      attributes: [
+        { name: "suite", label: "\u5957\u4EF6", type: "string", synonyms: ["\u5957\u4EF6", "suite", "\u6D4B\u8BD5\u96C6"] },
+        {
+          name: "type",
+          label: "\u7C7B\u578B",
+          type: "enum",
+          values: ["\u529F\u80FD", "\u5F02\u5E38", "\u8FB9\u754C", "\u56DE\u5F52", "\u6027\u80FD", "\u5B89\u5168"],
+          synonyms: ["\u7C7B\u578B", "\u7528\u4F8B\u7C7B\u578B"]
+        },
+        {
+          name: "priority",
+          label: "\u4F18\u5148\u7EA7",
+          type: "enum",
+          values: ["P0", "P1", "P2", "P3"],
+          synonyms: ["\u4F18\u5148\u7EA7", "\u7B49\u7EA7"]
+        },
+        { name: "module", label: "\u6A21\u5757", type: "string", synonyms: ["\u6A21\u5757", "\u7EC4\u4EF6"] },
+        { name: "covered_requirement", label: "\u8986\u76D6\u9700\u6C42", type: "string", synonyms: ["\u8986\u76D6\u9700\u6C42", "\u9700\u6C42"] }
+      ]
+    },
+    {
+      name: "TestRun",
+      label: "\u6D4B\u8BD5\u6267\u884C",
+      table: "test_runs",
+      primaryKey: "run_id",
+      synonyms: ["\u6267\u884C", "\u6D4B\u8BD5\u6267\u884C", "\u8FD0\u884C", "test run"],
+      attributes: [
+        {
+          name: "result",
+          label: "\u7ED3\u679C",
+          type: "enum",
+          values: ["Pass", "Fail", "Block", "Skip"],
+          synonyms: ["\u7ED3\u679C", "\u901A\u8FC7\u72B6\u6001", "result"]
+        },
+        { name: "case_id", label: "\u7528\u4F8BID", type: "string", synonyms: ["\u7528\u4F8BID"] },
+        { name: "executed_at", label: "\u6267\u884C\u65F6\u95F4", type: "date", synonyms: ["\u6267\u884C\u65F6\u95F4", "\u8FD0\u884C\u65F6\u95F4"] },
+        { name: "duration_ms", label: "\u8017\u65F6", type: "number", synonyms: ["\u8017\u65F6", "\u65F6\u957F", "duration"] },
+        { name: "ecu_target", label: "\u76EE\u6807ECU", type: "string", synonyms: ["ECU", "\u76EE\u6807"] },
+        { name: "environment", label: "\u73AF\u5883", type: "string", synonyms: ["\u73AF\u5883", "env"] }
+      ],
+      relations: [{ name: "covers_case", target: "TestCase", via: "case_id", cardinality: "one" }]
+    }
+  ],
+  metrics: [
+    {
+      name: "\u9AD8\u9891\u7F3A\u9677\u7387",
+      label: "\u9AD8\u9891\u7F3A\u9677\u7387",
+      description: "\u8FD1\u671F\u590D\u73B0 \u2265 3 \u6B21\u7684\u7F3A\u9677\u5360\u6BD4",
+      synonyms: ["\u9AD8\u9891\u7F3A\u9677", "\u590D\u53D1\u7387", "\u91CD\u590D\u7F3A\u9677\u6BD4\u4F8B", "\u9891\u53D1\u7F3A\u9677"],
+      baseEntity: "Defect",
+      dimensions: ["module", "severity", "owner_team"],
+      formula: "SUM(CASE WHEN recurrence_count >= 3 THEN 1 ELSE 0 END) * 1.0 / NULLIF(COUNT(*), 0)"
+    },
+    {
+      name: "\u7F3A\u9677\u79EF\u538B\u91CF",
+      label: "\u7F3A\u9677\u79EF\u538B\u91CF",
+      description: "\u672A\u5173\u95ED\u7F3A\u9677\u6570\u91CF",
+      synonyms: ["\u79EF\u538B", "\u672A\u5173\u95ED", "open \u7F3A\u9677", "backlog"],
+      baseEntity: "Defect",
+      dimensions: ["module", "severity", "owner_team"],
+      formula: "SUM(CASE WHEN status NOT IN ('Closed','Verified') THEN 1 ELSE 0 END)"
+    },
+    {
+      name: "\u6D4B\u8BD5\u901A\u8FC7\u7387",
+      label: "\u6D4B\u8BD5\u901A\u8FC7\u7387",
+      description: "\u901A\u8FC7\u7528\u4F8B\u6570\u5360\u603B\u6267\u884C\u6570\u6BD4\u4F8B",
+      synonyms: ["\u901A\u8FC7\u7387", "pass rate", "\u6267\u884C\u901A\u8FC7\u7387"],
+      baseEntity: "TestRun",
+      dimensions: ["ecu_target", "environment", "case_id"],
+      formula: "SUM(CASE WHEN result='Pass' THEN 1 ELSE 0 END) * 1.0 / NULLIF(COUNT(*), 0)"
+    },
+    {
+      name: "\u5E73\u5747\u6267\u884C\u8017\u65F6",
+      label: "\u5E73\u5747\u6267\u884C\u8017\u65F6(ms)",
+      description: "\u6D4B\u8BD5\u6267\u884C\u5E73\u5747\u8017\u65F6",
+      synonyms: ["\u5E73\u5747\u8017\u65F6", "\u6267\u884C\u65F6\u957F", "avg duration"],
+      baseEntity: "TestRun",
+      dimensions: ["ecu_target", "environment"],
+      formula: "AVG(duration_ms)"
+    },
+    {
+      name: "\u957F\u5C3E\u7F3A\u9677\u7387",
+      label: "\u957F\u5C3E\u7F3A\u9677\u7387",
+      description: "\u5B58\u6D3B > 30 \u5929\u7684\u7F3A\u9677\u5360\u6BD4",
+      synonyms: ["\u957F\u5C3E", "\u8001\u7F3A\u9677", "\u79EF\u538B\u8001\u5316"],
+      baseEntity: "Defect",
+      dimensions: ["module", "owner_team"],
+      formula: "SUM(CASE WHEN age_days > 30 THEN 1 ELSE 0 END) * 1.0 / NULLIF(COUNT(*), 0)"
+    }
+  ]
+};
+
+// src/lib/ontology/graph.ts
+var buildEdges = () => {
+  const edges = [];
+  for (const e of ONTOLOGY.entities) {
+    for (const r of e.relations ?? []) {
+      edges.push({ from: e.name, to: r.target, via: r.via });
+      edges.push({ from: r.target, to: e.name, via: r.via });
+    }
+  }
+  return edges;
+};
+var EDGES = buildEdges();
+
+// src/lib/mcp/tools/list-ontology.ts
 var list_ontology_default = defineTool2({
   name: "list_ontology",
   title: "List DTSV ontology",

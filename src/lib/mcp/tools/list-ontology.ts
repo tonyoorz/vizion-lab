@@ -1,6 +1,6 @@
 import { defineTool } from "@lovable.dev/mcp-js";
 import { z } from "zod";
-import { ONTOLOGY } from "@/lib/ontology";
+import { ONTOLOGY } from "../../ontology";
 
 export default defineTool({
   name: "list_ontology",
