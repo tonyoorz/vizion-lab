@@ -14,6 +14,7 @@ import CoverageAnalysis from "@/components/dashboard/pages/CoverageAnalysis";
 import TestStatusAnalysis from "@/components/dashboard/pages/TestStatusAnalysis";
 import DefectStatusAnalysis from "@/components/dashboard/pages/DefectStatusAnalysis";
 import AIChat from "@/components/dashboard/pages/AIChat";
+import TestAgent from "@/components/dashboard/pages/TestAgent";
 
 const pageTitles: Record<string, { title: string; subtitle: string }> = {
   topissue: { title: "Top Issue 分析", subtitle: "关键问题追踪与趋势分析" },
