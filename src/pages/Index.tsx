@@ -25,6 +25,7 @@ const pageTitles: Record<string, { title: string; subtitle: string }> = {
   coverage: { title: "测试覆盖率分析", subtitle: "模块覆盖率监控与提升" },
   "test-status": { title: "测试状态分析", subtitle: "用例执行状态与通过率" },
   "defect-status": { title: "缺陷状态分析", subtitle: "缺陷生命周期与流转趋势" },
+  "test-agent": { title: "测试 Agent", subtitle: "基于历史缺陷与执行数据智能生成新增用例" },
   "ai-chat": { title: "AI Chat", subtitle: "与 DTSV 智能体对话，获取分析洞察" },
 };
 
