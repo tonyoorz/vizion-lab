@@ -1,6 +1,7 @@
 import { useState } from "react";
 import {
   BarChart3,
+  Beaker,
   Bug,
   ChevronLeft,
   ChevronRight,
@@ -23,6 +24,7 @@ const navItems = [
   { id: "coverage", label: "测试覆盖率分析", icon: ShieldCheck },
   { id: "test-status", label: "测试状态分析", icon: ListChecks },
   { id: "defect-status", label: "缺陷状态分析", icon: BarChart3 },
+  { id: "test-agent", label: "测试 Agent", icon: Beaker, badge: "New" as const },
   { id: "ai-chat", label: "AI Chat", icon: Sparkles, badge: "Beta" as const },
 ];
 
