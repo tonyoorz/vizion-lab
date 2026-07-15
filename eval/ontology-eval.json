@@ -1,0 +1,49 @@
+{
+  "version": "0.1.0",
+  "description": "DTSV ontology resolution eval set. Each item lists expected entities/attributes/metrics/timeRangeDays that resolveQuestion should recall. attributes are matched by `${Entity}.${attr}` canonical form. Tags: easy/medium/hard, zh/en, ambiguous, negative.",
+  "items": [
+    { "id": "e01", "q": "本周有多少 P0 缺陷", "tags": ["easy", "zh"], "entities": ["Defect"], "attributes": ["Defect.severity"], "metrics": [], "timeRangeDays": 7 },
+    { "id": "e02", "q": "过去 30 天的缺陷积压量按模块分组", "tags": ["easy", "zh"], "entities": ["Defect"], "attributes": ["Defect.module"], "metrics": ["缺陷积压量"], "timeRangeDays": 30 },
+    { "id": "e03", "q": "今年的测试通过率", "tags": ["easy", "zh"], "entities": ["TestRun"], "attributes": [], "metrics": ["测试通过率"], "timeRangeDays": 365 },
+    { "id": "e04", "q": "近 14 天各 ECU 的平均执行耗时", "tags": ["medium", "zh"], "entities": ["TestRun"], "attributes": ["TestRun.ecu_target"], "metrics": ["平均执行耗时"], "timeRangeDays": 14 },
+    { "id": "e05", "q": "长尾缺陷率按团队看", "tags": ["medium", "zh"], "entities": ["Defect"], "attributes": ["Defect.owner_team"], "metrics": ["长尾缺陷率"] },
+    { "id": "e06", "q": "高频缺陷率最高的模块", "tags": ["medium", "zh"], "entities": ["Defect"], "attributes": ["Defect.module"], "metrics": ["高频缺陷率"] },
+    { "id": "e07", "q": "回归用例的通过率", "tags": ["medium", "zh"], "entities": ["TestCase", "TestRun"], "attributes": ["TestCase.type"], "metrics": ["测试通过率"] },
+    { "id": "e08", "q": "P1 bug 有几个还没关闭", "tags": ["medium", "zh"], "entities": ["Defect"], "attributes": ["Defect.severity", "Defect.status"], "metrics": [] },
+    { "id": "e09", "q": "昨天的 fail 执行记录", "tags": ["easy", "zh"], "entities": ["TestRun"], "attributes": ["TestRun.result"], "metrics": [], "timeRangeDays": 2 },
+    { "id": "e10", "q": "近 90 天存活超过 30 天的老缺陷比例", "tags": ["hard", "zh"], "entities": ["Defect"], "attributes": ["Defect.age_days"], "metrics": ["长尾缺陷率"], "timeRangeDays": 90 },
+    { "id": "e11", "q": "本月复现 3 次以上的缺陷有多少", "tags": ["hard", "zh"], "entities": ["Defect"], "attributes": ["Defect.recurrence_count"], "metrics": [], "timeRangeDays": 30 },
+    { "id": "e12", "q": "上周性能用例的执行时长", "tags": ["hard", "zh"], "entities": ["TestCase", "TestRun"], "attributes": ["TestCase.type", "TestRun.duration_ms"], "metrics": [], "timeRangeDays": 14 },
+    { "id": "e13", "q": "各环境下的 pass rate 对比", "tags": ["medium", "zh"], "entities": ["TestRun"], "attributes": ["TestRun.environment"], "metrics": ["测试通过率"] },
+    { "id": "e14", "q": "今天新提的缺陷", "tags": ["easy", "zh"], "entities": ["Defect"], "attributes": ["Defect.open_date"], "metrics": [], "timeRangeDays": 1 },
+    { "id": "e15", "q": "backlog 按 severity 看", "tags": ["medium", "zh"], "entities": ["Defect"], "attributes": ["Defect.severity"], "metrics": ["缺陷积压量"] },
+    { "id": "e16", "q": "P0 P1 缺陷各团队分布", "tags": ["hard", "zh"], "entities": ["Defect"], "attributes": ["Defect.severity", "Defect.owner_team"], "metrics": [] },
+    { "id": "e17", "q": "近一个月边界用例的失败情况", "tags": ["hard", "zh"], "entities": ["TestCase", "TestRun"], "attributes": ["TestCase.type", "TestRun.result"], "metrics": [], "timeRangeDays": 30 },
+    { "id": "e18", "q": "安全套件的覆盖需求", "tags": ["medium", "zh"], "entities": ["TestCase"], "attributes": ["TestCase.type", "TestCase.covered_requirement"], "metrics": [] },
+
+    { "id": "n01", "q": "how many open defects this week", "tags": ["easy", "en"], "entities": ["Defect"], "attributes": ["Defect.status"], "metrics": [], "timeRangeDays": 7 },
+    { "id": "n02", "q": "pass rate by ecu target last month", "tags": ["medium", "en"], "entities": ["TestRun"], "attributes": ["TestRun.ecu_target"], "metrics": ["测试通过率"], "timeRangeDays": 60 },
+    { "id": "n03", "q": "average duration of test runs today", "tags": ["medium", "en"], "entities": ["TestRun"], "attributes": [], "metrics": ["平均执行耗时"], "timeRangeDays": 1 },
+    { "id": "n04", "q": "P0 bugs in module BMS", "tags": ["easy", "en"], "entities": ["Defect"], "attributes": ["Defect.severity", "Defect.module"], "metrics": [] },
+    { "id": "n05", "q": "backlog by owner team", "tags": ["medium", "en"], "entities": ["Defect"], "attributes": ["Defect.owner_team"], "metrics": ["缺陷积压量"] },
+    { "id": "n06", "q": "regression cases failing this week", "tags": ["hard", "en"], "entities": ["TestCase", "TestRun"], "attributes": ["TestCase.type", "TestRun.result"], "metrics": [], "timeRangeDays": 7 },
+    { "id": "n07", "q": "recurring defects with occur >= 3", "tags": ["hard", "en"], "entities": ["Defect"], "attributes": ["Defect.recurrence_count"], "metrics": [] },
+    { "id": "n08", "q": "long tail defect rate by module", "tags": ["medium", "en"], "entities": ["Defect"], "attributes": ["Defect.module"], "metrics": ["长尾缺陷率"] },
+    { "id": "n09", "q": "block runs yesterday", "tags": ["easy", "en"], "entities": ["TestRun"], "attributes": ["TestRun.result"], "metrics": [], "timeRangeDays": 2 },
+    { "id": "n10", "q": "high frequency defect ratio", "tags": ["medium", "en"], "entities": ["Defect"], "attributes": [], "metrics": ["高频缺陷率"] },
+
+    { "id": "a01", "q": "缺陷情况", "tags": ["ambiguous", "zh"], "entities": ["Defect"], "attributes": [], "metrics": [] },
+    { "id": "a02", "q": "测试用例", "tags": ["ambiguous", "zh"], "entities": ["TestCase"], "attributes": [], "metrics": [] },
+    { "id": "a03", "q": "run 结果", "tags": ["ambiguous", "zh-en"], "entities": ["TestRun"], "attributes": ["TestRun.result"], "metrics": [] },
+    { "id": "a04", "q": "P0", "tags": ["ambiguous", "enum-only"], "entities": [], "attributes": ["Defect.severity", "TestCase.priority"], "metrics": [], "note": "enum value alone — either entity accepted" },
+
+    { "id": "h01", "q": "近 7 天 P0 缺陷积压量按 module 分组，并列出 owner", "tags": ["hard", "zh"], "entities": ["Defect"], "attributes": ["Defect.severity", "Defect.module", "Defect.owner_team"], "metrics": ["缺陷积压量"], "timeRangeDays": 7 },
+    { "id": "h02", "q": "过去三个月各 ECU 的通过率与平均耗时", "tags": ["hard", "zh"], "entities": ["TestRun"], "attributes": ["TestRun.ecu_target"], "metrics": ["测试通过率", "平均执行耗时"], "timeRangeDays": 90 },
+    { "id": "h03", "q": "今年长尾且高频的缺陷有多少", "tags": ["hard", "zh"], "entities": ["Defect"], "attributes": [], "metrics": ["长尾缺陷率", "高频缺陷率"], "timeRangeDays": 365 },
+    { "id": "h04", "q": "本周 dev 环境 fail 的执行", "tags": ["hard", "zh-en"], "entities": ["TestRun"], "attributes": ["TestRun.environment", "TestRun.result"], "metrics": [], "timeRangeDays": 7 },
+    { "id": "h05", "q": "P0 缺陷影响到哪些用例", "tags": ["hard", "zh"], "entities": ["Defect", "TestCase"], "attributes": ["Defect.severity"], "metrics": [] },
+
+    { "id": "neg01", "q": "帮我写一首关于测试的诗", "tags": ["negative"], "entities": [], "attributes": [], "metrics": [] },
+    { "id": "neg02", "q": "what is the weather in Beijing", "tags": ["negative", "en"], "entities": [], "attributes": [], "metrics": [] }
+  ]
+}
