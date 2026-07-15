@@ -8,7 +8,7 @@
   "mcp": {
     "server": {
       "name": "dtsv-mcp",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "title": "DTSV Analytics MCP"
     },
     "tools": [
@@ -29,6 +29,90 @@
               "description": "Optional entity name (e.g. Defect, TestCase, TestRun) to return only one entity."
             }
           },
+          "additionalProperties": false,
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        },
+        "outputSchema": null
+      },
+      {
+        "name": "resolve_concepts",
+        "title": "Resolve NL → ontology concepts",
+        "description": "Parse a natural-language question (zh/en) into DTSV ontology matches: entities, attributes (with matched enum values), metrics, and time hints. Use this BEFORE writing SQL to ground column names, enums, and joins.",
+        "annotations": {
+          "readOnlyHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false
+        },
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "question": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Raw user question in Chinese or English."
+            }
+          },
+          "required": [
+            "question"
+          ],
+          "additionalProperties": false,
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        },
+        "outputSchema": null
+      },
+      {
+        "name": "get_entity_schema",
+        "title": "Get entity schema",
+        "description": "Return the physical schema (table, primary key, columns with type/enum values/synonyms, relations) for a single ontology entity. Use to prevent column-name hallucinations before generating SQL.",
+        "annotations": {
+          "readOnlyHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false
+        },
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "entity": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Entity name (e.g. Defect, TestCase, TestRun). Case-insensitive."
+            }
+          },
+          "required": [
+            "entity"
+          ],
+          "additionalProperties": false,
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        },
+        "outputSchema": null
+      },
+      {
+        "name": "find_join_path",
+        "title": "Find join path between entities",
+        "description": "BFS shortest join path between two ontology entities. Returns the ordered edges (from → to via foreign-key column) needed to JOIN the underlying tables. Returns an empty path if from==to and null if unreachable.",
+        "annotations": {
+          "readOnlyHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false
+        },
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "from": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Source entity name (e.g. Defect)."
+            },
+            "to": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Target entity name (e.g. TestCase)."
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
           "additionalProperties": false,
           "$schema": "http://json-schema.org/draft-07/schema#"
         },

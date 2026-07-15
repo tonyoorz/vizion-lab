@@ -185,6 +185,108 @@ var ONTOLOGY = {
   ]
 };
 
+// src/lib/ontology/resolver.ts
+var norm = (s) => s.toLowerCase().trim();
+var matchSynonym = (text, synonyms) => {
+  const t = norm(text);
+  for (const s of synonyms) {
+    if (t.includes(norm(s))) return s;
+  }
+  return void 0;
+};
+var TIME_PATTERNS = [
+  { re: /今天|today/i, days: 1 },
+  { re: /昨天|yesterday/i, days: 2 },
+  { re: /本周|这周|this week/i, days: 7 },
+  { re: /上周|last week/i, days: 14 },
+  { re: /近\s*(\d+)\s*天/, days: 0 },
+  // dynamic
+  { re: /本月|this month/i, days: 30 },
+  { re: /近一个月|过去一个月/, days: 30 },
+  { re: /上个月|last month/i, days: 60 },
+  { re: /近\s*90\s*天|近三个月|过去三个月/, days: 90 },
+  { re: /今年|this year/i, days: 365 }
+];
+var extractTime = (text) => {
+  const hints = [];
+  const dyn = /近\s*(\d+)\s*天/.exec(text);
+  if (dyn) hints.push({ rangeDays: Number(dyn[1]), rawPhrase: dyn[0] });
+  for (const p of TIME_PATTERNS) {
+    if (p.days === 0) continue;
+    const m = p.re.exec(text);
+    if (m) hints.push({ rangeDays: p.days, rawPhrase: m[0] });
+  }
+  return hints;
+};
+var resolveQuestion = (question) => {
+  const match = {
+    entities: [],
+    attributes: [],
+    metrics: [],
+    timeHints: extractTime(question)
+  };
+  for (const entity of ONTOLOGY.entities) {
+    const ms = matchSynonym(question, entity.synonyms);
+    if (ms) {
+      match.entities.push({ entity, score: 1, matchedSynonym: ms });
+    }
+    for (const attr of entity.attributes) {
+      const am = matchSynonym(question, attr.synonyms ?? [attr.label]);
+      let enumHit;
+      if (attr.values) {
+        for (const v of attr.values) {
+          if (norm(question).includes(norm(v))) {
+            enumHit = v;
+            break;
+          }
+        }
+      }
+      if (am || enumHit) {
+        match.attributes.push({
+          entity,
+          attribute: attr,
+          score: enumHit ? 1 : 0.8,
+          matchedSynonym: am,
+          enumValueMatched: enumHit
+        });
+      }
+    }
+  }
+  for (const metric of ONTOLOGY.metrics) {
+    const mm = matchSynonym(question, [metric.name, metric.label, ...metric.synonyms]);
+    if (mm) {
+      match.metrics.push({ metric, score: 1, matchedSynonym: mm });
+      const baseEnt = ONTOLOGY.entities.find((e) => e.name === metric.baseEntity);
+      if (baseEnt && !match.entities.some((x) => x.entity.name === baseEnt.name)) {
+        match.entities.push({ entity: baseEnt, score: 0.9, matchedSynonym: "(by metric)" });
+      }
+    }
+  }
+  return match;
+};
+var summarizeMatchForPrompt = (m) => {
+  const lines = [];
+  if (m.entities.length) {
+    lines.push("Entities: " + m.entities.map((x) => `${x.entity.name}(${x.entity.table})`).join(", "));
+  }
+  if (m.attributes.length) {
+    lines.push(
+      "Attributes: " + m.attributes.map(
+        (x) => `${x.entity.name}.${x.attribute.name}${x.enumValueMatched ? `=${x.enumValueMatched}` : ""}`
+      ).join(", ")
+    );
+  }
+  if (m.metrics.length) {
+    lines.push(
+      "Metrics: " + m.metrics.map((x) => `${x.metric.name} [formula: ${x.metric.formula}]`).join("; ")
+    );
+  }
+  if (m.timeHints.length) {
+    lines.push("Time: " + m.timeHints.map((t) => `${t.rangeDays}d (${t.rawPhrase})`).join(", "));
+  }
+  return lines.join("\n") || "(no direct ontology matches)";
+};
+
 // src/lib/ontology/graph.ts
 var buildEdges = () => {
   const edges = [];
@@ -197,6 +299,23 @@ var buildEdges = () => {
   return edges;
 };
 var EDGES = buildEdges();
+var findJoinPath = (from, to) => {
+  if (from === to) return [];
+  const queue = [{ node: from, path: [] }];
+  const seen = /* @__PURE__ */ new Set([from]);
+  while (queue.length) {
+    const { node, path } = queue.shift();
+    for (const e of EDGES.filter((x) => x.from === node)) {
+      if (seen.has(e.to)) continue;
+      const np = [...path, e];
+      if (e.to === to) return np;
+      seen.add(e.to);
+      queue.push({ node: e.to, path: np });
+    }
+  }
+  return null;
+};
+var entityByName = (name) => ONTOLOGY.entities.find((e) => e.name === name);
 
 // src/lib/mcp/tools/list-ontology.ts
 var list_ontology_default = defineTool2({
@@ -264,13 +383,160 @@ var ingest_knowledge_default = defineTool3({
   }
 });
 
+// src/lib/mcp/tools/resolve-concepts.ts
+import { defineTool as defineTool4 } from "npm:@lovable.dev/mcp-js@0.20.1";
+import { z as z4 } from "npm:zod@^3.25.76";
+var resolve_concepts_default = defineTool4({
+  name: "resolve_concepts",
+  title: "Resolve NL \u2192 ontology concepts",
+  description: "Parse a natural-language question (zh/en) into DTSV ontology matches: entities, attributes (with matched enum values), metrics, and time hints. Use this BEFORE writing SQL to ground column names, enums, and joins.",
+  inputSchema: {
+    question: z4.string().min(1).describe("Raw user question in Chinese or English.")
+  },
+  annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+  handler: ({ question }) => {
+    const match = resolveQuestion(question);
+    const compact = {
+      entities: match.entities.map((e) => ({
+        name: e.entity.name,
+        table: e.entity.table,
+        primaryKey: e.entity.primaryKey,
+        matchedSynonym: e.matchedSynonym,
+        score: e.score
+      })),
+      attributes: match.attributes.map((a) => ({
+        entity: a.entity.name,
+        attribute: a.attribute.name,
+        column: `${a.entity.table}.${a.attribute.name}`,
+        type: a.attribute.type,
+        enumValueMatched: a.enumValueMatched,
+        matchedSynonym: a.matchedSynonym,
+        score: a.score
+      })),
+      metrics: match.metrics.map((m) => ({
+        name: m.metric.name,
+        baseEntity: m.metric.baseEntity,
+        formula: m.metric.formula,
+        dimensions: m.metric.dimensions
+      })),
+      timeHints: match.timeHints
+    };
+    return {
+      content: [{ type: "text", text: summarizeMatchForPrompt(match) }],
+      structuredContent: compact
+    };
+  }
+});
+
+// src/lib/mcp/tools/get-entity-schema.ts
+import { defineTool as defineTool5 } from "npm:@lovable.dev/mcp-js@0.20.1";
+import { z as z5 } from "npm:zod@^3.25.76";
+var get_entity_schema_default = defineTool5({
+  name: "get_entity_schema",
+  title: "Get entity schema",
+  description: "Return the physical schema (table, primary key, columns with type/enum values/synonyms, relations) for a single ontology entity. Use to prevent column-name hallucinations before generating SQL.",
+  inputSchema: {
+    entity: z5.string().min(1).describe("Entity name (e.g. Defect, TestCase, TestRun). Case-insensitive.")
+  },
+  annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+  handler: ({ entity }) => {
+    const found = entityByName(entity) ?? ONTOLOGY.entities.find((e) => e.name.toLowerCase() === entity.toLowerCase());
+    if (!found) {
+      const known = ONTOLOGY.entities.map((e) => e.name).join(", ");
+      return {
+        content: [{ type: "text", text: `Unknown entity "${entity}". Known: ${known}` }],
+        isError: true
+      };
+    }
+    const payload = {
+      name: found.name,
+      label: found.label,
+      table: found.table,
+      primaryKey: found.primaryKey,
+      columns: found.attributes.map((a) => ({
+        name: a.name,
+        label: a.label,
+        type: a.type,
+        values: a.values,
+        synonyms: a.synonyms ?? []
+      })),
+      relations: found.relations ?? [],
+      allowedColumns: [
+        found.primaryKey,
+        ...found.attributes.map((a) => a.name)
+      ].map((c) => `${found.table}.${c}`)
+    };
+    return {
+      content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
+      structuredContent: payload
+    };
+  }
+});
+
+// src/lib/mcp/tools/find-join-path.ts
+import { defineTool as defineTool6 } from "npm:@lovable.dev/mcp-js@0.20.1";
+import { z as z6 } from "npm:zod@^3.25.76";
+var find_join_path_default = defineTool6({
+  name: "find_join_path",
+  title: "Find join path between entities",
+  description: "BFS shortest join path between two ontology entities. Returns the ordered edges (from \u2192 to via foreign-key column) needed to JOIN the underlying tables. Returns an empty path if from==to and null if unreachable.",
+  inputSchema: {
+    from: z6.string().min(1).describe("Source entity name (e.g. Defect)."),
+    to: z6.string().min(1).describe("Target entity name (e.g. TestCase).")
+  },
+  annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+  handler: ({ from, to }) => {
+    const fromE = entityByName(from);
+    const toE = entityByName(to);
+    if (!fromE || !toE) {
+      return {
+        content: [{ type: "text", text: `Unknown entity: ${!fromE ? from : to}` }],
+        isError: true
+      };
+    }
+    const path = findJoinPath(fromE.name, toE.name);
+    if (path === null) {
+      return {
+        content: [{ type: "text", text: `No join path from ${from} to ${to}.` }],
+        structuredContent: { reachable: false, path: [] }
+      };
+    }
+    const enriched = path.map((e) => {
+      const fromEnt = entityByName(e.from);
+      const toEnt = entityByName(e.to);
+      return {
+        from: e.from,
+        to: e.to,
+        via: e.via,
+        joinSql: `JOIN ${toEnt.table} ON ${fromEnt.table}.${e.via} = ${toEnt.table}.${e.via}`
+      };
+    });
+    return {
+      content: [
+        {
+          type: "text",
+          text: enriched.length === 0 ? `${from} == ${to} (no join needed)` : enriched.map((x) => x.joinSql).join("\n")
+        }
+      ],
+      structuredContent: { reachable: true, path: enriched }
+    };
+  }
+});
+
 // src/lib/mcp/index.ts
 var mcp_default = defineMcp({
   name: "dtsv-mcp",
   title: "DTSV Analytics MCP",
-  version: "0.1.0",
-  instructions: "Tools for the DTSV testing-analytics app. Use `list_ontology` to discover entities/metrics, `search_knowledge` for hybrid (vector + keyword) recall over ontology/defect/testcase/Q&A chunks, and `ingest_knowledge` to add new chunks to the RAG index.",
-  tools: [list_ontology_default, search_knowledge_default, ingest_knowledge_default]
+  version: "0.2.0",
+  instructions: "Tools for the DTSV testing-analytics app. Recommended flow for data Q&A: (1) `resolve_concepts` to parse the user question into entities/attributes/metrics/time; (2) `get_entity_schema` for each involved entity to ground column names and enums; (3) `find_join_path` when multiple entities are needed; (4) `search_knowledge` for supporting context; (5) then generate SQL. Use `list_ontology` for a full dump and `ingest_knowledge` to add new RAG chunks.",
+  tools: [
+    list_ontology_default,
+    resolve_concepts_default,
+    get_entity_schema_default,
+    find_join_path_default,
+    search_knowledge_default,
+    ingest_knowledge_default
+  ]
 });
 
 // lovable-mcp-supabase-entry.ts
