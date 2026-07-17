@@ -127,7 +127,7 @@ export const ONTOLOGY: Ontology = {
       name: "平均执行耗时",
       label: "平均执行耗时(ms)",
       description: "测试执行平均耗时",
-      synonyms: ["平均耗时", "执行时长", "avg duration"],
+      synonyms: ["平均耗时", "执行时长", "avg duration", "average duration", "mean duration", "avg time", "average execution time"],
       baseEntity: "TestRun",
       dimensions: ["ecu_target", "environment"],
       formula: "AVG(duration_ms)",

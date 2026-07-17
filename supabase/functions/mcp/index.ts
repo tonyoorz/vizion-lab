@@ -183,7 +183,7 @@ var ONTOLOGY = {
       name: "\u5E73\u5747\u6267\u884C\u8017\u65F6",
       label: "\u5E73\u5747\u6267\u884C\u8017\u65F6(ms)",
       description: "\u6D4B\u8BD5\u6267\u884C\u5E73\u5747\u8017\u65F6",
-      synonyms: ["\u5E73\u5747\u8017\u65F6", "\u6267\u884C\u65F6\u957F", "avg duration"],
+      synonyms: ["\u5E73\u5747\u8017\u65F6", "\u6267\u884C\u65F6\u957F", "avg duration", "average duration", "mean duration", "avg time", "average execution time"],
       baseEntity: "TestRun",
       dimensions: ["ecu_target", "environment"],
       formula: "AVG(duration_ms)"
