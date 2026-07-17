@@ -45,7 +45,7 @@ export const ONTOLOGY: Ontology = {
       label: "测试用例",
       table: "test_cases",
       primaryKey: "case_id",
-      synonyms: ["用例", "测试用例", "test case", "case"],
+      synonyms: ["用例", "测试用例", "test case", "test cases", "cases", "case"],
       attributes: [
         { name: "suite", label: "套件", type: "string", synonyms: ["套件", "suite", "测试集"] },
         {
@@ -53,7 +53,12 @@ export const ONTOLOGY: Ontology = {
           label: "类型",
           type: "enum",
           values: ["功能", "异常", "边界", "回归", "性能", "安全"],
-          synonyms: ["类型", "用例类型"],
+          synonyms: [
+            "类型", "用例类型",
+            "regression", "回归", "boundary", "边界",
+            "functional", "功能", "performance", "性能",
+            "security", "安全", "exception", "异常",
+          ],
         },
         {
           name: "priority",
@@ -62,8 +67,8 @@ export const ONTOLOGY: Ontology = {
           values: ["P0", "P1", "P2", "P3"],
           synonyms: ["优先级", "等级"],
         },
-        { name: "module", label: "模块", type: "string", synonyms: ["模块", "组件"] },
-        { name: "covered_requirement", label: "覆盖需求", type: "string", synonyms: ["覆盖需求", "需求"] },
+        { name: "module", label: "模块", type: "string", synonyms: ["模块", "组件", "module"] },
+        { name: "covered_requirement", label: "覆盖需求", type: "string", synonyms: ["覆盖需求", "需求", "requirement", "覆盖"] },
       ],
     },
     {

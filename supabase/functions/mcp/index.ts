@@ -92,7 +92,7 @@ var ONTOLOGY = {
       label: "\u6D4B\u8BD5\u7528\u4F8B",
       table: "test_cases",
       primaryKey: "case_id",
-      synonyms: ["\u7528\u4F8B", "\u6D4B\u8BD5\u7528\u4F8B", "test case", "case"],
+      synonyms: ["\u7528\u4F8B", "\u6D4B\u8BD5\u7528\u4F8B", "test case", "test cases", "cases", "case"],
       attributes: [
         { name: "suite", label: "\u5957\u4EF6", type: "string", synonyms: ["\u5957\u4EF6", "suite", "\u6D4B\u8BD5\u96C6"] },
         {
@@ -100,7 +100,22 @@ var ONTOLOGY = {
           label: "\u7C7B\u578B",
           type: "enum",
           values: ["\u529F\u80FD", "\u5F02\u5E38", "\u8FB9\u754C", "\u56DE\u5F52", "\u6027\u80FD", "\u5B89\u5168"],
-          synonyms: ["\u7C7B\u578B", "\u7528\u4F8B\u7C7B\u578B"]
+          synonyms: [
+            "\u7C7B\u578B",
+            "\u7528\u4F8B\u7C7B\u578B",
+            "regression",
+            "\u56DE\u5F52",
+            "boundary",
+            "\u8FB9\u754C",
+            "functional",
+            "\u529F\u80FD",
+            "performance",
+            "\u6027\u80FD",
+            "security",
+            "\u5B89\u5168",
+            "exception",
+            "\u5F02\u5E38"
+          ]
         },
         {
           name: "priority",
@@ -109,8 +124,8 @@ var ONTOLOGY = {
           values: ["P0", "P1", "P2", "P3"],
           synonyms: ["\u4F18\u5148\u7EA7", "\u7B49\u7EA7"]
         },
-        { name: "module", label: "\u6A21\u5757", type: "string", synonyms: ["\u6A21\u5757", "\u7EC4\u4EF6"] },
-        { name: "covered_requirement", label: "\u8986\u76D6\u9700\u6C42", type: "string", synonyms: ["\u8986\u76D6\u9700\u6C42", "\u9700\u6C42"] }
+        { name: "module", label: "\u6A21\u5757", type: "string", synonyms: ["\u6A21\u5757", "\u7EC4\u4EF6", "module"] },
+        { name: "covered_requirement", label: "\u8986\u76D6\u9700\u6C42", type: "string", synonyms: ["\u8986\u76D6\u9700\u6C42", "\u9700\u6C42", "requirement", "\u8986\u76D6"] }
       ]
     },
     {
