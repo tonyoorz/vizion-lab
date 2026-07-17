@@ -199,18 +199,21 @@ var TIME_PATTERNS = [
   { re: /昨天|yesterday/i, days: 2 },
   { re: /本周|这周|this week/i, days: 7 },
   { re: /上周|last week/i, days: 14 },
-  { re: /近\s*(\d+)\s*天/, days: 0 },
+  { re: /(?:近|过去|最近|过往)\s*(\d+)\s*天|last\s+(\d+)\s+days?/i, days: 0 },
   // dynamic
   { re: /本月|this month/i, days: 30 },
-  { re: /近一个月|过去一个月/, days: 30 },
+  { re: /近一个月|过去一个月|近1个月|过去1个月|past month/i, days: 30 },
   { re: /上个月|last month/i, days: 60 },
-  { re: /近\s*90\s*天|近三个月|过去三个月/, days: 90 },
+  { re: /近\s*90\s*天|近三个月|过去三个月|past\s+3\s+months|last\s+quarter/i, days: 90 },
   { re: /今年|this year/i, days: 365 }
 ];
 var extractTime = (text) => {
   const hints = [];
-  const dyn = /近\s*(\d+)\s*天/.exec(text);
-  if (dyn) hints.push({ rangeDays: Number(dyn[1]), rawPhrase: dyn[0] });
+  const dyn = /(?:近|过去|最近|过往)\s*(\d+)\s*天|last\s+(\d+)\s+days?/i.exec(text);
+  if (dyn) {
+    const n = Number(dyn[1] ?? dyn[2]);
+    hints.push({ rangeDays: n, rawPhrase: dyn[0] });
+  }
   for (const p of TIME_PATTERNS) {
     if (p.days === 0) continue;
     const m = p.re.exec(text);
