@@ -99,7 +99,7 @@ export const ONTOLOGY: Ontology = {
       name: "高频缺陷率",
       label: "高频缺陷率",
       description: "近期复现 ≥ 3 次的缺陷占比",
-      synonyms: ["高频缺陷", "复发率", "重复缺陷比例", "频发缺陷"],
+      synonyms: ["高频缺陷", "高频", "复发率", "重复缺陷比例", "频发缺陷", "high frequency", "high-frequency", "high frequency defect", "recurring defect rate"],
       baseEntity: "Defect",
       dimensions: ["module", "severity", "owner_team"],
       formula:

@@ -156,7 +156,7 @@ var ONTOLOGY = {
       name: "\u9AD8\u9891\u7F3A\u9677\u7387",
       label: "\u9AD8\u9891\u7F3A\u9677\u7387",
       description: "\u8FD1\u671F\u590D\u73B0 \u2265 3 \u6B21\u7684\u7F3A\u9677\u5360\u6BD4",
-      synonyms: ["\u9AD8\u9891\u7F3A\u9677", "\u590D\u53D1\u7387", "\u91CD\u590D\u7F3A\u9677\u6BD4\u4F8B", "\u9891\u53D1\u7F3A\u9677"],
+      synonyms: ["\u9AD8\u9891\u7F3A\u9677", "\u9AD8\u9891", "\u590D\u53D1\u7387", "\u91CD\u590D\u7F3A\u9677\u6BD4\u4F8B", "\u9891\u53D1\u7F3A\u9677", "high frequency", "high-frequency", "high frequency defect", "recurring defect rate"],
       baseEntity: "Defect",
       dimensions: ["module", "severity", "owner_team"],
       formula: "SUM(CASE WHEN recurrence_count >= 3 THEN 1 ELSE 0 END) * 1.0 / NULLIF(COUNT(*), 0)"
