@@ -77,6 +77,15 @@ export const resolveQuestion = (question: string): OntologyMatch => {
           matchedSynonym: am,
           enumValueMatched: enumHit,
         });
+        // If an enum value or column synonym unambiguously belongs to this entity,
+        // pull the entity in so downstream joins/SQL have a FROM anchor.
+        if (enumHit && !match.entities.some((x) => x.entity.name === entity.name)) {
+          match.entities.push({
+            entity,
+            score: 0.85,
+            matchedSynonym: `(by enum ${enumHit})`,
+          });
+        }
       }
     }
   }
