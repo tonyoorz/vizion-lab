@@ -192,7 +192,7 @@ var ONTOLOGY = {
       name: "\u957F\u5C3E\u7F3A\u9677\u7387",
       label: "\u957F\u5C3E\u7F3A\u9677\u7387",
       description: "\u5B58\u6D3B > 30 \u5929\u7684\u7F3A\u9677\u5360\u6BD4",
-      synonyms: ["\u957F\u5C3E", "\u8001\u7F3A\u9677", "\u79EF\u538B\u8001\u5316"],
+      synonyms: ["\u957F\u5C3E", "\u957F\u5C3E\u7F3A\u9677", "\u8001\u7F3A\u9677", "\u79EF\u538B\u8001\u5316", "long tail", "long-tail", "long tail defect", "long tail defect rate"],
       baseEntity: "Defect",
       dimensions: ["module", "owner_team"],
       formula: "SUM(CASE WHEN age_days > 30 THEN 1 ELSE 0 END) * 1.0 / NULLIF(COUNT(*), 0)"

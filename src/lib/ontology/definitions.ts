@@ -136,7 +136,7 @@ export const ONTOLOGY: Ontology = {
       name: "长尾缺陷率",
       label: "长尾缺陷率",
       description: "存活 > 30 天的缺陷占比",
-      synonyms: ["长尾", "老缺陷", "积压老化"],
+      synonyms: ["长尾", "长尾缺陷", "老缺陷", "积压老化", "long tail", "long-tail", "long tail defect", "long tail defect rate"],
       baseEntity: "Defect",
       dimensions: ["module", "owner_team"],
       formula: "SUM(CASE WHEN age_days > 30 THEN 1 ELSE 0 END) * 1.0 / NULLIF(COUNT(*), 0)",
