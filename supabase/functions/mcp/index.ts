@@ -133,20 +133,20 @@ var ONTOLOGY = {
       label: "\u6D4B\u8BD5\u6267\u884C",
       table: "test_runs",
       primaryKey: "run_id",
-      synonyms: ["\u6267\u884C", "\u6D4B\u8BD5\u6267\u884C", "\u8FD0\u884C", "test run"],
+      synonyms: ["\u6267\u884C", "\u6D4B\u8BD5\u6267\u884C", "\u8FD0\u884C", "test run", "test runs", "run", "runs", "execution", "executions"],
       attributes: [
         {
           name: "result",
           label: "\u7ED3\u679C",
           type: "enum",
           values: ["Pass", "Fail", "Block", "Skip"],
-          synonyms: ["\u7ED3\u679C", "\u901A\u8FC7\u72B6\u6001", "result"]
+          synonyms: ["\u7ED3\u679C", "\u901A\u8FC7\u72B6\u6001", "result", "\u5931\u8D25", "\u5931\u8D25\u60C5\u51B5", "failing", "failed", "\u901A\u8FC7", "\u963B\u585E"]
         },
         { name: "case_id", label: "\u7528\u4F8BID", type: "string", synonyms: ["\u7528\u4F8BID"] },
-        { name: "executed_at", label: "\u6267\u884C\u65F6\u95F4", type: "date", synonyms: ["\u6267\u884C\u65F6\u95F4", "\u8FD0\u884C\u65F6\u95F4"] },
-        { name: "duration_ms", label: "\u8017\u65F6", type: "number", synonyms: ["\u8017\u65F6", "\u65F6\u957F", "duration"] },
-        { name: "ecu_target", label: "\u76EE\u6807ECU", type: "string", synonyms: ["ECU", "\u76EE\u6807"] },
-        { name: "environment", label: "\u73AF\u5883", type: "string", synonyms: ["\u73AF\u5883", "env"] }
+        { name: "executed_at", label: "\u6267\u884C\u65F6\u95F4", type: "date", synonyms: ["\u6267\u884C\u65F6\u95F4", "\u8FD0\u884C\u65F6\u95F4", "executed"] },
+        { name: "duration_ms", label: "\u8017\u65F6", type: "number", synonyms: ["\u8017\u65F6", "\u65F6\u957F", "duration", "\u6267\u884C\u65F6\u957F"] },
+        { name: "ecu_target", label: "\u76EE\u6807ECU", type: "string", synonyms: ["ECU", "\u76EE\u6807", "ecu target"] },
+        { name: "environment", label: "\u73AF\u5883", type: "string", synonyms: ["\u73AF\u5883", "env", "environment"] }
       ],
       relations: [{ name: "covers_case", target: "TestCase", via: "case_id", cardinality: "one" }]
     }
