@@ -76,11 +76,11 @@ var ONTOLOGY = {
           values: ["Open", "InProgress", "Fixed", "Verified", "Closed", "Reopened"],
           synonyms: ["\u72B6\u6001", "\u7F3A\u9677\u72B6\u6001", "\u5904\u7406\u72B6\u6001"]
         },
-        { name: "module", label: "\u6A21\u5757", type: "string", synonyms: ["\u6A21\u5757", "\u7EC4\u4EF6", "ECU", "\u5B50\u7CFB\u7EDF"] },
-        { name: "owner_team", label: "\u8D1F\u8D23\u56E2\u961F", type: "string", synonyms: ["\u56E2\u961F", "\u8D1F\u8D23\u4EBA", "owner"] },
-        { name: "open_date", label: "\u63D0\u5355\u65E5\u671F", type: "date", synonyms: ["\u521B\u5EFA\u65F6\u95F4", "\u63D0\u5355\u65F6\u95F4", "open"] },
-        { name: "age_days", label: "\u5B58\u6D3B\u5929\u6570", type: "number", synonyms: ["\u5B58\u6D3B", "\u79EF\u538B\u5929\u6570"] },
-        { name: "recurrence_count", label: "\u590D\u73B0\u6B21\u6570", type: "number", synonyms: ["\u590D\u73B0", "\u91CD\u590D\u6B21\u6570", "occur"] }
+        { name: "module", label: "\u6A21\u5757", type: "string", synonyms: ["\u6A21\u5757", "\u7EC4\u4EF6", "ECU", "\u5B50\u7CFB\u7EDF", "module", "component"] },
+        { name: "owner_team", label: "\u8D1F\u8D23\u56E2\u961F", type: "string", synonyms: ["\u56E2\u961F", "\u8D1F\u8D23\u4EBA", "owner", "team", "owner team"] },
+        { name: "open_date", label: "\u63D0\u5355\u65E5\u671F", type: "date", synonyms: ["\u521B\u5EFA\u65F6\u95F4", "\u63D0\u5355\u65F6\u95F4", "\u65B0\u63D0", "\u65B0\u5EFA", "\u65B0\u62A5", "reported", "opened", "created", "open"] },
+        { name: "age_days", label: "\u5B58\u6D3B\u5929\u6570", type: "number", synonyms: ["\u5B58\u6D3B", "\u79EF\u538B\u5929\u6570", "age", "aging"] },
+        { name: "recurrence_count", label: "\u590D\u73B0\u6B21\u6570", type: "number", synonyms: ["\u590D\u73B0", "\u91CD\u590D\u6B21\u6570", "occur", "recurring", "recurrence"] }
       ],
       relations: [
         { name: "found_in_run", target: "TestRun", via: "run_id", cardinality: "many" },
