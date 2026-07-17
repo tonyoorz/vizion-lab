@@ -76,11 +76,11 @@ var ONTOLOGY = {
           values: ["Open", "InProgress", "Fixed", "Verified", "Closed", "Reopened"],
           synonyms: ["\u72B6\u6001", "\u7F3A\u9677\u72B6\u6001", "\u5904\u7406\u72B6\u6001"]
         },
-        { name: "module", label: "\u6A21\u5757", type: "string", synonyms: ["\u6A21\u5757", "\u7EC4\u4EF6", "ECU", "\u5B50\u7CFB\u7EDF"] },
-        { name: "owner_team", label: "\u8D1F\u8D23\u56E2\u961F", type: "string", synonyms: ["\u56E2\u961F", "\u8D1F\u8D23\u4EBA", "owner"] },
-        { name: "open_date", label: "\u63D0\u5355\u65E5\u671F", type: "date", synonyms: ["\u521B\u5EFA\u65F6\u95F4", "\u63D0\u5355\u65F6\u95F4", "open"] },
-        { name: "age_days", label: "\u5B58\u6D3B\u5929\u6570", type: "number", synonyms: ["\u5B58\u6D3B", "\u79EF\u538B\u5929\u6570"] },
-        { name: "recurrence_count", label: "\u590D\u73B0\u6B21\u6570", type: "number", synonyms: ["\u590D\u73B0", "\u91CD\u590D\u6B21\u6570", "occur"] }
+        { name: "module", label: "\u6A21\u5757", type: "string", synonyms: ["\u6A21\u5757", "\u7EC4\u4EF6", "ECU", "\u5B50\u7CFB\u7EDF", "module", "component"] },
+        { name: "owner_team", label: "\u8D1F\u8D23\u56E2\u961F", type: "string", synonyms: ["\u56E2\u961F", "\u8D1F\u8D23\u4EBA", "owner", "team", "owner team"] },
+        { name: "open_date", label: "\u63D0\u5355\u65E5\u671F", type: "date", synonyms: ["\u521B\u5EFA\u65F6\u95F4", "\u63D0\u5355\u65F6\u95F4", "\u65B0\u63D0", "\u65B0\u5EFA", "\u65B0\u62A5", "reported", "opened", "created", "open"] },
+        { name: "age_days", label: "\u5B58\u6D3B\u5929\u6570", type: "number", synonyms: ["\u5B58\u6D3B", "\u79EF\u538B\u5929\u6570", "age", "aging"] },
+        { name: "recurrence_count", label: "\u590D\u73B0\u6B21\u6570", type: "number", synonyms: ["\u590D\u73B0", "\u91CD\u590D\u6B21\u6570", "occur", "recurring", "recurrence"] }
       ],
       relations: [
         { name: "found_in_run", target: "TestRun", via: "run_id", cardinality: "many" },
@@ -92,7 +92,7 @@ var ONTOLOGY = {
       label: "\u6D4B\u8BD5\u7528\u4F8B",
       table: "test_cases",
       primaryKey: "case_id",
-      synonyms: ["\u7528\u4F8B", "\u6D4B\u8BD5\u7528\u4F8B", "test case", "case"],
+      synonyms: ["\u7528\u4F8B", "\u6D4B\u8BD5\u7528\u4F8B", "test case", "test cases", "cases", "case"],
       attributes: [
         { name: "suite", label: "\u5957\u4EF6", type: "string", synonyms: ["\u5957\u4EF6", "suite", "\u6D4B\u8BD5\u96C6"] },
         {
@@ -100,7 +100,22 @@ var ONTOLOGY = {
           label: "\u7C7B\u578B",
           type: "enum",
           values: ["\u529F\u80FD", "\u5F02\u5E38", "\u8FB9\u754C", "\u56DE\u5F52", "\u6027\u80FD", "\u5B89\u5168"],
-          synonyms: ["\u7C7B\u578B", "\u7528\u4F8B\u7C7B\u578B"]
+          synonyms: [
+            "\u7C7B\u578B",
+            "\u7528\u4F8B\u7C7B\u578B",
+            "regression",
+            "\u56DE\u5F52",
+            "boundary",
+            "\u8FB9\u754C",
+            "functional",
+            "\u529F\u80FD",
+            "performance",
+            "\u6027\u80FD",
+            "security",
+            "\u5B89\u5168",
+            "exception",
+            "\u5F02\u5E38"
+          ]
         },
         {
           name: "priority",
@@ -109,8 +124,8 @@ var ONTOLOGY = {
           values: ["P0", "P1", "P2", "P3"],
           synonyms: ["\u4F18\u5148\u7EA7", "\u7B49\u7EA7"]
         },
-        { name: "module", label: "\u6A21\u5757", type: "string", synonyms: ["\u6A21\u5757", "\u7EC4\u4EF6"] },
-        { name: "covered_requirement", label: "\u8986\u76D6\u9700\u6C42", type: "string", synonyms: ["\u8986\u76D6\u9700\u6C42", "\u9700\u6C42"] }
+        { name: "module", label: "\u6A21\u5757", type: "string", synonyms: ["\u6A21\u5757", "\u7EC4\u4EF6", "module"] },
+        { name: "covered_requirement", label: "\u8986\u76D6\u9700\u6C42", type: "string", synonyms: ["\u8986\u76D6\u9700\u6C42", "\u9700\u6C42", "requirement", "\u8986\u76D6"] }
       ]
     },
     {
@@ -118,20 +133,20 @@ var ONTOLOGY = {
       label: "\u6D4B\u8BD5\u6267\u884C",
       table: "test_runs",
       primaryKey: "run_id",
-      synonyms: ["\u6267\u884C", "\u6D4B\u8BD5\u6267\u884C", "\u8FD0\u884C", "test run"],
+      synonyms: ["\u6267\u884C", "\u6D4B\u8BD5\u6267\u884C", "\u8FD0\u884C", "test run", "test runs", "run", "runs", "execution", "executions"],
       attributes: [
         {
           name: "result",
           label: "\u7ED3\u679C",
           type: "enum",
           values: ["Pass", "Fail", "Block", "Skip"],
-          synonyms: ["\u7ED3\u679C", "\u901A\u8FC7\u72B6\u6001", "result"]
+          synonyms: ["\u7ED3\u679C", "\u901A\u8FC7\u72B6\u6001", "result", "\u5931\u8D25", "\u5931\u8D25\u60C5\u51B5", "failing", "failed", "\u901A\u8FC7", "\u963B\u585E"]
         },
         { name: "case_id", label: "\u7528\u4F8BID", type: "string", synonyms: ["\u7528\u4F8BID"] },
-        { name: "executed_at", label: "\u6267\u884C\u65F6\u95F4", type: "date", synonyms: ["\u6267\u884C\u65F6\u95F4", "\u8FD0\u884C\u65F6\u95F4"] },
-        { name: "duration_ms", label: "\u8017\u65F6", type: "number", synonyms: ["\u8017\u65F6", "\u65F6\u957F", "duration"] },
-        { name: "ecu_target", label: "\u76EE\u6807ECU", type: "string", synonyms: ["ECU", "\u76EE\u6807"] },
-        { name: "environment", label: "\u73AF\u5883", type: "string", synonyms: ["\u73AF\u5883", "env"] }
+        { name: "executed_at", label: "\u6267\u884C\u65F6\u95F4", type: "date", synonyms: ["\u6267\u884C\u65F6\u95F4", "\u8FD0\u884C\u65F6\u95F4", "executed"] },
+        { name: "duration_ms", label: "\u8017\u65F6", type: "number", synonyms: ["\u8017\u65F6", "\u65F6\u957F", "duration", "\u6267\u884C\u65F6\u957F"] },
+        { name: "ecu_target", label: "\u76EE\u6807ECU", type: "string", synonyms: ["ECU", "\u76EE\u6807", "ecu target"] },
+        { name: "environment", label: "\u73AF\u5883", type: "string", synonyms: ["\u73AF\u5883", "env", "environment"] }
       ],
       relations: [{ name: "covers_case", target: "TestCase", via: "case_id", cardinality: "one" }]
     }
@@ -141,7 +156,7 @@ var ONTOLOGY = {
       name: "\u9AD8\u9891\u7F3A\u9677\u7387",
       label: "\u9AD8\u9891\u7F3A\u9677\u7387",
       description: "\u8FD1\u671F\u590D\u73B0 \u2265 3 \u6B21\u7684\u7F3A\u9677\u5360\u6BD4",
-      synonyms: ["\u9AD8\u9891\u7F3A\u9677", "\u590D\u53D1\u7387", "\u91CD\u590D\u7F3A\u9677\u6BD4\u4F8B", "\u9891\u53D1\u7F3A\u9677"],
+      synonyms: ["\u9AD8\u9891\u7F3A\u9677", "\u9AD8\u9891", "\u590D\u53D1\u7387", "\u91CD\u590D\u7F3A\u9677\u6BD4\u4F8B", "\u9891\u53D1\u7F3A\u9677", "high frequency", "high-frequency", "high frequency defect", "recurring defect rate"],
       baseEntity: "Defect",
       dimensions: ["module", "severity", "owner_team"],
       formula: "SUM(CASE WHEN recurrence_count >= 3 THEN 1 ELSE 0 END) * 1.0 / NULLIF(COUNT(*), 0)"
@@ -168,7 +183,7 @@ var ONTOLOGY = {
       name: "\u5E73\u5747\u6267\u884C\u8017\u65F6",
       label: "\u5E73\u5747\u6267\u884C\u8017\u65F6(ms)",
       description: "\u6D4B\u8BD5\u6267\u884C\u5E73\u5747\u8017\u65F6",
-      synonyms: ["\u5E73\u5747\u8017\u65F6", "\u6267\u884C\u65F6\u957F", "avg duration"],
+      synonyms: ["\u5E73\u5747\u8017\u65F6", "\u6267\u884C\u65F6\u957F", "avg duration", "average duration", "mean duration", "avg time", "average execution time"],
       baseEntity: "TestRun",
       dimensions: ["ecu_target", "environment"],
       formula: "AVG(duration_ms)"
@@ -177,7 +192,7 @@ var ONTOLOGY = {
       name: "\u957F\u5C3E\u7F3A\u9677\u7387",
       label: "\u957F\u5C3E\u7F3A\u9677\u7387",
       description: "\u5B58\u6D3B > 30 \u5929\u7684\u7F3A\u9677\u5360\u6BD4",
-      synonyms: ["\u957F\u5C3E", "\u8001\u7F3A\u9677", "\u79EF\u538B\u8001\u5316"],
+      synonyms: ["\u957F\u5C3E", "\u957F\u5C3E\u7F3A\u9677", "\u8001\u7F3A\u9677", "\u79EF\u538B\u8001\u5316", "long tail", "long-tail", "long tail defect", "long tail defect rate"],
       baseEntity: "Defect",
       dimensions: ["module", "owner_team"],
       formula: "SUM(CASE WHEN age_days > 30 THEN 1 ELSE 0 END) * 1.0 / NULLIF(COUNT(*), 0)"
@@ -199,18 +214,21 @@ var TIME_PATTERNS = [
   { re: /昨天|yesterday/i, days: 2 },
   { re: /本周|这周|this week/i, days: 7 },
   { re: /上周|last week/i, days: 14 },
-  { re: /近\s*(\d+)\s*天/, days: 0 },
+  { re: /(?:近|过去|最近|过往)\s*(\d+)\s*天|last\s+(\d+)\s+days?/i, days: 0 },
   // dynamic
   { re: /本月|this month/i, days: 30 },
-  { re: /近一个月|过去一个月/, days: 30 },
+  { re: /近一个月|过去一个月|近1个月|过去1个月|past month/i, days: 30 },
   { re: /上个月|last month/i, days: 60 },
-  { re: /近\s*90\s*天|近三个月|过去三个月/, days: 90 },
+  { re: /近\s*90\s*天|近三个月|过去三个月|past\s+3\s+months|last\s+quarter/i, days: 90 },
   { re: /今年|this year/i, days: 365 }
 ];
 var extractTime = (text) => {
   const hints = [];
-  const dyn = /近\s*(\d+)\s*天/.exec(text);
-  if (dyn) hints.push({ rangeDays: Number(dyn[1]), rawPhrase: dyn[0] });
+  const dyn = /(?:近|过去|最近|过往)\s*(\d+)\s*天|last\s+(\d+)\s+days?/i.exec(text);
+  if (dyn) {
+    const n = Number(dyn[1] ?? dyn[2]);
+    hints.push({ rangeDays: n, rawPhrase: dyn[0] });
+  }
   for (const p of TIME_PATTERNS) {
     if (p.days === 0) continue;
     const m = p.re.exec(text);
@@ -249,6 +267,13 @@ var resolveQuestion = (question) => {
           matchedSynonym: am,
           enumValueMatched: enumHit
         });
+        if ((am || enumHit) && !match.entities.some((x) => x.entity.name === entity.name)) {
+          match.entities.push({
+            entity,
+            score: enumHit ? 0.85 : 0.7,
+            matchedSynonym: enumHit ? `(by enum ${enumHit})` : `(by attr ${attr.name})`
+          });
+        }
       }
     }
   }
