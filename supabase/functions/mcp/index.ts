@@ -267,11 +267,11 @@ var resolveQuestion = (question) => {
           matchedSynonym: am,
           enumValueMatched: enumHit
         });
-        if (enumHit && !match.entities.some((x) => x.entity.name === entity.name)) {
+        if ((am || enumHit) && !match.entities.some((x) => x.entity.name === entity.name)) {
           match.entities.push({
             entity,
-            score: 0.85,
-            matchedSynonym: `(by enum ${enumHit})`
+            score: enumHit ? 0.85 : 0.7,
+            matchedSynonym: enumHit ? `(by enum ${enumHit})` : `(by attr ${attr.name})`
           });
         }
       }
