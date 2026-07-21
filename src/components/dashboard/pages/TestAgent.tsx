@@ -179,9 +179,10 @@ const TestAgent = () => {
     return () => { unsub(); };
   }, []);
 
-  const hasDefects = tables.some((t) => /defects?/i.test(t.name));
-  const hasRuns = tables.some((t) => /test_runs?/i.test(t.name));
-  const hasCases = tables.some((t) => /test_cases?/i.test(t.name));
+  const tableNames = tables.map((t) => t.name.toLowerCase());
+  const hasDefects = tableNames.includes(T_DEFECT.toLowerCase());
+  const hasRuns = tableNames.includes(T_RUN.toLowerCase());
+  const hasCases = tableNames.includes(T_CASE.toLowerCase());
   const dbReady = hasDefects || hasRuns || hasCases;
 
   const updateStep = (key: string, patch: Partial<AgentStep>) =>
