@@ -780,6 +780,20 @@ const TestAgent = () => {
                         覆盖：{c.coverage_dimension}
                       </span>
                     )}
+                    {typeof c.novelty_score === "number" && (
+                      <span
+                        title={c.dedup_note}
+                        className={`rounded-md px-1.5 py-0.5 text-[10px] font-medium ${
+                          c.novelty_score >= 0.7
+                            ? "bg-emerald-500/10 text-emerald-600"
+                            : c.novelty_score >= 0.4
+                              ? "bg-amber-500/10 text-amber-600"
+                              : "bg-muted text-muted-foreground"
+                        }`}
+                      >
+                        新颖度 {(c.novelty_score * 100).toFixed(0)}
+                      </span>
+                    )}
                     <span className="ml-auto text-[11px] font-semibold text-foreground">
                       {c.title}
                     </span>
