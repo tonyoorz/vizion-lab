@@ -96,11 +96,13 @@ interface CoverageGap {
 
 const initialSteps = (): AgentStep[] => [
   { key: "scan", name: "Data Scanner", hint: "扫描本地表", status: "pending" },
+  { key: "onto", name: "Ontology Resolver", hint: "解析目标 → 实体/字段", status: "pending" },
   { key: "defect", name: "Defect Miner", hint: "挖掘缺陷模式", status: "pending" },
   { key: "exec", name: "Execution Analyst", hint: "分析测试执行失败", status: "pending" },
   { key: "gap", name: "Coverage Gap Analyst", hint: "识别覆盖缺口", status: "pending" },
   { key: "generator", name: "Case Generator", hint: "生成候选用例", status: "pending" },
-  { key: "critic", name: "Critic", hint: "剔除幻觉与冗余", status: "pending" },
+  { key: "dedup", name: "Novelty Dedup", hint: "去重与新颖度打分", status: "pending" },
+  { key: "critic", name: "Critic (Hard Gate)", hint: "校验 + 失败自动重跑", status: "pending" },
 ];
 
 const callAgent = async (
