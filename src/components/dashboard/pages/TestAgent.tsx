@@ -72,6 +72,8 @@ interface GeneratedCase {
   linked_defects?: string[];
   linked_requirement?: string;
   coverage_dimension?: string;
+  novelty_score?: number;
+  dedup_note?: string;
 }
 
 interface DefectPattern {
