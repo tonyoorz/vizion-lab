@@ -19,7 +19,30 @@ import {
 import { motion, AnimatePresence } from "framer-motion";
 import AgentStepCard, { AgentStep } from "../chat/AgentStepCard";
 import { duckdbManager, TableInfo } from "@/lib/duckdb/client";
-import { ONTOLOGY } from "@/lib/ontology";
+import { ONTOLOGY, entityByName, resolveQuestion } from "@/lib/ontology";
+
+// -- Ontology-derived physical table names (fall back to conventional defaults)
+const T_DEFECT = entityByName("Defect")?.table ?? "defects";
+const T_CASE = entityByName("TestCase")?.table ?? "test_cases";
+const T_RUN = entityByName("TestRun")?.table ?? "test_runs";
+const DEFECT_PK = entityByName("Defect")?.primaryKey ?? "defect_id";
+const CASE_PK = entityByName("TestCase")?.primaryKey ?? "case_id";
+
+// -- Dedup helpers (bigram Jaccard, zh-friendly, cheap)
+const bigrams = (s: string): Set<string> => {
+  const t = (s || "").toLowerCase().replace(/\s+/g, "");
+  const g = new Set<string>();
+  for (let i = 0; i < t.length - 1; i++) g.add(t.slice(i, i + 2));
+  return g;
+};
+const jaccard = (a: Set<string>, b: Set<string>): number => {
+  if (!a.size || !b.size) return 0;
+  let inter = 0;
+  for (const x of a) if (b.has(x)) inter++;
+  return inter / (a.size + b.size - inter);
+};
+const caseSignature = (c: { title?: string; steps?: string[]; expected?: string }) =>
+  bigrams([c.title ?? "", ...(c.steps ?? []), c.expected ?? ""].join(" "));
 
 const TIME_WINDOWS = [
   { id: "30", label: "近 30 天", days: 30 },
