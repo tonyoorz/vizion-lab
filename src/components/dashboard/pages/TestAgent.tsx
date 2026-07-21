@@ -19,7 +19,30 @@ import {
 import { motion, AnimatePresence } from "framer-motion";
 import AgentStepCard, { AgentStep } from "../chat/AgentStepCard";
 import { duckdbManager, TableInfo } from "@/lib/duckdb/client";
-import { ONTOLOGY } from "@/lib/ontology";
+import { ONTOLOGY, entityByName, resolveQuestion } from "@/lib/ontology";
+
+// -- Ontology-derived physical table names (fall back to conventional defaults)
+const T_DEFECT = entityByName("Defect")?.table ?? "defects";
+const T_CASE = entityByName("TestCase")?.table ?? "test_cases";
+const T_RUN = entityByName("TestRun")?.table ?? "test_runs";
+const DEFECT_PK = entityByName("Defect")?.primaryKey ?? "defect_id";
+const CASE_PK = entityByName("TestCase")?.primaryKey ?? "case_id";
+
+// -- Dedup helpers (bigram Jaccard, zh-friendly, cheap)
+const bigrams = (s: string): Set<string> => {
+  const t = (s || "").toLowerCase().replace(/\s+/g, "");
+  const g = new Set<string>();
+  for (let i = 0; i < t.length - 1; i++) g.add(t.slice(i, i + 2));
+  return g;
+};
+const jaccard = (a: Set<string>, b: Set<string>): number => {
+  if (!a.size || !b.size) return 0;
+  let inter = 0;
+  for (const x of a) if (b.has(x)) inter++;
+  return inter / (a.size + b.size - inter);
+};
+const caseSignature = (c: { title?: string; steps?: string[]; expected?: string }) =>
+  bigrams([c.title ?? "", ...(c.steps ?? []), c.expected ?? ""].join(" "));
 
 const TIME_WINDOWS = [
   { id: "30", label: "近 30 天", days: 30 },
@@ -49,6 +72,8 @@ interface GeneratedCase {
   linked_defects?: string[];
   linked_requirement?: string;
   coverage_dimension?: string;
+  novelty_score?: number;
+  dedup_note?: string;
 }
 
 interface DefectPattern {
@@ -73,11 +98,13 @@ interface CoverageGap {
 
 const initialSteps = (): AgentStep[] => [
   { key: "scan", name: "Data Scanner", hint: "扫描本地表", status: "pending" },
+  { key: "onto", name: "Ontology Resolver", hint: "解析目标 → 实体/字段", status: "pending" },
   { key: "defect", name: "Defect Miner", hint: "挖掘缺陷模式", status: "pending" },
   { key: "exec", name: "Execution Analyst", hint: "分析测试执行失败", status: "pending" },
   { key: "gap", name: "Coverage Gap Analyst", hint: "识别覆盖缺口", status: "pending" },
   { key: "generator", name: "Case Generator", hint: "生成候选用例", status: "pending" },
-  { key: "critic", name: "Critic", hint: "剔除幻觉与冗余", status: "pending" },
+  { key: "dedup", name: "Novelty Dedup", hint: "去重与新颖度打分", status: "pending" },
+  { key: "critic", name: "Critic (Hard Gate)", hint: "校验 + 失败自动重跑", status: "pending" },
 ];
 
 const callAgent = async (
@@ -154,9 +181,10 @@ const TestAgent = () => {
     return () => { unsub(); };
   }, []);
 
-  const hasDefects = tables.some((t) => /defects?/i.test(t.name));
-  const hasRuns = tables.some((t) => /test_runs?/i.test(t.name));
-  const hasCases = tables.some((t) => /test_cases?/i.test(t.name));
+  const tableNames = tables.map((t) => t.name.toLowerCase());
+  const hasDefects = tableNames.includes(T_DEFECT.toLowerCase());
+  const hasRuns = tableNames.includes(T_RUN.toLowerCase());
+  const hasCases = tableNames.includes(T_CASE.toLowerCase());
   const dbReady = hasDefects || hasRuns || hasCases;
 
   const updateStep = (key: string, patch: Partial<AgentStep>) =>
@@ -205,24 +233,54 @@ const TestAgent = () => {
         ),
       });
 
-      // ---- Step 2: Defect Miner (real SQL) ----
+      // ---- Step 2: Ontology Resolver ----
+      const tOnto = performance.now();
+      updateStep("onto", { status: "running" });
+      const ontoMatch = resolveQuestion(`${module} ${winLabel}`);
+      const involvedEntities = Array.from(
+        new Set([
+          ...ontoMatch.entities.map((e) => e.entity.name),
+          ...(hasDefects ? ["Defect"] : []),
+          ...(hasCases ? ["TestCase"] : []),
+          ...(hasRuns ? ["TestRun"] : []),
+        ]),
+      );
+      const ontoAttrs = ontoMatch.attributes.map(
+        (a) => `${a.entity.name}.${a.attribute.name}${a.enumValueMatched ? `=${a.enumValueMatched}` : ""}`,
+      );
+      updateStep("onto", {
+        status: "done",
+        summary: `实体：${involvedEntities.join("/") || "n/a"}${
+          ontoAttrs.length ? ` · 命中属性 ${ontoAttrs.length}` : ""
+        }`,
+        durationMs: Math.round(performance.now() - tOnto),
+        detail: (
+          <div className="space-y-1 text-[11px] text-muted-foreground">
+            <div>物理表映射：Defect→{T_DEFECT} · TestCase→{T_CASE} · TestRun→{T_RUN}</div>
+            {ontoAttrs.length > 0 && <div>命中属性：{ontoAttrs.join(", ")}</div>}
+            {ontoMatch.metrics.length > 0 && (
+              <div>相关指标：{ontoMatch.metrics.map((m) => m.metric.name).join(", ")}</div>
+            )}
+          </div>
+        ),
+      });
+
+      // ---- Step 3: Defect Miner (real SQL, ontology-driven table) ----
       const t1 = performance.now();
       updateStep("defect", { status: "running" });
       const like = `%${module.replace(/'/g, "''")}%`;
       const defectSql = hasDefects
         ? `SELECT module, severity, COUNT(*)::INT AS defect_count,
                   ROUND(AVG(COALESCE(recurrence_count,1)),2) AS avg_recurrence,
-                  LIST(defect_id ORDER BY COALESCE(recurrence_count,0) DESC) AS ids
-             FROM defects
-            WHERE (module ILIKE '${like}' OR CAST(defect_id AS VARCHAR) ILIKE '${like}')
+                  LIST(${DEFECT_PK} ORDER BY COALESCE(recurrence_count,0) DESC) AS ids
+             FROM ${T_DEFECT}
+            WHERE (module ILIKE '${like}' OR CAST(${DEFECT_PK} AS VARCHAR) ILIKE '${like}')
               AND (open_date IS NULL OR open_date >= (CURRENT_DATE - INTERVAL ${days} DAY))
             GROUP BY module, severity
             ORDER BY defect_count DESC
             LIMIT 12`
         : "";
-      const defectRows = hasDefects
-        ? await safeQuery<any>(defectSql)
-        : [];
+      const defectRows = hasDefects ? await safeQuery<any>(defectSql) : [];
       const defectPatterns: DefectPattern[] = defectRows.map((r) => ({
         module: String(r.module ?? ""),
         severity: String(r.severity ?? ""),
@@ -236,12 +294,12 @@ const TestAgent = () => {
         durationMs: Math.round(performance.now() - t1),
         detail: (
           <pre className="whitespace-pre-wrap font-mono text-[11px] text-muted-foreground">
-            {defectPatterns.length ? JSON.stringify(defectPatterns, null, 2) : "未在 defects 表匹配到目标"}
+            {defectPatterns.length ? JSON.stringify(defectPatterns, null, 2) : `未在 ${T_DEFECT} 表匹配到目标`}
           </pre>
         ),
       });
 
-      // ---- Step 3: Execution Analyst ----
+      // ---- Step 4: Execution Analyst ----
       const t2 = performance.now();
       updateStep("exec", { status: "running" });
       let execWeak: ExecutionWeakness[] = [];
@@ -250,7 +308,7 @@ const TestAgent = () => {
                                 r.ecu_target AS ecu_target,
                                 COUNT(*)::INT AS run_count,
                                 ROUND(SUM(CASE WHEN r.result='Fail' THEN 1 ELSE 0 END)*1.0/COUNT(*),3) AS fail_rate
-                           FROM test_runs r JOIN test_cases c ON c.case_id = r.case_id
+                           FROM ${T_RUN} r JOIN ${T_CASE} c ON c.${CASE_PK} = r.${CASE_PK}
                           WHERE c.module ILIKE '${like}'
                             AND (r.executed_at IS NULL OR r.executed_at >= (CURRENT_DATE - INTERVAL ${days} DAY))
                           GROUP BY c.module, r.ecu_target
@@ -276,15 +334,16 @@ const TestAgent = () => {
         ),
       });
 
-      // ---- Step 4: Coverage Gap ----
+      // ---- Step 5: Coverage Gap + existing case corpus for dedup ----
       const t3 = performance.now();
       updateStep("gap", { status: "running" });
       let gaps: CoverageGap[] = [];
+      let existingCorpus: { title: string; steps: string[] }[] = [];
       if (hasCases) {
         const gapSql = `SELECT module,
                                COUNT(*)::INT AS total_cases,
                                LIST(DISTINCT type) AS types
-                          FROM test_cases
+                          FROM ${T_CASE}
                          WHERE module ILIKE '${like}'
                          GROUP BY module
                          ORDER BY total_cases DESC
@@ -300,10 +359,24 @@ const TestAgent = () => {
             missing_types: allTypes.filter((t) => !covered.includes(t)),
           };
         });
+        // pull existing titles/steps sample for novelty comparison
+        const corpusRows = await safeQuery<any>(
+          `SELECT title, steps FROM ${T_CASE} WHERE module ILIKE '${like}' LIMIT 500`,
+        );
+        existingCorpus = corpusRows.map((r) => ({
+          title: String(r.title ?? ""),
+          steps: Array.isArray(r.steps)
+            ? r.steps.map(String)
+            : typeof r.steps === "string"
+              ? [r.steps]
+              : [],
+        }));
       }
       updateStep("gap", {
         status: "done",
-        summary: gaps.length ? `${gaps.length} 模块 · 缺口类型 ${gaps[0]?.missing_types.join("/") || "无"}` : "未查询到用例分布",
+        summary: gaps.length
+          ? `${gaps.length} 模块 · 缺口类型 ${gaps[0]?.missing_types.join("/") || "无"} · 语料 ${existingCorpus.length}`
+          : "未查询到用例分布",
         durationMs: Math.round(performance.now() - t3),
         detail: (
           <pre className="whitespace-pre-wrap font-mono text-[11px] text-muted-foreground">
@@ -312,9 +385,15 @@ const TestAgent = () => {
         ),
       });
 
-      // ---- Step 5: Generator (LLM) ----
-      const t4 = performance.now();
-      updateStep("generator", { status: "running" });
+      // ---- Step 6: Generator (LLM) — supports one auto-retry with violations ----
+      const validIds = new Set(defectPatterns.flatMap((d) => d.sample_ids));
+      const allowedTypes = new Set(types);
+      const validModulesFromDb = new Set(
+        [...defectPatterns.map((d) => d.module), ...gaps.map((g) => g.module)]
+          .filter(Boolean)
+          .map((s) => s.toLowerCase()),
+      );
+
       const genSys =
         `你是资深汽车电子测试架构师。根据真实的历史缺陷模式、执行失败热点与覆盖缺口，` +
         `产出高质量新增测试用例。每条用例必须引用真实数字或缺陷 ID 作为 rationale 依据；` +
@@ -324,59 +403,159 @@ const TestAgent = () => {
         .find((e) => e.name === "TestCase")
         ?.attributes.map((a) => `${a.name}(${a.label})`)
         .join(", ");
-      const genUser =
+
+      const buildGenUser = (violationFeedback?: string) =>
         `目标模块/组件：${module}\n时间窗口：${winLabel}\n生成条数：${count}\n用例类型集合：${types.join("、")}\n\n` +
         `【历史缺陷簇】\n${JSON.stringify(defectPatterns, null, 2)}\n\n` +
         `【执行失败热点】\n${JSON.stringify(execWeak, null, 2)}\n\n` +
         `【覆盖缺口】\n${JSON.stringify(gaps, null, 2)}\n\n` +
         `TestCase 字段参考: ${ontologyHint}\n\n` +
+        (violationFeedback
+          ? `【上一轮 Critic 硬门禁不通过原因，请务必修正】\n${violationFeedback}\n\n`
+          : "") +
         `请输出 JSON：{"cases":[{"title","type","priority","module","preconditions","steps":[...],"expected","rationale","linked_defects":[...],"linked_requirement","coverage_dimension"}]}\n` +
         `要求：\n` +
         `1. 严格产出 ${count} 条。\n` +
         `2. 优先针对高频/高严重度缺陷和失败率>=0.3的场景。\n` +
         `3. 至少一半是覆盖缺口类型（未覆盖的用例类型）以扩大广度。\n` +
         `4. rationale 必须包含具体数字或 defect_id。\n` +
-        `5. linked_defects 只能来自上面的 sample_ids 列表。\n`;
-      const genRaw = await callAgent("generator", genSys, genUser, true);
+        `5. linked_defects 只能来自这个白名单: ${JSON.stringify([...validIds])}\n`;
+
+      const t4 = performance.now();
+      updateStep("generator", { status: "running" });
+      const genRaw = await callAgent("generator", genSys, buildGenUser(), true);
       const gen = extractJSON<{ cases: GeneratedCase[] }>(genRaw, { cases: [] });
-      const draftCases = Array.isArray(gen.cases) ? gen.cases : [];
+      let draftCases = Array.isArray(gen.cases) ? gen.cases : [];
       updateStep("generator", {
         status: "done",
         summary: `${draftCases.length} 条候选`,
         durationMs: Math.round(performance.now() - t4),
       });
 
-      // ---- Step 6: Critic ----
+      // ---- Step 7: Novelty Dedup (bigram Jaccard vs existing + intra-batch) ----
+      const tDedup = performance.now();
+      updateStep("dedup", { status: "running" });
+      const corpusSigs = existingCorpus.map((r) => bigrams(`${r.title} ${r.steps.join(" ")}`));
+      const scored = draftCases.map((c) => {
+        const sig = caseSignature(c);
+        let maxSim = 0;
+        for (const cs of corpusSigs) maxSim = Math.max(maxSim, jaccard(sig, cs));
+        return { c, sig, novelty: Number((1 - maxSim).toFixed(3)), maxSim };
+      });
+      // intra-batch dedup: drop candidate if too similar to a already-kept one
+      const kept: typeof scored = [];
+      for (const item of scored.sort((a, b) => b.novelty - a.novelty)) {
+        const intra = kept.reduce((m, k) => Math.max(m, jaccard(item.sig, k.sig)), 0);
+        if (intra >= 0.72) continue;
+        kept.push(item);
+      }
+      const NOVELTY_THRESHOLD = 0.25;
+      const deduped = kept
+        .filter((k) => k.novelty >= NOVELTY_THRESHOLD)
+        .map((k) => ({
+          ...k.c,
+          novelty_score: k.novelty,
+          dedup_note:
+            k.maxSim > 0
+              ? `与既有用例最大相似度 ${(k.maxSim * 100).toFixed(0)}%`
+              : "无同模块历史用例可比对",
+        }));
+      const droppedCount = draftCases.length - deduped.length;
+      updateStep("dedup", {
+        status: "done",
+        summary: `保留 ${deduped.length} / 丢弃 ${droppedCount}（阈值 novelty≥${NOVELTY_THRESHOLD}）`,
+        durationMs: Math.round(performance.now() - tDedup),
+      });
+      draftCases = deduped;
+
+      // ---- Step 8: Critic (HARD GATE) + one automatic retry ----
       const t5 = performance.now();
       updateStep("critic", { status: "running" });
-      const validIds = new Set(defectPatterns.flatMap((d) => d.sample_ids));
-      const allowedTypes = new Set(types);
-      const criticSys =
-        `你是严格的测试用例评审专家。剔除以下问题：` +
-        `(a) linked_defects 中出现不在允许集合的 ID；` +
-        `(b) 类型不在允许集合；(c) rationale 无具体数字或 ID；(d) 与现有覆盖类型高度重复且无新价值。` +
-        `保留可执行、可验证、带明确断言的用例。严格返回 JSON {"cases":[...]}。`;
-      const criticUser =
-        `允许 defect_id: ${JSON.stringify([...validIds])}\n允许类型: ${JSON.stringify([...allowedTypes])}\n` +
-        `原始候选:\n${JSON.stringify(draftCases, null, 2)}\n\n输出精炼后的最终数组，条数不超过 ${count}。`;
-      let finalCases = draftCases;
-      try {
-        const criRaw = await callAgent("critic", criticSys, criticUser, true);
-        const cri = extractJSON<{ cases: GeneratedCase[] }>(criRaw, { cases: draftCases });
-        finalCases = Array.isArray(cri.cases) && cri.cases.length ? cri.cases : draftCases;
-      } catch (e) {
-        console.warn("[TestAgent] critic failed", e);
+
+      const hardValidate = (arr: GeneratedCase[]) => {
+        const violations: string[] = [];
+        arr.forEach((c, i) => {
+          const tag = `#${i + 1} "${(c.title || "").slice(0, 24)}"`;
+          if (!allowedTypes.has(c.type))
+            violations.push(`${tag}: type "${c.type}" 不在允许集 ${JSON.stringify([...allowedTypes])}`);
+          for (const id of c.linked_defects || []) {
+            if (!validIds.has(String(id)))
+              violations.push(`${tag}: linked_defects 出现虚构 ID "${id}"（不在白名单）`);
+          }
+          if (!/\d|[A-Z]{2,}-\d+/.test(c.rationale || ""))
+            violations.push(`${tag}: rationale 无具体数字或 ID 依据`);
+          if (
+            validModulesFromDb.size > 0 &&
+            c.module &&
+            !validModulesFromDb.has(String(c.module).toLowerCase())
+          )
+            violations.push(`${tag}: module "${c.module}" 未出现在真实数据中`);
+          if (!Array.isArray(c.steps) || c.steps.length < 2)
+            violations.push(`${tag}: steps 至少需要 2 步`);
+          if (!c.expected || c.expected.length < 4)
+            violations.push(`${tag}: expected 断言过弱`);
+        });
+        return violations;
+      };
+
+      let violations = hardValidate(draftCases);
+      let retried = false;
+
+      if (violations.length > 0 && draftCases.length > 0) {
+        retried = true;
+        updateStep("critic", {
+          status: "running",
+          summary: `发现 ${violations.length} 处违规 · 自动重跑 Generator`,
+        });
+        try {
+          const retryRaw = await callAgent(
+            "generator",
+            genSys,
+            buildGenUser(violations.slice(0, 15).join("\n")),
+            true,
+          );
+          const retryGen = extractJSON<{ cases: GeneratedCase[] }>(retryRaw, { cases: draftCases });
+          if (Array.isArray(retryGen.cases) && retryGen.cases.length) {
+            // re-score novelty for retried batch
+            draftCases = retryGen.cases.map((c) => {
+              const sig = caseSignature(c);
+              let maxSim = 0;
+              for (const cs of corpusSigs) maxSim = Math.max(maxSim, jaccard(sig, cs));
+              return {
+                ...c,
+                novelty_score: Number((1 - maxSim).toFixed(3)),
+                dedup_note: maxSim > 0 ? `与既有用例最大相似度 ${(maxSim * 100).toFixed(0)}%` : undefined,
+              };
+            });
+            violations = hardValidate(draftCases);
+          }
+        } catch (e) {
+          console.warn("[TestAgent] critic auto-retry failed", e);
+        }
       }
-      // Local defense-in-depth: drop invalid linked_defects
-      finalCases = finalCases.map((c, i) => ({
-        ...c,
-        case_id: c.case_id || `TC-AGENT-${Date.now().toString(36).slice(-4)}-${i + 1}`,
-        linked_defects: (c.linked_defects || []).filter((id) => validIds.has(String(id))),
-      }));
+
+      // Final defense-in-depth: strip invalid IDs, drop cases with fatal type violation
+      const finalCases = draftCases
+        .filter((c) => allowedTypes.has(c.type))
+        .map((c, i) => ({
+          ...c,
+          case_id: c.case_id || `TC-AGENT-${Date.now().toString(36).slice(-4)}-${i + 1}`,
+          linked_defects: (c.linked_defects || []).filter((id) => validIds.has(String(id))),
+        }));
+
       updateStep("critic", {
-        status: "done",
-        summary: `${finalCases.length} 条通过评审`,
+        status: violations.length && !retried ? "done" : "done",
+        summary:
+          `${finalCases.length} 条通过硬门禁` +
+          (retried ? " · 已自动重跑 1 次" : "") +
+          (violations.length ? ` · 残留提示 ${violations.length}` : ""),
         durationMs: Math.round(performance.now() - t5),
+        detail:
+          violations.length > 0 ? (
+            <pre className="whitespace-pre-wrap font-mono text-[11px] text-muted-foreground">
+              {violations.slice(0, 12).join("\n")}
+            </pre>
+          ) : undefined,
       });
 
       setCases(finalCases);
@@ -599,6 +778,20 @@ const TestAgent = () => {
                     {c.coverage_dimension && (
                       <span className="rounded-md bg-accent/10 px-1.5 py-0.5 text-[10px] text-accent">
                         覆盖：{c.coverage_dimension}
+                      </span>
+                    )}
+                    {typeof c.novelty_score === "number" && (
+                      <span
+                        title={c.dedup_note}
+                        className={`rounded-md px-1.5 py-0.5 text-[10px] font-medium ${
+                          c.novelty_score >= 0.7
+                            ? "bg-emerald-500/10 text-emerald-600"
+                            : c.novelty_score >= 0.4
+                              ? "bg-amber-500/10 text-amber-600"
+                              : "bg-muted text-muted-foreground"
+                        }`}
+                      >
+                        新颖度 {(c.novelty_score * 100).toFixed(0)}
                       </span>
                     )}
                     <span className="ml-auto text-[11px] font-semibold text-foreground">
