@@ -3,7 +3,13 @@
   "sdk_version": "0.20.1",
   "path": "/functions/v1/mcp",
   "auth": {
-    "type": "none"
+    "type": "oauth",
+    "issuer": "https://muyrtwybdfjbglnbfeis.supabase.co/auth/v1",
+    "resource_name": "DTSV Analytics MCP",
+    "accepted_audiences": [
+      "authenticated"
+    ],
+    "jwks_uri": "https://muyrtwybdfjbglnbfeis.supabase.co/auth/v1/.well-known/jwks.json"
   },
   "mcp": {
     "server": {
