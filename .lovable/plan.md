@@ -1,103 +1,63 @@
+# 记忆系统（本地优先，四层记忆）
 
-# Phase 3：pgvector + Hybrid RAG
+给 Agent 加一套完整记忆：会话可续、偏好可学、任务可追溯、经验可复用。全部存在浏览器本地（IndexedDB），不需要登录，数据不出端；已有的 pgvector 经验记忆继续保留作为云端语义层。
 
-为本体多 Agent 系统接入「向量检索 + 关键词检索」融合的知识层，让 Agent 能在生成 SQL / 解释结果之前，先召回相似的缺陷、用例、历史问答、本体说明，显著提升复杂业务问题的准确率。
+## 四层记忆
 
-## 目标
+| 层 | 存什么 | 何时写 | 何时用 |
+|---|---|---|---|
+| 会话记忆 | 会话列表、消息、附件摘要、工具调用结果摘要 | 每条消息落库 | 刷新/切回自动恢复 |
+| 用户长期记忆 | 常用模块、口径偏好、语言风格、默认时间窗、图表偏好 | 显式「记住这条」+ 自动抽取 | 每次请求注入 system prompt |
+| 任务记忆 | 每次 Mission（智能问数 / Test Agent）的目标、步骤、SQL、结论、评分 | Mission 结束时 | Mission 复用、Diff、「上次怎么做的」 |
+| 经验记忆 | 成功/失败问答对（qa_history / qa_negative） | 反馈 👍/👎 时 | Retriever 混合检索召回 |
 
-1. **语义召回**：用 Gemini Embedding 把缺陷标题/描述、用例步骤、本体说明、历史问答向量化，存入 Lovable Cloud 的 pgvector。
-2. **混合检索**：向量相似度 + Postgres 全文检索 (`tsvector` / BM25 风格) → RRF (Reciprocal Rank Fusion) 融合。
-3. **接入多 Agent**：在 Planner 之后、Ontologist 之前插入一个 **Retriever Agent**，召回的 chunk 作为上下文喂给后续 Agent。
-4. **UI 可观测**：在 `AgentOrchestrator` 显示 Retriever 步骤卡，展示 Top-K 片段、来源、向量分/关键词分/RRF 分。
-
-## 技术架构
+## 存储设计（IndexedDB，库名 `dtsv-memory`）
 
 ```text
-用户问句
-   │
-   ▼
-[Planner] ──► [Retriever (Hybrid RAG)] ──► [Ontologist] ──► [SQL Writer]
-                     │  ▲                        │
-                     │  │                        ▼
-                     │  └── pgvector + tsvector  [Executor → Critic → Presenter]
-                     │
-                     └── 召回: 本体说明 / 历史问答 / 缺陷样本 / 用例样本
+conversations  { id, title, createdAt, updatedAt, mode, pinned }
+messages       { id, conversationId, role, content, toolCalls, artifacts, ts }
+user_memory    { id, kind: preference|fact|glossary, text, source: manual|auto,
+                 confidence, createdAt, lastUsedAt, hits }
+missions       { id, type, goal, filters, steps[], sql[], result, score, ts }
 ```
+索引：`messages.conversationId`、`missions.ts`、`user_memory.kind`。
+容量策略：消息超过 N 条自动做「滚动摘要」压缩为一条 summary 记忆，避免 IndexedDB 与 prompt 双膨胀。
 
-## 数据库设计（Lovable Cloud / pgvector）
+## 记忆检索与注入
 
-`knowledge_chunks` 表：
+每次请求组装 prompt 的顺序：
 
-| 字段 | 类型 | 说明 |
-|---|---|---|
-| id | uuid PK | |
-| source_type | text | `ontology` / `defect` / `testcase` / `qa_history` |
-| source_id | text | 业务侧 ID（缺陷号/用例号/本体 entity 名） |
-| title | text | 短标题，用于展示 |
-| content | text | 入库正文 |
-| content_tsv | tsvector | 由 content 自动生成 (GIN 索引) |
-| embedding | vector(1536) | Gemini Embedding，显式 dimensions=1536（HNSW 友好） |
-| metadata | jsonb | 模块、优先级、时间等过滤维度 |
-| model_version | text | embedding 模型标记，方便未来重嵌入 |
+```text
+system 提示
+ + 用户长期记忆（Top-K，按 kind 分组，最多 ~800 tokens）
+ + 当前会话滚动摘要 + 最近 N 轮原文
+ + Retriever 召回的 knowledge_chunks（已有）
+ + 本次问题
+```
+本地检索用轻量方案：关键词 + 最近使用度打分（不引入本地向量模型），命中即更新 `hits/lastUsedAt`，长期不用的自动降权。
 
-索引：
-- `HNSW (embedding vector_cosine_ops)`
-- `GIN (content_tsv)`
-- `btree (source_type)`, `GIN (metadata jsonb_path_ops)`
+## 自动抽取记忆
 
-RPC：
-- `match_knowledge(query_embedding, query_text, match_count, filter jsonb)` → 返回 `id, content, metadata, vec_score, kw_score, rrf_score`，服务端做 RRF 融合。
-
-RLS：当前应用单租户使用，先 `authenticated` 可读写；后续若多租户再细化。
-
-## 后端 Edge Functions
-
-1. **`embed-knowledge`**（POST）
-   - 入参：`{ items: [{ source_type, source_id, title, content, metadata }] }`
-   - 逻辑：批量调用 `https://ai.gateway.lovable.dev/v1/embeddings`（`google/gemini-embedding-001`, `dimensions: 1536`），upsert 到 `knowledge_chunks`。
-   - 自动分块：>1200 字符按段落切分，附 `chunk_index`。
-
-2. **`hybrid-search`**（POST）
-   - 入参：`{ query: string, top_k?: number=8, filter?: jsonb, source_types?: string[] }`
-   - 逻辑：embed query → 调用 `match_knowledge` RPC → 返回融合后的 Top-K + 分数。
-   - 同时返回 `latency_ms` 与各路得分，便于 UI 调试。
-
-3. **`seed-ontology-knowledge`**（POST，一次性）
-   - 把 `src/lib/ontology/definitions.ts` 中的 entity/metric 文档+同义词序列化为 chunk 灌入。
+在一轮对话结束后，用一次低成本模型调用抽取候选记忆（偏好/口径/术语），返回结构化列表；候选不直接生效，而是进入「待确认」，用户在记忆面板一键采纳或忽略。避免记忆污染。
 
 ## 前端改动
 
-1. **`src/lib/rag/client.ts`**（新建）
-   - `searchKnowledge(query, opts)`, `ingestKnowledge(items)` 简单封装。
+1. `src/lib/memory/db.ts`：IndexedDB 封装（idb），四张表的 CRUD。
+2. `src/lib/memory/store.ts`：会话状态管理、滚动摘要、消息落库与恢复。
+3. `src/lib/memory/user-memory.ts`：长期记忆读写、打分检索、prompt 序列化。
+4. `src/lib/memory/extract.ts`：调用现有 `chat` Edge Function 做记忆抽取。
+5. `src/components/dashboard/chat/ConversationSidebar.tsx`：会话列表（新建/重命名/置顶/删除/搜索）。
+6. `src/components/dashboard/chat/MemoryPanel.tsx`：长期记忆管理（查看/编辑/删除/采纳候选/一键清空）+ 任务记忆历史列表。
+7. `AIChat.tsx` / `AgentOrchestrator.tsx` / `TestAgent.tsx`：接入落库、恢复与 prompt 注入；Mission 结束写 `missions`。
 
-2. **`AgentOrchestrator.tsx`**（编辑）
-   - 在 Planner 之后插入 Retriever 步骤：调用 `hybrid-search`，把 Top-K 注入后续 Agent 的 prompt 上下文。
-   - 失败优雅降级：检索为空时继续走原链路并提示「无召回」。
+## 分期落地
 
-3. **`RetrievalStepCard.tsx`**（新建）
-   - 展示召回片段：来源类型 chip、标题、metadata、三栏分数条（vector / keyword / rrf）、原文 expand。
+- 第 1 步：IndexedDB 基础 + 会话记忆（侧栏、恢复、滚动摘要）
+- 第 2 步：用户长期记忆 + prompt 注入 + 记忆面板 + 「记住这条」
+- 第 3 步：任务记忆（Mission 历史与复用）
+- 第 4 步：自动抽取候选记忆 + 采纳流
 
-4. **`KnowledgeIngestionPanel.tsx`**（新建，挂在「智能问数」侧栏次级入口）
-   - 三个按钮：「灌入本体说明」「从当前 DuckDB 缺陷表抽样灌入」「从历史问答灌入」。
-   - 显示已入库 chunk 数 / 模型版本。
+## 说明与取舍
 
-## 风险与降级
-
-- **Embedding 配额**：批量入库限流 50/秒，UI 显示进度。
-- **dims 不匹配**：固定 `dimensions: 1536`；若以后换模型，`model_version` 字段允许并存与渐进重嵌入。
-- **召回噪声**：Retriever 输出由 Critic 校验，且 SQL Writer 仍受本体字段白名单约束，幻觉风险可控。
-- **冷启动**：未灌数据时 Retriever 步骤显示「知识库为空，跳过」并不阻塞主链路。
-
-## 交付清单
-
-- [ ] DB migration：pgvector + `knowledge_chunks` + 索引 + `match_knowledge` RPC + RLS + GRANT
-- [ ] `supabase/functions/embed-knowledge/index.ts`
-- [ ] `supabase/functions/hybrid-search/index.ts`
-- [ ] `supabase/functions/seed-ontology-knowledge/index.ts`
-- [ ] `src/lib/rag/client.ts`
-- [ ] `AgentOrchestrator.tsx` 集成 Retriever
-- [ ] `RetrievalStepCard.tsx`
-- [ ] `KnowledgeIngestionPanel.tsx`
-- [ ] 更新 `.lovable/plan.md`
-
-确认后我会一次性提交 migration 并并行落地三个 Edge Function 与前端组件。
+- 本地存储意味着换设备/清缓存会丢；记忆面板提供 JSON 导出/导入作为兜底，后续加登录时可直接迁到云端同表结构。
+- 已有的 pgvector 经验记忆保持不变，与本地记忆互补：本地管「你是谁、聊过什么」，云端管「怎么答对过」。
