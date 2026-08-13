@@ -142,6 +142,25 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
   const [dbLoading, setDbLoading] = useState(false);
   const [canvasArtifact, setCanvasArtifact] = useState<Artifact | null>(null);
   const [agentOpen, setAgentOpen] = useState(false);
+  const [memoryOpen, setMemoryOpen] = useState(false);
+
+  // ----- session memory: hydrate from IndexedDB (migrates legacy localStorage) -----
+  useEffect(() => {
+    let cancelled = false;
+    loadConversations()
+      .then((stored) => {
+        if (cancelled) return;
+        if (stored.length) {
+          setConversations(stored as Conversation[]);
+          setActiveId(stored[0].id);
+        }
+      })
+      .catch((e) => console.warn("[memory] load failed", e))
+      .finally(() => !cancelled && setHydrated(true));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     const unsub = duckdbManager.subscribe(() => setDbTables(duckdbManager.listTables()));
