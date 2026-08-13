@@ -590,7 +590,7 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
           Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
         },
         body: JSON.stringify({
-          messages: buildGatewayMessages(history),
+          messages: buildGatewayMessages(trimHistoryForModel(history)),
           model,
           context: contextStr,
           // Only advertise tools when there's something to operate on (web_search always works).
