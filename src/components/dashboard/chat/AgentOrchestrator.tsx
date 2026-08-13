@@ -363,6 +363,15 @@ ${matchSummary}`;
         summary: "已生成回答",
         durationMs: Math.round(performance.now() - t6),
       });
+      // Task memory: keep the mission so later turns can reuse the SQL/approach.
+      recordMission({
+        type: "ask-data",
+        goal: question,
+        status: "success",
+        sql,
+        rowCount: result.rowCount,
+        summary: (present.markdown || "").slice(0, 400),
+      }).catch(() => {});
     } catch (e: any) {
       const running = steps.find((s) => s.status === "running");
       if (running) updateStep(running.key, { status: "error", error: e?.message || String(e) });
