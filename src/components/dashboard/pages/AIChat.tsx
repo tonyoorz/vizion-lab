@@ -97,7 +97,7 @@ const MODELS = [
   { id: "openai/gpt-5", label: "GPT-5", hint: "最强" },
 ];
 
-const STORAGE_KEY = "dtsv.chat.v2";
+
 
 const IMAGE_QUICK_PROMPTS = [
   "这张图说明什么？",
