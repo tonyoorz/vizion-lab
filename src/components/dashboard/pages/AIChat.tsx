@@ -1054,6 +1054,15 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
               Multi-Agent
             </span>
           </button>
+          <button
+            onClick={() => setMemoryOpen(true)}
+            className="flex w-full items-center justify-between rounded-lg border border-border bg-card px-3 py-2.5 text-sm font-medium text-foreground shadow-sm transition-colors hover:bg-secondary"
+          >
+            <span className="flex items-center gap-2">
+              <Brain className="h-4 w-4 text-primary" /> 记忆中心
+            </span>
+            <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">本地</span>
+          </button>
         </div>
         <div className="px-3 pb-2">
           <p className="filter-label px-1">会话</p>
