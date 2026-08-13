@@ -558,6 +558,22 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
     }
     const schema = summarizeSchemaForPrompt();
     if (schema) ctxParts.push(schema);
+
+    // ----- memory injection (only on the first round of a turn) -----
+    const lastUserText =
+      [...history].reverse().find((m) => m.role === "user" && !m.hidden)?.content ?? "";
+    if (round === 0) {
+      const memPrompt = await buildMemoryPrompt(lastUserText);
+      if (memPrompt) ctxParts.push(memPrompt);
+      const conv = conversations.find((c) => c.id === activeId);
+      if (conv?.summary) ctxParts.push(`【本会话早期内容摘要】\n${conv.summary}`);
+      try {
+        const missions = await listMissions();
+        const recap = serializeMissions(missions, 3);
+        if (recap) ctxParts.push(recap);
+      } catch {}
+    }
+
     const contextStr = ctxParts.join("\n\n") || undefined;
     const hasData = duckdbManager.listTables().length > 0;
 
