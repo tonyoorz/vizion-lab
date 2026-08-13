@@ -2,6 +2,7 @@
 // 基于历史 defects + test_runs + test_cases 真实数据，
 // 通过多智能体协作产出可提升覆盖率/广度的新用例。
 import { useEffect, useMemo, useState } from "react";
+import { recordMission } from "@/lib/memory/missions";
 import {
   Beaker,
   Bug,
@@ -562,9 +563,9 @@ const TestAgent = () => {
       // Task memory: persist this generation mission for later reuse / diffing.
       recordMission({
         type: "test-agent",
-        goal: goal || "测试用例生成",
-        filters: { modules: selectedModules, window: timeWindow, types: caseTypes },
-        steps: steps.map((s) => ({ name: s.label, status: s.status, summary: s.summary })),
+        goal: target || "测试用例生成",
+        filters: { target, window: win, count, types },
+        steps: steps.map((s) => ({ name: s.name, status: s.status, summary: s.summary, ms: s.durationMs })),
         result: `生成 ${finalCases.length} 条用例` + (retried ? "（重跑 1 次）" : ""),
       }).catch(() => {});
     } catch (e: any) {
