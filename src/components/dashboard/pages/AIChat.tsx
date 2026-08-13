@@ -929,6 +929,7 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
     setConversations((prev) => prev.map((c) => (c.id === id ? { ...c, title: title || "新对话" } : c)));
 
   const deleteConvo = (id: string) => {
+    deleteStoredConversation(id).catch(() => {});
     setConversations((prev) => {
       const next = prev.filter((c) => c.id !== id);
       if (next.length === 0) {
