@@ -28,6 +28,7 @@ import DataHud from "../chat/DataHud";
 import SlashMenu, { SLASH_COMMANDS, SlashCommand } from "../chat/SlashMenu";
 import MissionLauncher from "../chat/MissionLauncher";
 import AgentOrchestrator from "../chat/AgentOrchestrator";
+import MemoryPanel from "../chat/MemoryPanel";
 import { segmentsToPlainText, parseAgentStream } from "../chat/agentParser";
 import { duckdbManager, isDuckdbFile, TableInfo } from "@/lib/duckdb/client";
 import { profileTable, riskScan, summarizeSchemaForPrompt } from "@/lib/duckdb/profile";
@@ -35,6 +36,18 @@ import { pyodideManager } from "@/lib/pyodide/client";
 import { TOOL_SCHEMAS } from "@/lib/tools/schemas";
 import { forecastSeries } from "@/lib/tools/forecast";
 import { detectAnomalies } from "@/lib/tools/anomaly";
+import {
+  loadConversations,
+  persistConversation,
+  deleteConversation as deleteStoredConversation,
+  summarizeTurns,
+  SUMMARY_THRESHOLD,
+  SUMMARY_KEEP_RECENT,
+} from "@/lib/memory/conversations";
+import { addMemory, buildMemoryPrompt } from "@/lib/memory/user-memory";
+import { extractMemories } from "@/lib/memory/extract";
+import { listMissions, serializeMissions } from "@/lib/memory/missions";
+import { toast } from "@/hooks/use-toast";
 
 interface ToolCallRecord { id: string; name: string; arguments: string }
 interface ToolRoleMsg { tool_call_id: string; content: string }
