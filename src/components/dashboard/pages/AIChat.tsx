@@ -800,6 +800,26 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
         const firstUser = history.find((m) => m.role === "user")?.content || "";
         generateTitle(firstUser, finalContent).catch(() => {});
       }
+
+      // ----- memory hooks: rolling summary + candidate memory extraction -----
+      if (finalContent.trim() && !controller.signal.aborted) {
+        const convId = activeId;
+        setTimeout(() => void maybeSummarize(convId), 0);
+        const userText =
+          [...history].reverse().find((m) => m.role === "user" && !m.hidden)?.content ?? "";
+        if (userText.trim()) {
+          extractMemories(userText, segmentsToPlainText(parseAgentStream(finalContent)) || finalContent)
+            .then((n) => {
+              if (n > 0) {
+                toast({
+                  title: `发现 ${n} 条候选记忆`,
+                  description: "在「记忆中心 · 待确认」里采纳或忽略。",
+                });
+              }
+            })
+            .catch(() => {});
+        }
+      }
     }
   };
 
