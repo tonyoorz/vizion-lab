@@ -1358,6 +1358,14 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
                                     setEditingMsgVal(m.content);
                                   }}
                                 />
+                                <ActionBtn
+                                  icon={Brain}
+                                  label="记住这条"
+                                  onClick={async () => {
+                                    await addMemory(m.content, { kind: "preference", source: "manual" });
+                                    toast({ title: "已加入长期记忆" });
+                                  }}
+                                />
                               </>
                             )}
                           </div>
