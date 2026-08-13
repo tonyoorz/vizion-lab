@@ -85,6 +85,9 @@ interface Conversation {
   pinned?: boolean;
   messages: Msg[];
   updatedAt: number;
+  /** Rolling summary of older turns (session memory compaction). */
+  summary?: string;
+  summarizedCount?: number;
 }
 
 const MODELS = [
