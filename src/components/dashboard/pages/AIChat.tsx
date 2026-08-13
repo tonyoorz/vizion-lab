@@ -122,16 +122,8 @@ interface Props {
 }
 
 const AIChat = ({ moduleKey, moduleLabel }: Props) => {
-  const [conversations, setConversations] = useState<Conversation[]>(() => {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw) as Conversation[];
-        if (Array.isArray(parsed) && parsed.length) return parsed;
-      }
-    } catch {}
-    return [newConversation()];
-  });
+  const [conversations, setConversations] = useState<Conversation[]>(() => [newConversation()]);
+  const [hydrated, setHydrated] = useState(false);
   const [activeId, setActiveId] = useState<string>(() => conversations[0].id);
   const [input, setInput] = useState("");
   const [model, setModel] = useState(MODELS[0].id);
