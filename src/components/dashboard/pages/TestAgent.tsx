@@ -559,6 +559,14 @@ const TestAgent = () => {
       });
 
       setCases(finalCases);
+      // Task memory: persist this generation mission for later reuse / diffing.
+      recordMission({
+        type: "test-agent",
+        goal: goal || "测试用例生成",
+        filters: { modules: selectedModules, window: timeWindow, types: caseTypes },
+        steps: steps.map((s) => ({ name: s.label, status: s.status, summary: s.summary })),
+        result: `生成 ${finalCases.length} 条用例` + (retried ? "（重跑 1 次）" : ""),
+      }).catch(() => {});
     } catch (e: any) {
       const msg = e?.message || String(e);
       setError(msg);

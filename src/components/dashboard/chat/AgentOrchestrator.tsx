@@ -368,7 +368,7 @@ ${matchSummary}`;
       recordMission({
         type: "ask-data",
         goal: question,
-        steps: steps.map((s) => ({ key: s.key, label: s.label, status: s.status })),
+        steps: steps.map((s) => ({ name: s.label, status: s.status, summary: s.summary })),
         sql: [sql],
         result: `${result.rowCount} 行 · ${(present.markdown || "").slice(0, 300)}`,
       }).catch(() => {});
