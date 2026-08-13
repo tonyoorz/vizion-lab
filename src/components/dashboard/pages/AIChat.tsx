@@ -544,6 +544,46 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
   const escapeXml = (s: string) =>
     s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
+  /**
+   * Session-memory compaction: once a conversation gets long, only the recent
+   * turns are sent verbatim — older content is covered by the rolling summary
+   * injected into the system context. Slices at a plain user-message boundary
+   * so assistant/tool_call pairs are never split.
+   */
+  const trimHistoryForModel = (history: Msg[]): Msg[] => {
+    if (history.length <= SUMMARY_THRESHOLD) return history;
+    const minIdx = Math.max(0, history.length - SUMMARY_KEEP_RECENT);
+    for (let i = minIdx; i < history.length; i++) {
+      const m = history[i];
+      if (m.role === "user" && !m.hidden) return history.slice(i);
+    }
+    return history;
+  };
+
+  /** Compress older turns into a rolling summary stored with the conversation. */
+  const maybeSummarize = async (convId: string) => {
+    const conv = conversations.find((c) => c.id === convId);
+    if (!conv) return;
+    const visible = conv.messages.filter((m) => !m.hidden);
+    const covered = conv.summarizedCount ?? 0;
+    if (visible.length - covered < SUMMARY_THRESHOLD) return;
+    const upTo = visible.length - SUMMARY_KEEP_RECENT;
+    const turns = visible.slice(covered, upTo).map((m) => ({
+      role: m.role,
+      content: segmentsToPlainText(parseAgentStream(m.content)) || m.content,
+    }));
+    if (!turns.length) return;
+    try {
+      const summary = await summarizeTurns(turns, conv.summary);
+      if (!summary) return;
+      setConversations((prev) =>
+        prev.map((c) => (c.id === convId ? { ...c, summary, summarizedCount: upTo } : c)),
+      );
+    } catch (e) {
+      console.warn("[memory] summarize failed", e);
+    }
+  };
+
   const runStream = async (history: Msg[], assistantMsgId: string, round = 0) => {
     setStreaming(true);
     const controller = new AbortController();
