@@ -183,12 +183,16 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
   const active = conversations.find((c) => c.id === activeId) ?? conversations[0];
   const isEmpty = active.messages.length === 0;
 
-  // persist
+  // persist (debounced) — session memory lives in IndexedDB, not localStorage
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(conversations));
-    } catch {}
-  }, [conversations]);
+    if (!hydrated) return;
+    const t = setTimeout(() => {
+      Promise.all(conversations.map((c) => persistConversation(c as any))).catch((e) =>
+        console.warn("[memory] persist failed", e),
+      );
+    }, 400);
+    return () => clearTimeout(t);
+  }, [conversations, hydrated]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({
