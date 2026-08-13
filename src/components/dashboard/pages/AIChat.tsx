@@ -1028,6 +1028,7 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
   return (
     <div className="-m-6 flex h-[calc(100vh-64px)] overflow-hidden">
       <AgentOrchestrator open={agentOpen} onClose={() => setAgentOpen(false)} />
+      <MemoryPanel open={memoryOpen} onClose={() => setMemoryOpen(false)} />
       {/* */}
       {/* Conversation list */}
       <aside className="hidden w-[260px] flex-col border-r border-border bg-muted/30 lg:flex">
