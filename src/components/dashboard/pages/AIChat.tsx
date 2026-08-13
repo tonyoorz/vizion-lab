@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowUp,
+  Brain,
   Check,
   Copy,
   Database,
@@ -28,6 +29,7 @@ import DataHud from "../chat/DataHud";
 import SlashMenu, { SLASH_COMMANDS, SlashCommand } from "../chat/SlashMenu";
 import MissionLauncher from "../chat/MissionLauncher";
 import AgentOrchestrator from "../chat/AgentOrchestrator";
+import MemoryPanel from "../chat/MemoryPanel";
 import { segmentsToPlainText, parseAgentStream } from "../chat/agentParser";
 import { duckdbManager, isDuckdbFile, TableInfo } from "@/lib/duckdb/client";
 import { profileTable, riskScan, summarizeSchemaForPrompt } from "@/lib/duckdb/profile";
@@ -35,6 +37,18 @@ import { pyodideManager } from "@/lib/pyodide/client";
 import { TOOL_SCHEMAS } from "@/lib/tools/schemas";
 import { forecastSeries } from "@/lib/tools/forecast";
 import { detectAnomalies } from "@/lib/tools/anomaly";
+import {
+  loadConversations,
+  persistConversation,
+  deleteConversation as deleteStoredConversation,
+  summarizeTurns,
+  SUMMARY_THRESHOLD,
+  SUMMARY_KEEP_RECENT,
+} from "@/lib/memory/conversations";
+import { addMemory, buildMemoryPrompt } from "@/lib/memory/user-memory";
+import { extractMemories } from "@/lib/memory/extract";
+import { listMissions, serializeMissions } from "@/lib/memory/missions";
+import { toast } from "@/hooks/use-toast";
 
 interface ToolCallRecord { id: string; name: string; arguments: string }
 interface ToolRoleMsg { tool_call_id: string; content: string }
@@ -72,6 +86,9 @@ interface Conversation {
   pinned?: boolean;
   messages: Msg[];
   updatedAt: number;
+  /** Rolling summary of older turns (session memory compaction). */
+  summary?: string;
+  summarizedCount?: number;
 }
 
 const MODELS = [
@@ -81,7 +98,7 @@ const MODELS = [
   { id: "openai/gpt-5", label: "GPT-5", hint: "最强" },
 ];
 
-const STORAGE_KEY = "dtsv.chat.v2";
+
 
 const IMAGE_QUICK_PROMPTS = [
   "这张图说明什么？",
@@ -106,16 +123,8 @@ interface Props {
 }
 
 const AIChat = ({ moduleKey, moduleLabel }: Props) => {
-  const [conversations, setConversations] = useState<Conversation[]>(() => {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw) as Conversation[];
-        if (Array.isArray(parsed) && parsed.length) return parsed;
-      }
-    } catch {}
-    return [newConversation()];
-  });
+  const [conversations, setConversations] = useState<Conversation[]>(() => [newConversation()]);
+  const [hydrated, setHydrated] = useState(false);
   const [activeId, setActiveId] = useState<string>(() => conversations[0].id);
   const [input, setInput] = useState("");
   const [model, setModel] = useState(MODELS[0].id);
@@ -134,6 +143,25 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
   const [dbLoading, setDbLoading] = useState(false);
   const [canvasArtifact, setCanvasArtifact] = useState<Artifact | null>(null);
   const [agentOpen, setAgentOpen] = useState(false);
+  const [memoryOpen, setMemoryOpen] = useState(false);
+
+  // ----- session memory: hydrate from IndexedDB (migrates legacy localStorage) -----
+  useEffect(() => {
+    let cancelled = false;
+    loadConversations()
+      .then((stored) => {
+        if (cancelled) return;
+        if (stored.length) {
+          setConversations(stored as Conversation[]);
+          setActiveId(stored[0].id);
+        }
+      })
+      .catch((e) => console.warn("[memory] load failed", e))
+      .finally(() => !cancelled && setHydrated(true));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     const unsub = duckdbManager.subscribe(() => setDbTables(duckdbManager.listTables()));
@@ -156,12 +184,16 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
   const active = conversations.find((c) => c.id === activeId) ?? conversations[0];
   const isEmpty = active.messages.length === 0;
 
-  // persist
+  // persist (debounced) — session memory lives in IndexedDB, not localStorage
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(conversations));
-    } catch {}
-  }, [conversations]);
+    if (!hydrated) return;
+    const t = setTimeout(() => {
+      Promise.all(conversations.map((c) => persistConversation(c as any))).catch((e) =>
+        console.warn("[memory] persist failed", e),
+      );
+    }, 400);
+    return () => clearTimeout(t);
+  }, [conversations, hydrated]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({
@@ -513,6 +545,46 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
   const escapeXml = (s: string) =>
     s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
+  /**
+   * Session-memory compaction: once a conversation gets long, only the recent
+   * turns are sent verbatim — older content is covered by the rolling summary
+   * injected into the system context. Slices at a plain user-message boundary
+   * so assistant/tool_call pairs are never split.
+   */
+  const trimHistoryForModel = (history: Msg[]): Msg[] => {
+    if (history.length <= SUMMARY_THRESHOLD) return history;
+    const minIdx = Math.max(0, history.length - SUMMARY_KEEP_RECENT);
+    for (let i = minIdx; i < history.length; i++) {
+      const m = history[i];
+      if (m.role === "user" && !m.hidden) return history.slice(i);
+    }
+    return history;
+  };
+
+  /** Compress older turns into a rolling summary stored with the conversation. */
+  const maybeSummarize = async (convId: string) => {
+    const conv = conversations.find((c) => c.id === convId);
+    if (!conv) return;
+    const visible = conv.messages.filter((m) => !m.hidden);
+    const covered = conv.summarizedCount ?? 0;
+    if (visible.length - covered < SUMMARY_THRESHOLD) return;
+    const upTo = visible.length - SUMMARY_KEEP_RECENT;
+    const turns = visible.slice(covered, upTo).map((m) => ({
+      role: m.role,
+      content: segmentsToPlainText(parseAgentStream(m.content)) || m.content,
+    }));
+    if (!turns.length) return;
+    try {
+      const summary = await summarizeTurns(turns, conv.summary);
+      if (!summary) return;
+      setConversations((prev) =>
+        prev.map((c) => (c.id === convId ? { ...c, summary, summarizedCount: upTo } : c)),
+      );
+    } catch (e) {
+      console.warn("[memory] summarize failed", e);
+    }
+  };
+
   const runStream = async (history: Msg[], assistantMsgId: string, round = 0) => {
     setStreaming(true);
     const controller = new AbortController();
@@ -527,6 +599,22 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
     }
     const schema = summarizeSchemaForPrompt();
     if (schema) ctxParts.push(schema);
+
+    // ----- memory injection (only on the first round of a turn) -----
+    const lastUserText =
+      [...history].reverse().find((m) => m.role === "user" && !m.hidden)?.content ?? "";
+    if (round === 0) {
+      const memPrompt = await buildMemoryPrompt(lastUserText);
+      if (memPrompt) ctxParts.push(memPrompt);
+      const conv = conversations.find((c) => c.id === activeId);
+      if (conv?.summary) ctxParts.push(`【本会话早期内容摘要】\n${conv.summary}`);
+      try {
+        const missions = await listMissions();
+        const recap = serializeMissions(missions, 3);
+        if (recap) ctxParts.push(recap);
+      } catch {}
+    }
+
     const contextStr = ctxParts.join("\n\n") || undefined;
     const hasData = duckdbManager.listTables().length > 0;
 
@@ -543,7 +631,7 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
           Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
         },
         body: JSON.stringify({
-          messages: buildGatewayMessages(history),
+          messages: buildGatewayMessages(trimHistoryForModel(history)),
           model,
           context: contextStr,
           // Only advertise tools when there's something to operate on (web_search always works).
@@ -712,6 +800,26 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
       if (isFirstRound && finalContent.trim()) {
         const firstUser = history.find((m) => m.role === "user")?.content || "";
         generateTitle(firstUser, finalContent).catch(() => {});
+      }
+
+      // ----- memory hooks: rolling summary + candidate memory extraction -----
+      if (finalContent.trim() && !controller.signal.aborted) {
+        const convId = activeId;
+        setTimeout(() => void maybeSummarize(convId), 0);
+        const userText =
+          [...history].reverse().find((m) => m.role === "user" && !m.hidden)?.content ?? "";
+        if (userText.trim()) {
+          extractMemories(userText, segmentsToPlainText(parseAgentStream(finalContent)) || finalContent)
+            .then((n) => {
+              if (n > 0) {
+                toast({
+                  title: `发现 ${n} 条候选记忆`,
+                  description: "在「记忆中心 · 待确认」里采纳或忽略。",
+                });
+              }
+            })
+            .catch(() => {});
+        }
       }
     }
   };
@@ -898,6 +1006,7 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
     setConversations((prev) => prev.map((c) => (c.id === id ? { ...c, title: title || "新对话" } : c)));
 
   const deleteConvo = (id: string) => {
+    deleteStoredConversation(id).catch(() => {});
     setConversations((prev) => {
       const next = prev.filter((c) => c.id !== id);
       if (next.length === 0) {
@@ -919,6 +1028,7 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
   return (
     <div className="-m-6 flex h-[calc(100vh-64px)] overflow-hidden">
       <AgentOrchestrator open={agentOpen} onClose={() => setAgentOpen(false)} />
+      <MemoryPanel open={memoryOpen} onClose={() => setMemoryOpen(false)} />
       {/* */}
       {/* Conversation list */}
       <aside className="hidden w-[260px] flex-col border-r border-border bg-muted/30 lg:flex">
@@ -944,6 +1054,15 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
             <span className="rounded bg-primary/20 px-1.5 py-0.5 text-[10px] font-semibold text-primary">
               Multi-Agent
             </span>
+          </button>
+          <button
+            onClick={() => setMemoryOpen(true)}
+            className="flex w-full items-center justify-between rounded-lg border border-border bg-card px-3 py-2.5 text-sm font-medium text-foreground shadow-sm transition-colors hover:bg-secondary"
+          >
+            <span className="flex items-center gap-2">
+              <Brain className="h-4 w-4 text-primary" /> 记忆中心
+            </span>
+            <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">本地</span>
           </button>
         </div>
         <div className="px-3 pb-2">
@@ -1248,6 +1367,14 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
                                   onClick={() => {
                                     setEditingMsgId(m.id);
                                     setEditingMsgVal(m.content);
+                                  }}
+                                />
+                                <ActionBtn
+                                  icon={Brain}
+                                  label="记住这条"
+                                  onClick={async () => {
+                                    await addMemory(m.content, { kind: "preference", source: "manual" });
+                                    toast({ title: "已加入长期记忆" });
                                   }}
                                 />
                               </>

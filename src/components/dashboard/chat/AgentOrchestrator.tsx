@@ -8,6 +8,7 @@ import { ONTOLOGY, resolveQuestion, summarizeMatchForPrompt, listAllowedFields }
 import type { OntologyMatch } from "@/lib/ontology/schema";
 import "@/lib/ontology/store"; // hydrate localStorage overrides at boot
 import { duckdbManager } from "@/lib/duckdb/client";
+import { recordMission } from "@/lib/memory/missions";
 import { isSafeReadOnlySql } from "@/lib/duckdb/safety";
 import { searchKnowledge, summarizeHitsForPrompt, ingestKnowledge, type KnowledgeHit } from "@/lib/rag/client";
 
@@ -363,6 +364,14 @@ ${matchSummary}`;
         summary: "已生成回答",
         durationMs: Math.round(performance.now() - t6),
       });
+      // Task memory: keep the mission so later turns can reuse the SQL/approach.
+      recordMission({
+        type: "ask-data",
+        goal: question,
+        steps: steps.map((s) => ({ name: s.name, status: s.status, summary: s.summary, ms: s.durationMs })),
+        sql: [sql],
+        result: `${result.rowCount} 行 · ${(present.markdown || "").slice(0, 300)}`,
+      }).catch(() => {});
     } catch (e: any) {
       const running = steps.find((s) => s.status === "running");
       if (running) updateStep(running.key, { status: "error", error: e?.message || String(e) });
