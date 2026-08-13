@@ -8,6 +8,7 @@ import { ONTOLOGY, resolveQuestion, summarizeMatchForPrompt, listAllowedFields }
 import type { OntologyMatch } from "@/lib/ontology/schema";
 import "@/lib/ontology/store"; // hydrate localStorage overrides at boot
 import { duckdbManager } from "@/lib/duckdb/client";
+import { recordMission } from "@/lib/memory/missions";
 import { isSafeReadOnlySql } from "@/lib/duckdb/safety";
 import { searchKnowledge, summarizeHitsForPrompt, ingestKnowledge, type KnowledgeHit } from "@/lib/rag/client";
 
@@ -367,10 +368,9 @@ ${matchSummary}`;
       recordMission({
         type: "ask-data",
         goal: question,
-        status: "success",
-        sql,
-        rowCount: result.rowCount,
-        summary: (present.markdown || "").slice(0, 400),
+        steps: steps.map((s) => ({ key: s.key, label: s.label, status: s.status })),
+        sql: [sql],
+        result: `${result.rowCount} 行 · ${(present.markdown || "").slice(0, 300)}`,
       }).catch(() => {});
     } catch (e: any) {
       const running = steps.find((s) => s.status === "running");
