@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Sparkle, Send, X, BarChart3, Database, Settings2, ThumbsUp, ThumbsDown, Check, BookMarked, Boxes } from "lucide-react";
+import { Sparkle, Send, X, BarChart3, Database, Settings2, ThumbsUp, ThumbsDown, Check, BookMarked, Boxes, Activity } from "lucide-react";
 import AgentStepCard, { AgentStep } from "./AgentStepCard";
 import RetrievalStepCard from "./RetrievalStepCard";
 import KnowledgeIngestionPanel from "./KnowledgeIngestionPanel";
@@ -11,6 +11,9 @@ import { duckdbManager } from "@/lib/duckdb/client";
 import { recordMission } from "@/lib/memory/missions";
 import { isSafeReadOnlySql } from "@/lib/duckdb/safety";
 import { searchKnowledge, summarizeHitsForPrompt, ingestKnowledge, type KnowledgeHit } from "@/lib/rag/client";
+import { startTrace, type Tracer } from "@/lib/trace";
+import TracePanel from "./TracePanel";
+
 
 interface Props {
   open: boolean;
@@ -25,7 +28,10 @@ const PRESETS = [
   "本月平均执行耗时趋势",
 ];
 
-const callAgentStep = async (
+// Observability: the active tracer for the current run (one run at a time).
+let activeTracer: Tracer | null = null;
+
+const rawAgentStep = async (
   role: string,
   systemPrompt: string,
   userPrompt: string,
@@ -45,6 +51,24 @@ const callAgentStep = async (
   const data = await resp.json();
   if (!resp.ok) throw new Error(data?.error || `${role} 调用失败`);
   return data.content as string;
+};
+
+const callAgentStep = async (
+  role: string,
+  systemPrompt: string,
+  userPrompt: string,
+  opts: { jsonMode?: boolean; model?: string } = {},
+): Promise<string> => {
+  const tracer = activeTracer;
+  if (!tracer) return rawAgentStep(role, systemPrompt, userPrompt, opts);
+  return tracer.span(
+    role,
+    "llm",
+    { system: systemPrompt, user: userPrompt, ...opts },
+    () => rawAgentStep(role, systemPrompt, userPrompt, opts),
+    (out) => out,
+  );
+
 };
 
 const extractJSON = (raw: string): unknown => {
@@ -85,6 +109,8 @@ const AgentOrchestrator = ({ open, onClose, initialQuestion = "" }: Props) => {
   const [feedbackNote, setFeedbackNote] = useState("");
   const [ontoMatch, setOntoMatch] = useState<OntologyMatch | null>(null);
   const [ragHits, setRagHits] = useState<KnowledgeHit[]>([]);
+  const [traceOpen, setTraceOpen] = useState(false);
+  const [traceId, setTraceId] = useState<string | null>(null);
 
   const updateStep = (key: string, patch: Partial<AgentStep>) =>
     setSteps((prev) => prev.map((s) => (s.key === key ? { ...s, ...patch } : s)));
@@ -101,13 +127,21 @@ const AgentOrchestrator = ({ open, onClose, initialQuestion = "" }: Props) => {
     setOntoMatch(null);
     setRagHits([]);
 
+    const tracer = startTrace("ask-data", question.trim(), { ontologyVersion: ONTOLOGY.version });
+    activeTracer = tracer;
+    setTraceId(tracer.traceId);
+    let runError: unknown = null;
+
     try {
       // ---------- 1. Ontology Resolver (local, no LLM) ----------
       const t0 = performance.now();
       updateStep("ontology", { status: "running" });
+      const ontoSpan = tracer.start("Ontology Resolver", "local", { question });
       const match = resolveQuestion(question);
       setOntoMatch(match);
       const matchSummary = summarizeMatchForPrompt(match);
+      tracer.end(ontoSpan, { output: matchSummary });
+
       updateStep("ontology", {
         status: "done",
         summary: `${match.entities.length} 实体 / ${match.metrics.length} 指标 / ${match.timeHints.length} 时间`,
@@ -170,7 +204,9 @@ ${matchSummary}`;
       let hits: KnowledgeHit[] = [];
       let retrievalContext = "(知识库无召回)";
       try {
-        const r = await searchKnowledge(question, { topK: 6 });
+        const r = await tracer.span("Retriever · hybrid search", "retrieval", { question, topK: 6 }, () =>
+          searchKnowledge(question, { topK: 6 }),
+        );
         hits = r.hits ?? [];
         setRagHits(hits);
         retrievalContext = summarizeHitsForPrompt(hits);
@@ -261,7 +297,11 @@ ${matchSummary}`;
       let result: any = null;
       let execError: string | undefined;
       try {
-        result = await duckdbManager.runQuery(sql, 500);
+        result = await tracer.span("Executor · DuckDB", "sql", sql, () => duckdbManager.runQuery(sql, 500), (r: any) => ({
+          rowCount: r?.rowCount,
+          columns: r?.columns,
+          sample: r?.rows?.slice(0, 10),
+        }));
       } catch (e: any) {
         execError = e?.message || String(e);
       }
@@ -376,7 +416,10 @@ ${matchSummary}`;
       const running = steps.find((s) => s.status === "running");
       if (running) updateStep(running.key, { status: "error", error: e?.message || String(e) });
       else setAnswer(`运行出错: ${e?.message || String(e)}`);
+      runError = e;
     } finally {
+      tracer.finish(runError);
+      activeTracer = null;
       setRunning(false);
     }
   };
@@ -463,6 +506,18 @@ ${matchSummary}`;
             </span>
           </div>
           <div className="flex items-center gap-1">
+            <button
+              onClick={() => setTraceOpen(true)}
+              className={`flex items-center gap-1 rounded border px-2 py-1 text-[11px] transition-colors ${
+                traceId
+                  ? "border-primary/40 bg-primary/10 text-primary"
+                  : "border-border text-muted-foreground hover:bg-muted hover:text-foreground"
+              }`}
+              title="查看本次运行的调用树与耗时瀑布"
+            >
+              <Activity className="h-3 w-3" />
+              Trace
+            </button>
             <button
               onClick={() => setEditorOpen(true)}
               className="flex items-center gap-1 rounded border border-border px-2 py-1 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
@@ -706,6 +761,7 @@ ${matchSummary}`;
       </div>
       <KnowledgeIngestionPanel open={kbOpen} onClose={() => setKbOpen(false)} />
       <OntologyEditor open={editorOpen} onClose={() => setEditorOpen(false)} />
+      <TracePanel open={traceOpen} onClose={() => setTraceOpen(false)} />
     </div>
   );
 };
