@@ -146,6 +146,7 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
   const [canvasArtifact, setCanvasArtifact] = useState<Artifact | null>(null);
   const [agentOpen, setAgentOpen] = useState(false);
   const [memoryOpen, setMemoryOpen] = useState(false);
+  const [traceOpen, setTraceOpen] = useState(false);
 
   // ----- session memory: hydrate from IndexedDB (migrates legacy localStorage) -----
   useEffect(() => {
