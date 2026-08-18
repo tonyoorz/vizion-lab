@@ -203,7 +203,9 @@ ${matchSummary}`;
       let hits: KnowledgeHit[] = [];
       let retrievalContext = "(知识库无召回)";
       try {
-        const r = await searchKnowledge(question, { topK: 6 });
+        const r = await tracer.span("Retriever · hybrid search", "retrieval", { question, topK: 6 }, () =>
+          searchKnowledge(question, { topK: 6 }),
+        );
         hits = r.hits ?? [];
         setRagHits(hits);
         retrievalContext = summarizeHitsForPrompt(hits);
@@ -294,7 +296,11 @@ ${matchSummary}`;
       let result: any = null;
       let execError: string | undefined;
       try {
-        result = await duckdbManager.runQuery(sql, 500);
+        result = await tracer.span("Executor · DuckDB", "sql", sql, () => duckdbManager.runQuery(sql, 500), (r: any) => ({
+          rowCount: r?.rowCount,
+          columns: r?.columns,
+          sample: r?.rows?.slice(0, 10),
+        }));
       } catch (e: any) {
         execError = e?.message || String(e);
       }
@@ -409,7 +415,10 @@ ${matchSummary}`;
       const running = steps.find((s) => s.status === "running");
       if (running) updateStep(running.key, { status: "error", error: e?.message || String(e) });
       else setAnswer(`运行出错: ${e?.message || String(e)}`);
+      tracer.finish(e);
     } finally {
+      if (tracer) tracer.finish();
+      activeTracer = null;
       setRunning(false);
     }
   };
