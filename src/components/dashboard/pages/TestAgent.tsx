@@ -3,7 +3,10 @@
 // 通过多智能体协作产出可提升覆盖率/广度的新用例。
 import { useEffect, useMemo, useState } from "react";
 import { recordMission } from "@/lib/memory/missions";
+import { startTrace, type Tracer } from "@/lib/trace";
+import TracePanel from "../chat/TracePanel";
 import {
+  Activity,
   Beaker,
   Bug,
   ClipboardCheck,
@@ -108,7 +111,10 @@ const initialSteps = (): AgentStep[] => [
   { key: "critic", name: "Critic (Hard Gate)", hint: "校验 + 失败自动重跑", status: "pending" },
 ];
 
-const callAgent = async (
+// Observability: active tracer for the current generation run.
+let activeTracer: Tracer | null = null;
+
+const rawAgent = async (
   role: string,
   systemPrompt: string,
   userPrompt: string,
@@ -128,6 +134,19 @@ const callAgent = async (
   const data = await resp.json();
   if (!resp.ok) throw new Error(data?.error || `${role} 调用失败`);
   return data.content as string;
+};
+
+const callAgent = async (
+  role: string,
+  systemPrompt: string,
+  userPrompt: string,
+  jsonMode = false,
+): Promise<string> => {
+  const tracer = activeTracer;
+  if (!tracer) return rawAgent(role, systemPrompt, userPrompt, jsonMode);
+  return tracer.span(role, "llm", { system: systemPrompt, user: userPrompt, jsonMode }, () =>
+    rawAgent(role, systemPrompt, userPrompt, jsonMode),
+  );
 };
 
 const extractJSON = <T,>(raw: string, fallback: T): T => {
@@ -171,6 +190,8 @@ const TestAgent = () => {
   const [error, setError] = useState<string | null>(null);
   const [tables, setTables] = useState<TableInfo[]>(duckdbManager.listTables());
   const [loadingDb, setLoadingDb] = useState(false);
+  const [traceOpen, setTraceOpen] = useState(false);
+  const [traceId, setTraceId] = useState<string | null>(null);
 
   useEffect(() => {
     const unsub = duckdbManager.subscribe(() => setTables(duckdbManager.listTables()));
@@ -197,10 +218,14 @@ const TestAgent = () => {
   const canRun = target.trim().length > 0 && types.length > 0 && !running && dbReady;
 
   const safeQuery = async <T,>(sql: string): Promise<T[]> => {
+    const spanId = activeTracer?.start("DuckDB query", "sql", sql);
     try {
       const r = await duckdbManager.runQuery(sql, 200);
+      if (spanId && activeTracer)
+        activeTracer.end(spanId, { output: { rowCount: r.rowCount, sample: r.rows.slice(0, 10) } });
       return r.rows as T[];
     } catch (e) {
+      if (spanId && activeTracer) activeTracer.end(spanId, { error: e });
       console.warn("[TestAgent] query failed", sql, e);
       return [];
     }
@@ -214,6 +239,10 @@ const TestAgent = () => {
     setSteps(initialSteps());
 
     const module = target.trim();
+    const tracer = startTrace("test-agent", `用例生成 · ${target.trim()}`, { win, count, types });
+    activeTracer = tracer;
+    setTraceId(tracer.traceId);
+    let runError: unknown = null;
     const days = TIME_WINDOWS.find((w) => w.id === win)?.days ?? 90;
     const winLabel = TIME_WINDOWS.find((w) => w.id === win)?.label ?? "近 90 天";
 
@@ -570,11 +599,14 @@ const TestAgent = () => {
       }).catch(() => {});
     } catch (e: any) {
       const msg = e?.message || String(e);
+      runError = e;
       setError(msg);
       setSteps((prev) =>
         prev.map((s) => (s.status === "running" ? { ...s, status: "error", error: msg } : s)),
       );
     } finally {
+      tracer.finish(runError);
+      activeTracer = null;
       setRunning(false);
     }
   };
@@ -614,7 +646,18 @@ const TestAgent = () => {
               识别历史测试执行与缺陷特征，产出可提升覆盖率与广度的新用例。数据仅在本地 DuckDB 中查询，模型仅接收结构化摘要。
             </p>
           </div>
-          <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+            <button
+              onClick={() => setTraceOpen(true)}
+              className={`flex items-center gap-1 rounded-md border px-2 py-1 transition-colors ${
+                traceId
+                  ? "border-primary/40 bg-primary/10 text-primary"
+                  : "border-border hover:bg-secondary hover:text-foreground"
+              }`}
+              title="查看调用树、耗时瀑布与每步输入输出"
+            >
+              <Activity className="h-3 w-3" /> Trace
+            </button>
             <span
               className={`inline-flex h-2 w-2 rounded-full ${
                 dbReady ? "bg-emerald-500" : loadingDb ? "bg-amber-500 animate-pulse" : "bg-rose-500"
