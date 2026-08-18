@@ -907,6 +907,8 @@ const TestAgent = () => {
           输入分析目标并选择用例类型后启动 Agent。所有查询在浏览器本地 DuckDB 中执行。
         </div>
       )}
+
+      <TracePanel open={traceOpen} onClose={() => setTraceOpen(false)} />
     </div>
   );
 };
