@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Sparkle, Send, X, BarChart3, Database, Settings2, ThumbsUp, ThumbsDown, Check, BookMarked, Boxes } from "lucide-react";
+import { Sparkle, Send, X, BarChart3, Database, Settings2, ThumbsUp, ThumbsDown, Check, BookMarked, Boxes, Activity } from "lucide-react";
 import AgentStepCard, { AgentStep } from "./AgentStepCard";
 import RetrievalStepCard from "./RetrievalStepCard";
 import KnowledgeIngestionPanel from "./KnowledgeIngestionPanel";
@@ -507,6 +507,18 @@ ${matchSummary}`;
           </div>
           <div className="flex items-center gap-1">
             <button
+              onClick={() => setTraceOpen(true)}
+              className={`flex items-center gap-1 rounded border px-2 py-1 text-[11px] transition-colors ${
+                traceId
+                  ? "border-primary/40 bg-primary/10 text-primary"
+                  : "border-border text-muted-foreground hover:bg-muted hover:text-foreground"
+              }`}
+              title="查看本次运行的调用树与耗时瀑布"
+            >
+              <Activity className="h-3 w-3" />
+              Trace
+            </button>
+            <button
               onClick={() => setEditorOpen(true)}
               className="flex items-center gap-1 rounded border border-border px-2 py-1 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
               title="编辑本体（实体/字段/指标）"
@@ -749,6 +761,7 @@ ${matchSummary}`;
       </div>
       <KnowledgeIngestionPanel open={kbOpen} onClose={() => setKbOpen(false)} />
       <OntologyEditor open={editorOpen} onClose={() => setEditorOpen(false)} />
+      <TracePanel open={traceOpen} onClose={() => setTraceOpen(false)} />
     </div>
   );
 };
