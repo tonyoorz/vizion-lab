@@ -109,6 +109,8 @@ const AgentOrchestrator = ({ open, onClose, initialQuestion = "" }: Props) => {
   const [feedbackNote, setFeedbackNote] = useState("");
   const [ontoMatch, setOntoMatch] = useState<OntologyMatch | null>(null);
   const [ragHits, setRagHits] = useState<KnowledgeHit[]>([]);
+  const [traceOpen, setTraceOpen] = useState(false);
+  const [traceId, setTraceId] = useState<string | null>(null);
 
   const updateStep = (key: string, patch: Partial<AgentStep>) =>
     setSteps((prev) => prev.map((s) => (s.key === key ? { ...s, ...patch } : s)));
@@ -125,13 +127,20 @@ const AgentOrchestrator = ({ open, onClose, initialQuestion = "" }: Props) => {
     setOntoMatch(null);
     setRagHits([]);
 
+    const tracer = startTrace("ask-data", question.trim(), { ontologyVersion: ONTOLOGY.version });
+    activeTracer = tracer;
+    setTraceId(tracer.traceId);
+
     try {
       // ---------- 1. Ontology Resolver (local, no LLM) ----------
       const t0 = performance.now();
       updateStep("ontology", { status: "running" });
+      const ontoSpan = tracer.start("Ontology Resolver", "local", { question });
       const match = resolveQuestion(question);
       setOntoMatch(match);
       const matchSummary = summarizeMatchForPrompt(match);
+      tracer.end(ontoSpan, { output: matchSummary });
+
       updateStep("ontology", {
         status: "done",
         summary: `${match.entities.length} 实体 / ${match.metrics.length} 指标 / ${match.timeHints.length} 时间`,
