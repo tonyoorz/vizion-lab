@@ -11,6 +11,9 @@ import { duckdbManager } from "@/lib/duckdb/client";
 import { recordMission } from "@/lib/memory/missions";
 import { isSafeReadOnlySql } from "@/lib/duckdb/safety";
 import { searchKnowledge, summarizeHitsForPrompt, ingestKnowledge, type KnowledgeHit } from "@/lib/rag/client";
+import { startTrace, type Tracer } from "@/lib/trace";
+import TracePanel from "./TracePanel";
+
 
 interface Props {
   open: boolean;
