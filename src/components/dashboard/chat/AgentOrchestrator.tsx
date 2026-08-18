@@ -28,7 +28,10 @@ const PRESETS = [
   "本月平均执行耗时趋势",
 ];
 
-const callAgentStep = async (
+// Observability: the active tracer for the current run (one run at a time).
+let activeTracer: Tracer | null = null;
+
+const rawAgentStep = async (
   role: string,
   systemPrompt: string,
   userPrompt: string,
@@ -48,6 +51,24 @@ const callAgentStep = async (
   const data = await resp.json();
   if (!resp.ok) throw new Error(data?.error || `${role} 调用失败`);
   return data.content as string;
+};
+
+const callAgentStep = async (
+  role: string,
+  systemPrompt: string,
+  userPrompt: string,
+  opts: { jsonMode?: boolean; model?: string } = {},
+): Promise<string> => {
+  const tracer = activeTracer;
+  if (!tracer) return rawAgentStep(role, systemPrompt, userPrompt, opts);
+  return tracer.span(
+    role,
+    "llm",
+    { system: systemPrompt, user: userPrompt, ...opts },
+    () => rawAgentStep(role, systemPrompt, userPrompt, opts),
+    (out) => out,
+  );
+
 };
 
 const extractJSON = (raw: string): unknown => {
