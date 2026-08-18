@@ -40,7 +40,18 @@ export function openDb(): Promise<IDBDatabase> {
         s.createIndex("ts", "ts");
         s.createIndex("type", "type");
       }
+      if (!db.objectStoreNames.contains("traces")) {
+        const s = db.createObjectStore("traces", { keyPath: "id" });
+        s.createIndex("startTs", "startTs");
+        s.createIndex("type", "type");
+      }
+      if (!db.objectStoreNames.contains("spans")) {
+        const s = db.createObjectStore("spans", { keyPath: "id" });
+        s.createIndex("traceId", "traceId");
+        s.createIndex("startTs", "startTs");
+      }
     };
+
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
