@@ -130,6 +130,7 @@ const AgentOrchestrator = ({ open, onClose, initialQuestion = "" }: Props) => {
     const tracer = startTrace("ask-data", question.trim(), { ontologyVersion: ONTOLOGY.version });
     activeTracer = tracer;
     setTraceId(tracer.traceId);
+    let runError: unknown = null;
 
     try {
       // ---------- 1. Ontology Resolver (local, no LLM) ----------
@@ -415,9 +416,9 @@ ${matchSummary}`;
       const running = steps.find((s) => s.status === "running");
       if (running) updateStep(running.key, { status: "error", error: e?.message || String(e) });
       else setAnswer(`运行出错: ${e?.message || String(e)}`);
-      tracer.finish(e);
+      runError = e;
     } finally {
-      if (tracer) tracer.finish();
+      tracer.finish(runError);
       activeTracer = null;
       setRunning(false);
     }
