@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowUp,
+  Activity,
   Brain,
   Check,
   Copy,
@@ -30,6 +31,7 @@ import SlashMenu, { SLASH_COMMANDS, SlashCommand } from "../chat/SlashMenu";
 import MissionLauncher from "../chat/MissionLauncher";
 import AgentOrchestrator from "../chat/AgentOrchestrator";
 import MemoryPanel from "../chat/MemoryPanel";
+import TracePanel from "../chat/TracePanel";
 import { segmentsToPlainText, parseAgentStream } from "../chat/agentParser";
 import { duckdbManager, isDuckdbFile, TableInfo } from "@/lib/duckdb/client";
 import { profileTable, riskScan, summarizeSchemaForPrompt } from "@/lib/duckdb/profile";
@@ -1029,6 +1031,7 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
     <div className="-m-6 flex h-[calc(100vh-64px)] overflow-hidden">
       <AgentOrchestrator open={agentOpen} onClose={() => setAgentOpen(false)} />
       <MemoryPanel open={memoryOpen} onClose={() => setMemoryOpen(false)} />
+      <TracePanel open={traceOpen} onClose={() => setTraceOpen(false)} />
       {/* */}
       {/* Conversation list */}
       <aside className="hidden w-[260px] flex-col border-r border-border bg-muted/30 lg:flex">
@@ -1063,6 +1066,15 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
               <Brain className="h-4 w-4 text-primary" /> 记忆中心
             </span>
             <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">本地</span>
+          </button>
+          <button
+            onClick={() => setTraceOpen(true)}
+            className="flex w-full items-center justify-between rounded-lg border border-border bg-card px-3 py-2.5 text-sm font-medium text-foreground shadow-sm transition-colors hover:bg-secondary"
+          >
+            <span className="flex items-center gap-2">
+              <Activity className="h-4 w-4 text-primary" /> 运行轨迹
+            </span>
+            <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">Trace</span>
           </button>
         </div>
         <div className="px-3 pb-2">
