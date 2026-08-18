@@ -1,11 +1,18 @@
 // Minimal IndexedDB wrapper for the local-first memory system.
-// Four stores: conversations / messages / user_memory / missions.
+// Stores: conversations / messages / user_memory / missions / traces / spans.
 // No external deps — keeps the bundle lean and works fully offline.
 
 export const DB_NAME = "dtsv-memory";
-export const DB_VERSION = 1;
+export const DB_VERSION = 2;
 
-export type StoreName = "conversations" | "messages" | "user_memory" | "missions";
+export type StoreName =
+  | "conversations"
+  | "messages"
+  | "user_memory"
+  | "missions"
+  | "traces"
+  | "spans";
+
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
