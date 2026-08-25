@@ -36,12 +36,23 @@ def _configure_utf8_stdio() -> None:
 
 
 def _read_defect(defect_id: str) -> Dict[str, Any]:
-    """Read a defect from the local SQLite store by defect_id."""
-    from backend.analytics.config import get_full_picture_source_db_path
+    """Read a defect by id, falling back to a live Octane fetch if not in local SQLite.
 
+    The local SQLite (``qgate_raw.db``) only contains defects for teams/years that were
+    previously synced.  When a user references a defect outside that scope (e.g. a
+    defect belonging to a team not yet synced), we transparently fetch it from Octane
+    in real time so the test-case generation flow is not blocked by data-sync gaps.
+    """
     normalized = str(defect_id or "").strip()
     if not normalized:
         raise ValueError("defect_id is required")
+    # Accept human-facing "D2804379" form — strip the D prefix to match the
+    # bare numeric id stored in octane_defects.defect_id (Octane raw id).
+    if normalized[0] in ("D", "d") and normalized[1:].isdigit():
+        normalized = normalized[1:]
+
+    # --- Step 1: try local SQLite (fast path) ---
+    from backend.analytics.config import get_full_picture_source_db_path
 
     conn = sqlite3.connect(str(get_full_picture_source_db_path()))
     conn.row_factory = sqlite3.Row
@@ -54,19 +65,57 @@ def _read_defect(defect_id: str) -> Dict[str, Any]:
     finally:
         conn.close()
 
-    if row is None:
-        raise ValueError(f"defect {normalized} not found in local SQLite")
+    if row is not None:
+        return {
+            "defect_id": str(row["defect_id"] or ""),
+            "name": str(row["name"] or ""),
+            "severity": str(row["severity"] or ""),
+            "software_version": str(row["software_version"] or ""),
+            "assigned_ecu": str(row["assigned_ecu"] or ""),
+            "lead_model": str(row["lead_model"] or ""),
+            "project": str(row["project"] or ""),
+            "phase": str(row["phase"] or ""),
+            "description": str(row["description"] or ""),
+        }
+
+    # --- Step 2: fallback — fetch live from Octane API ---
+    return _fetch_defect_from_octane(normalized)
+
+
+def _fetch_defect_from_octane(defect_id: str) -> Dict[str, Any]:
+    """Fetch a defect from Octane in real time and map it to the same dict shape as _read_defect."""
+    from backend.analytics.ingest.client import build_default_octane_client
+    from backend.analytics.ingest.source_store import _coalesce, _first_named_value
+    from backend.analytics.processor import infer_defect_project, _project_from_software_version
+
+    client = build_default_octane_client()
+    row = client.fetch_defect_by_id(defect_id)
+
+    product_areas = _first_named_value(row.get("product_areas"))
+    software_version = _coalesce(
+        str(row.get("software_version") or ""),
+        str(row.get("software_version_udf") or ""),
+    )
+    # project is a derived dimension in the local DB (set by processor.py), not a
+    # direct Octane field.  Use the same inference chain so the live-fetched defect
+    # gets the same project label it would have if it had been synced.
+    project = _project_from_software_version(software_version) or infer_defect_project(
+        {"top_aida": product_areas, "product_areas": product_areas}
+    )
 
     return {
-        "defect_id": str(row["defect_id"] or ""),
-        "name": str(row["name"] or ""),
-        "severity": str(row["severity"] or ""),
-        "software_version": str(row["software_version"] or ""),
-        "assigned_ecu": str(row["assigned_ecu"] or ""),
-        "lead_model": str(row["lead_model"] or ""),
-        "project": str(row["project"] or ""),
-        "phase": str(row["phase"] or ""),
-        "description": str(row["description"] or ""),
+        "defect_id": str(row.get("id") or ""),
+        "name": str(row.get("name") or ""),
+        "severity": _first_named_value(row.get("severity")),
+        "software_version": software_version,
+        "assigned_ecu": _coalesce(
+            _first_named_value(row.get("assigned_ecu_udf")),
+            str(row.get("assigned_ecu") or ""),
+        ),
+        "lead_model": _first_named_value(row.get("lead_model_udf")),
+        "project": project,
+        "phase": _first_named_value(row.get("phase")),
+        "description": str(row.get("description") or ""),
     }
 
 
@@ -162,7 +211,7 @@ def _do_commit(payload: Dict[str, Any]) -> Dict[str, Any]:
     if steps_text and test_id:
         client.write_test_steps(test_id=test_id, steps_text=steps_text)
 
-    octane_url = f"https://octane-prod.bmwgroup.net/ui/?p=1002/2001#/entity-navigation?entityType=work_item&id={test_id}"
+    octane_url = f"https://octane-prod.bmwgroup.net/ui/entity-navigation?p=1002/2001&entityType=test&id={test_id}"
     return {"success": True, "test_id": test_id, "octane_url": octane_url}
 
 

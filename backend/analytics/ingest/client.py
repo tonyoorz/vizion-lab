@@ -217,6 +217,27 @@ class OctaneApiClient:
         )
         return self.fetch_rows(endpoint="defects", fields=DEFECT_FIELDS, query=query)
 
+    def fetch_defect_by_id(self, defect_id: str) -> dict[str, Any]:
+        """Fetch a single defect by its raw Octane id (real-time, not from local SQLite).
+
+        Used as a fallback when a defect is not in the local DB (e.g. belongs to a
+        team that wasn't synced).  Returns the raw Octane API row or raises.
+        """
+        normalized = str(defect_id or "").strip()
+        if normalized[0] in ("D", "d") and normalized[1:].isdigit():
+            normalized = normalized[1:]
+        if not normalized:
+            raise ValueError("defect_id is required")
+        rows = self.fetch_rows(
+            endpoint="defects",
+            fields=DEFECT_FIELDS,
+            query=f'"(id=\'{_escape_octane_text(normalized)}\')"',
+            limit=2,
+        )
+        if not rows:
+            raise ValueError(f"defect {normalized} not found in Octane")
+        return rows[0]
+
     def fetch_comments_for_defects(self, defect_ids: Sequence[str]) -> list[dict[str, Any]]:
         normalized_ids = sorted({str(defect_id).strip() for defect_id in defect_ids if str(defect_id).strip()})
         if not normalized_ids:

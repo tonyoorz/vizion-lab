@@ -45,6 +45,7 @@ interface Attachment {
   kind: "image" | "file";
   mimeType?: string;
   dataUrl?: string;
+  textContent?: string;
   size: number;
 }
 interface TokenUsage {
@@ -77,7 +78,7 @@ interface Conversation {
 type GatewayContentPart =
   | { type: "text"; text: string }
   | { type: "image_url"; image_url: { url: string } }
-  | { type: "file_data"; file_data: { name: string; mime_type?: string; url: string } };
+  | { type: "file"; file: { file_data: string; filename: string; mime_type?: string } };
 
 type ToolStreamEvent = {
   type?: unknown;
@@ -102,6 +103,7 @@ const CHAT_MODEL_PRICING: Record<string, ChatModelPricing> = {
   "glm-5": { currency: "CNY", inputPerMillion: 6, outputPerMillion: 22 },
   "qwen3.5-397b-a17b": { currency: "CNY", inputPerMillion: 0.72, outputPerMillion: 1.2 },
   "doubao-seed-2.1-pro": { currency: "CNY", inputPerMillion: 0, outputPerMillion: 0 },
+  "doubao-seed-2.1-turbo": { currency: "CNY", inputPerMillion: 0, outputPerMillion: 0 },
 };
 
 const VERSIONED_MODEL_PRICING_ALIASES = [
@@ -348,20 +350,34 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
       if (f.size > 8 * 1024 * 1024) continue;
       const isImg = f.type.startsWith("image/");
       const isPdf = f.type === "application/pdf" || f.name.toLowerCase().endsWith(".pdf");
-      let dataUrl: string | undefined;
-      if (isImg || isPdf) {
-        dataUrl = await new Promise<string>((resolve) => {
-          const r = new FileReader();
-          r.onload = () => resolve(r.result as string);
-          r.readAsDataURL(f);
-        });
-      }
+      const isText = [
+        "text/plain", "text/csv", "text/markdown",
+        "application/json", "application/x-json", "text/json",
+      ].includes(f.type) || /\.(txt|csv|md|markdown|json)$/i.test(f.name);
+      const resolvedMime = f.type || (isPdf ? "application/pdf" : isText ? "text/plain" : "application/octet-stream");
+      // Text files are read as UTF-8 content (sent as text parts); binary
+      // attachments (images, PDF) are read as data URLs.
+      const textContent = isText
+        ? await new Promise<string>((resolve) => {
+            const r = new FileReader();
+            r.onload = () => resolve(String(r.result || ""));
+            r.readAsText(f);
+          })
+        : undefined;
+      const dataUrl = !isText
+        ? await new Promise<string>((resolve) => {
+            const r = new FileReader();
+            r.onload = () => resolve(r.result as string);
+            r.readAsDataURL(f);
+          })
+        : undefined;
       adds.push({
         id: newId(),
         name: f.name,
         kind: isImg ? "image" : "file",
-        mimeType: f.type || (isPdf ? "application/pdf" : "application/octet-stream"),
+        mimeType: resolvedMime,
         dataUrl,
+        textContent,
         size: f.size,
       });
     }
@@ -507,20 +523,34 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
   // ----- core send -----
   const buildGatewayMessages = (history: Msg[]) =>
     history.map((m) => {
-      if (m.role === "user" && m.attachments?.some((a) => a.dataUrl && (a.kind === "image" || a.mimeType === "application/pdf"))) {
+      const hasAttachment = m.attachments?.some((a) =>
+        (a.kind === "image" && a.dataUrl) ||
+        (a.kind === "file" && a.dataUrl) ||
+        (a.kind === "file" && a.textContent),
+      );
+      if (m.role === "user" && hasAttachment) {
         const parts: GatewayContentPart[] = [{ type: "text", text: m.content || "(附件)" }];
-        for (const a of m.attachments) {
+        for (const a of m.attachments ?? []) {
           if (a.kind === "image" && a.dataUrl) {
             parts.push({ type: "image_url", image_url: { url: a.dataUrl } });
           }
-          if (a.kind === "file" && a.mimeType === "application/pdf" && a.dataUrl) {
+          if (a.kind === "file" && a.dataUrl) {
+            // Binary files (PDF, etc.) are sent as native file parts.
             parts.push({
-              type: "file_data",
-              file_data: {
-                name: a.name,
+              type: "file",
+              file: {
+                file_data: a.dataUrl,
+                filename: a.name,
                 mime_type: a.mimeType,
-                url: a.dataUrl,
               },
+            });
+          }
+          if (a.kind === "file" && a.textContent) {
+            // Text files (txt/csv/json/md) are inlined as text parts — the
+            // model reads them directly without a binary wrapper.
+            parts.push({
+              type: "text",
+              text: `Attachment ${a.name}:\n${a.textContent}`,
             });
           }
         }
@@ -802,7 +832,7 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
     }
   };
 
-  const runCreateTestcase = async (defectId: string, assistantMsgId: string) => {
+  const runCreateTestcase = async (defectId: string, assistantMsgId: string, intentText = "") => {
     setStreaming(true);
     const controller = new AbortController();
     activeRequestRef.current = newId();
@@ -822,7 +852,7 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
       const response = await fetch("/api/create-testcase", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ defect_id: defectId }),
+        body: JSON.stringify({ defect_id: defectId, intent: intentText }),
         signal: controller.signal,
       });
 
@@ -1009,19 +1039,22 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
     setAttachments([]);
     setSlashOpen(false);
 
-    // detect /创建测试用例 <defect_id> — extract the first numeric id from the
-    // argument text so natural-language phrasings like "基于 ticket 2804379 创建" work.
-    // Octane defect_id in the local SQLite store is purely numeric (e.g. "2804379"),
-    // so a D-prefixed id (D2804379) is stripped to its digits.
-    if (/^\/创建测试用例\s+/.test(content)) {
+    // detect /创建测试用例 anywhere in the message — the slash command may not be
+    // at the start (e.g. "基于ticket 2796236，创建testcase/创建测试用例"). Extract the
+    // first numeric id from the whole message; Octane defect_id is purely numeric
+    // (e.g. "2804379"), so D-prefixed (D2804379) / DEF-prefixed ids are stripped.
+    if (/\/创建测试用例/.test(content)) {
       const idMatch = content.match(/\b(?:D|DEF-)?(\d{4,})\b/i);
       if (idMatch) {
-        await runCreateTestcase(idMatch[1], assistantMsg.id);
+        // Preserve the user's intent/requirements (the text around the slash command)
+        // so the generation LLM can tailor the test case to what the user asked for.
+        const intentText = content.replace(/\/创建测试用例/, "").replace(/\b(?:D|DEF-)?\d{4,}\b/i, "").trim();
+        await runCreateTestcase(idMatch[1], assistantMsg.id, intentText);
       } else {
         updateActive((c) => ({
           ...c,
           messages: c.messages.map((message) =>
-            message.id === assistantMsgId
+            message.id === assistantMsg.id
               ? { ...message, content: "请在「/创建测试用例」后附带缺陷 ID（数字），例如：/创建测试用例 2804379" }
               : message,
           ),

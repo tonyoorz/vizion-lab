@@ -48,6 +48,12 @@ const INTENT_PROFILES = Object.freeze({
     requiredSlots: ["symptom_or_ticket"],
     policyHints: ["similarity_is_evidence_not_causality"],
   },
+  jira_query: {
+    confidence: 0.85,
+    reason: "Jira issue/ticket query wording matched",
+    requiredSlots: ["query_or_issue_key"],
+    policyHints: ["use_jira_mcp_tools"],
+  },
   testcase_context: {
     confidence: 0.84,
     reason: "testcase drafting or Octane ticket anchor matched",
@@ -89,6 +95,7 @@ const INTENT_PROFILES = Object.freeze({
 function routeToolIntent(queryText) {
   if (/删除|更新|修改|写入|评论|comment|write|update|delete|edit/i.test(queryText)) return "action_capability";
   if (/重复|查重|相似|duplicate|similar/i.test(queryText)) return "duplicate_search";
+  if (/\bjira\b|jira\s*(?:issue|ticket|工单|问题)|atlassian/i.test(queryText)) return "jira_query";
   if (/traceability|追溯|链路|Requirement|TestRun/i.test(queryText)) return "traceability";
   if (/创建.*测试用例|回归测试|test\s*case|testcase|entityType=work_item|id=\d+/i.test(queryText)) return "testcase_context";
   if (/字段|API|UDF|filterable|sortable|editable|schema|field|octane_defects/i.test(queryText)) return "schema_discovery";

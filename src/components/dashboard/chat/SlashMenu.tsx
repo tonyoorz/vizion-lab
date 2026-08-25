@@ -8,6 +8,7 @@ import {
   FlaskConical,
   GaugeCircle,
   LineChart,
+  Ticket,
   TrendingUp,
 } from "lucide-react";
 
@@ -79,6 +80,14 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     icon: FlaskConical,
     action: "create-testcase",
     argHint: "输入缺陷 ID，如 2804379",
+  },
+  {
+    id: "jira-search",
+    label: "/查 Jira",
+    hint: "通过 Jira MCP 搜索 Jira issue / 工单",
+    prompt: "帮我在 Jira 上查找：",
+    icon: Ticket,
+    argHint: "输入 Jira 关键词或 issue key，如 DTSV-123",
   },
 ];
 

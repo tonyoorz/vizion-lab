@@ -64,6 +64,13 @@ export const MAIN_AGENT_INTENT_PROFILES = Object.freeze({
     policyHints: ["similarity_is_evidence_not_causality"],
     toolNames: ["search_duplicates", "ask_clarification"],
   },
+  jira_query: {
+    confidence: 0.85,
+    reason: "Jira issue/ticket query wording matched",
+    requiredSlots: ["query_or_issue_key"],
+    policyHints: ["use_jira_mcp_tools"],
+    toolNames: ["jira_search_issues", "jira_get_issue", "ask_clarification"],
+  },
   testcase_context: {
     confidence: 0.84,
     reason: "testcase drafting or Octane ticket anchor matched",
@@ -119,11 +126,12 @@ export const MAIN_AGENT_TOOL_POLICIES = Object.freeze(
   }, {}),
 );
 
-const PLANNING_QUERY_RE = /\b(DTSV|QGate|Octane|ticket|work_item|dashboard|ontology|capability|available|partial|unavailable|bug|defect|issue|top\s*issue|octane_defects|solution_cluster|assigned_ecu|business_module|opened|created|raised|submitted|resolved|coverage|test|summary|count|metric|trend|growth|rising|increase|delta|duplicate|similar|write|update|delete|edit|risk|health|overview|assessment|empty\s*result|no\s*data|zero\s*rows)\b|entityType=work_item|id=\d+|本体|能力|缺陷|测试|测试小组|执行效率|缺陷发现率|覆盖率|多少|几个|统计|趋势|风险|健康度|当前情况|怎么看|怎么样|创建|提交|新建|解决|关闭|更新|修改|删除|写入|重复|查重|相似|模块|问题模块|上升|增长|环比|同比|根因|提票|报票|提了|数据.*(?:为空|没数据|没有数据|查不到)|为什么.*(?:为空|没数据|没有数据|查不到)|空结果/i;
+const PLANNING_QUERY_RE = /\b(DTSV|QGate|Octane|ticket|work_item|dashboard|ontology|capability|available|partial|unavailable|bug|defect|issue|top\s*issue|octane_defects|solution_cluster|assigned_ecu|business_module|opened|created|raised|submitted|resolved|coverage|test|summary|count|metric|trend|growth|rising|increase|delta|duplicate|similar|write|update|delete|edit|risk|health|overview|assessment|empty\s*result|no\s*data|zero\s*rows|jira|atlassian)\b|[A-Z][A-Z0-9]+-\d+|entityType=work_item|id=\d+|本体|能力|缺陷|测试|测试小组|执行效率|缺陷发现率|覆盖率|多少|几个|统计|趋势|风险|健康度|当前情况|怎么看|怎么样|创建|提交|新建|解决|关闭|更新|修改|删除|写入|重复|查重|相似|模块|问题模块|上升|增长|环比|同比|根因|提票|报票|提了|数据.*(?:为空|没数据|没有数据|查不到)|为什么.*(?:为空|没数据|没有数据|查不到)|空结果/i;
 
 function routeToolIntent(queryText) {
   if (/删除|更新|修改|写入|评论|comment|write|update|delete|edit/i.test(queryText)) return "action_capability";
   if (/重复|查重|相似|duplicate|similar/i.test(queryText)) return "duplicate_search";
+  if (/\bjira\b|jira\s*(?:issue|ticket|工单|问题)|atlassian/i.test(queryText)) return "jira_query";
   if (/traceability|追溯|链路|Requirement|TestRun/i.test(queryText)) return "traceability";
   if (/创建.*测试用例|回归测试|test\s*case|testcase|entityType=work_item|id=\d+/i.test(queryText)) return "testcase_context";
   if (/字段|API|UDF|filterable|sortable|editable|schema|field|octane_defects/i.test(queryText)) return "schema_discovery";

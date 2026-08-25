@@ -138,6 +138,9 @@ async function handleAuthenticatedAiChatRequest(body, response) {
             citationValidation: completed.answerValidation
               ? completed.answerValidation.valid ? "pass" : "blocked"
               : "not_required",
+            evidenceGateStatus: completed.runtimeResult?.mainAgentToolContext?.evidenceGate?.status || "not_required",
+            evidenceGateViolations: completed.runtimeResult?.mainAgentToolContext?.evidenceGate?.violations || [],
+            answerValidationViolations: completed.answerValidation?.violations || [],
           });
         },
       });
@@ -295,7 +298,7 @@ async function proxyAnalyticsJson(pathname, searchParams, response) {
   response.end(payload);
 }
 
-async function generateTestCaseContent(defectInfo, fewShotText, chatConfig) {
+async function generateTestCaseContent(defectInfo, fewShotText, chatConfig, intent = "") {
   const { buildChatCompletionRequest } = await import("./chatModelConfig.mjs");
 
   if (!chatConfig.credential) {
@@ -328,6 +331,7 @@ async function generateTestCaseContent(defectInfo, fewShotText, chatConfig) {
     defectInfo.description?.slice(0, 3000) || "(no description)",
     "",
     fewShotText ? `Reference test cases (style/structure examples):\n${fewShotText}\n` : "",
+    intent ? `User intent / requirements (tailor the test case to these):\n${intent}\n` : "",
     "Generate the test case now. Return ONLY the JSON object, no markdown code fence.",
   ].join("\n");
 
@@ -338,6 +342,9 @@ async function generateTestCaseContent(defectInfo, fewShotText, chatConfig) {
       { role: "user", content: userPrompt },
     ],
     env: process.env,
+    // Test-case generation outputs a full HTML description + structured steps as JSON,
+    // which needs more tokens than the 900-token default used by chat / summary flows.
+    maxTokens: 4096,
   });
 
   const abortController = new AbortController();
@@ -360,12 +367,26 @@ async function generateTestCaseContent(defectInfo, fewShotText, chatConfig) {
 
   const data = await response.json();
   const content = data?.choices?.[0]?.message?.content || "";
-  // Parse JSON from the LLM response (it may be wrapped in code fences)
+  if (!content.trim()) {
+    const finishReason = data?.choices?.[0]?.finish_reason || "unknown";
+    throw new Error(`LLM returned empty content (finish_reason: ${finishReason})`);
+  }
+  // Parse JSON from the LLM response (it may be wrapped in markdown code fences)
   const jsonMatch = content.match(/\{[\s\S]*\}/);
   if (!jsonMatch) {
+    // Log the raw content to help diagnose non-JSON responses
+    console.error("[testcase-gen] LLM did not return JSON. Raw content (first 500 chars):", content.slice(0, 500));
     throw new Error("LLM did not return a JSON object");
   }
-  const parsed = JSON.parse(jsonMatch[0]);
+  let parsed;
+  try {
+    parsed = JSON.parse(jsonMatch[0]);
+  } catch (parseErr) {
+    // The regex matched a truncated JSON (likely hit max_tokens). Log and re-throw.
+    console.error("[testcase-gen] JSON.parse failed. Content length:", jsonMatch[0].length, "Error:", parseErr.message);
+    console.error("[testcase-gen] Last 200 chars of matched content:", jsonMatch[0].slice(-200));
+    throw new Error("LLM returned truncated or malformed JSON (likely hit token limit)");
+  }
 
   return {
     testName: String(parsed.testName || `[${defectInfo.project}] Regression - ${defectInfo.name?.slice(0, 60)} (D${defectInfo.defect_id})`),
@@ -626,6 +647,7 @@ const server = http.createServer(async (request, response) => {
       if (!await requireInternalAuxiliaryActor(request, response)) return;
       const body = await readJsonBody(request);
       const defectId = typeof body?.defect_id === "string" ? body.defect_id.trim() : "";
+      const intent = typeof body?.intent === "string" ? body.intent.trim() : "";
 
       if (!defectId) {
         sendJson(response, 400, { success: false, error: "defect_id is required" });
@@ -646,7 +668,7 @@ const server = http.createServer(async (request, response) => {
 
         // Step 2: LLM generation — build description HTML + steps text
         const chatConfig = resolveChatModelConfig(undefined, process.env);
-        const llmResult = await generateTestCaseContent(defectInfo, fewShotText, chatConfig);
+        const llmResult = await generateTestCaseContent(defectInfo, fewShotText, chatConfig, intent);
 
         // Step 3: Python bridge — verify quality
         const verified = await runTestCaseBridge({

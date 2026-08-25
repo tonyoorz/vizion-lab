@@ -6,14 +6,15 @@ interface Props {
   result: TestCaseResult;
 }
 
-const OCTANE_BASE = "https://octane-prod.bmwgroup.net/ui/?p=1002/2001#/entity-navigation?entityType=work_item&id=";
+const OCTANE_BASE = "https://octane-prod.bmwgroup.net/ui/entity-navigation?p=1002/2001&entityType=test&id=";
 
 export default function TestCasePreviewCard({ result }: Props) {
+  const DEFAULT_OWNER_ID = "138017";
+
   const [commitState, setCommitState] = useState<"idle" | "submitting" | "success" | "error">("idle");
   const [commitError, setCommitError] = useState("");
   const [createdUrl, setCreatedUrl] = useState("");
   const [featureId, setFeatureId] = useState("");
-  const [ownerId, setOwnerId] = useState("");
 
   const handleCommit = async () => {
     setCommitState("submitting");
@@ -28,10 +29,10 @@ export default function TestCasePreviewCard({ result }: Props) {
             description_html: result.descriptionHtml,
             steps_text: result.stepsText,
             defectId: result.defectId,
-            owner_workspace_user_id: ownerId,
+            owner_workspace_user_id: DEFAULT_OWNER_ID,
           },
           feature_id: featureId,
-          owner_workspace_user_id: ownerId,
+          owner_workspace_user_id: DEFAULT_OWNER_ID,
         }),
       });
       const payload = await response.json().catch(() => ({}));
@@ -179,16 +180,9 @@ export default function TestCasePreviewCard({ result }: Props) {
                 placeholder="Feature ID（可选，link 到 feature）"
                 className="flex-1 rounded-md border border-border bg-background px-3 py-1.5 text-xs"
               />
-              <input
-                type="text"
-                value={ownerId}
-                onChange={(e) => setOwnerId(e.target.value)}
-                placeholder="Owner workspace_user ID"
-                className="flex-1 rounded-md border border-border bg-background px-3 py-1.5 text-xs"
-              />
               <button
                 onClick={handleCommit}
-                disabled={commitState === "submitting" || !ownerId}
+                disabled={commitState === "submitting"}
                 className="inline-flex items-center gap-1.5 rounded-md bg-primary px-4 py-1.5 text-xs font-medium text-primary-foreground disabled:opacity-50"
               >
                 {commitState === "submitting" ? (
@@ -202,11 +196,6 @@ export default function TestCasePreviewCard({ result }: Props) {
             </div>
             {commitState === "error" && (
               <p className="text-xs text-red-600 dark:text-red-400">{commitError}</p>
-            )}
-            {!ownerId && (
-              <p className="text-[10px] text-muted-foreground">
-                Owner workspace_user ID 必填（如 500026）
-              </p>
             )}
           </div>
         )}

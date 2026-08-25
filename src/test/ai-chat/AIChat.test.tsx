@@ -113,6 +113,7 @@ describe("AIChat duplicate search integration", () => {
       "qwen3.7-max",
       "qwen3.7-flash",
       "glm-5.1",
+      "doubao-seed-2.1-turbo",
     ]);
   });
 

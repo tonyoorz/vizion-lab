@@ -1,4 +1,4 @@
-import { buildChatCompletionRequest, resolveChatModelConfig } from "./chatModelConfig.mjs";
+import { buildChatCompletionRequest, isMultimodalChatModel, resolveChatModelConfig } from "./chatModelConfig.mjs";
 import { compactChatMessages } from "./chatMessageBudget.mjs";
 import { expandMessagesWithDocumentText } from "./documentText.mjs";
 import { expandImageMessagesWithOcr } from "./imageOcr.mjs";
@@ -58,14 +58,21 @@ function normalizeAssistantContent(content) {
   return "";
 }
 
+const MAX_CONTEXT_CHARS = Number(process.env.VIZION_MAX_CONTEXT_CHARS || 50000);
+
 function buildMergedMessages(messages, context) {
+  const trimmedContext =
+    context && context.length > MAX_CONTEXT_CHARS
+      ? context.slice(0, MAX_CONTEXT_CHARS) +
+        "\n\n[...context truncated due to size limit...]"
+      : context;
   return [
     { role: "system", content: SYSTEM_PROMPT },
-    ...(context
+    ...(trimmedContext
       ? [
           {
             role: "system",
-            content: `# Current dashboard context\n${context}`,
+            content: `# Current dashboard context\n${trimmedContext}`,
           },
         ]
       : []),
@@ -498,6 +505,30 @@ function finalizeSanitizedStream(response, state) {
     if (validation?.valid) {
       publishBufferedPayloads(response, state);
     } else {
+      try {
+        const evidence = state.answerValidation?.semanticEvidence || state.answerValidation?.evidence || [];
+        const gate = state.answerValidation?.evidenceGate || {};
+        console.warn("[claim-gate] answer blocked", {
+          answerViolations: validation?.violations || [],
+          evidenceGateStatus: gate.status || "not_required",
+          evidenceGateViolations: gate.violations || [],
+          evidenceCount: Array.isArray(evidence) ? evidence.length : 0,
+          evidenceTools: (Array.isArray(evidence) ? evidence : []).map((item) => ({
+            tool: item?.tool,
+            unparseable: item?.unparseable,
+            ok: item?.ok,
+            hasOntologyVersion: Boolean(item?.ontologyVersion),
+            hasSchemaFingerprint: Boolean(item?.schemaFingerprint),
+            hasAnalysisRef: Boolean(item?.analysisRef),
+            hasSourceRevision: Boolean(item?.sourceRevision?.revisionId),
+            hasScopeHash: Boolean(item?.scope?.actorScopeHash),
+            hasQuality: Boolean(item?.quality?.completeness),
+            hasEvidenceKind: Boolean(item?.evidence?.kind),
+          })),
+        });
+      } catch {
+        // Diagnostics must never interrupt answer streaming.
+      }
       writeSseEvent(response, { choices: [{ delta: { content: CLAIM_GATE_FALLBACK_CONTENT } }] });
     }
   } else if (validation) {
@@ -580,8 +611,16 @@ export async function requestCompanyChatCompletion({
     );
   }
 
-  const documentExpandedMessages = await expandMessagesWithDocumentText(messages, process.env, { documentTextRunner });
-  const preparedMessages = await expandImageMessagesWithOcr(documentExpandedMessages, process.env, { imageOcrRunner });
+  // Multimodal models (e.g. doubao) consume image_url and file parts natively —
+  // skip both the PDF text-extraction and the image OCR expansion that replace
+  // attachments with text for text-only models.
+  const isMultimodal = isMultimodalChatModel(config.model);
+  const documentExpandedMessages = isMultimodal
+    ? messages
+    : await expandMessagesWithDocumentText(messages, process.env, { documentTextRunner });
+  const preparedMessages = isMultimodal
+    ? documentExpandedMessages
+    : await expandImageMessagesWithOcr(documentExpandedMessages, process.env, { imageOcrRunner });
   const mergedMessages = buildMergedMessages(compactChatMessages(preparedMessages), context);
 
   const requestConfig = buildChatCompletionRequest({
@@ -638,8 +677,16 @@ export async function streamCompanyChatCompletion({
     );
   }
 
-  const documentExpandedMessages = await expandMessagesWithDocumentText(messages, process.env, { documentTextRunner });
-  const preparedMessages = await expandImageMessagesWithOcr(documentExpandedMessages, process.env, { imageOcrRunner });
+  // Multimodal models (e.g. doubao) consume image_url and file parts natively —
+  // skip both the PDF text-extraction and the image OCR expansion that replace
+  // attachments with text for text-only models.
+  const isMultimodal = isMultimodalChatModel(config.model);
+  const documentExpandedMessages = isMultimodal
+    ? messages
+    : await expandMessagesWithDocumentText(messages, process.env, { documentTextRunner });
+  const preparedMessages = isMultimodal
+    ? documentExpandedMessages
+    : await expandImageMessagesWithOcr(documentExpandedMessages, process.env, { imageOcrRunner });
   const mergedMessages = buildMergedMessages(compactChatMessages(preparedMessages), context);
   const requestConfig = buildChatCompletionRequest({
     selectedModel: config.model,

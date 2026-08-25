@@ -612,7 +612,12 @@ export function createLangGraphChatRuntime({
     let defectContext = null;
     const events = [];
 
-    if (body?.useAnalyticsContext === true) {
+    // External MCP intents (e.g. Jira) don't need governed analytics context or
+    // defect context — skip both to avoid wasting work and to prevent the
+    // governed semantic plan from interfering with model-driven MCP tool choice.
+    const isExternalMcpIntent = selectMainAgentToolset(body?.messages)?.intent === "jira_query";
+
+    if (!isExternalMcpIntent && body?.useAnalyticsContext === true) {
       if (!isAnalyticsActorScopeConfigured(state.actorScope)) {
         analyticsContext = {
           contextText: "# Governed data access\nStatus: BLOCKED\nReason: a server-owned workspace, team, or project scope and allowed object types are required before data access.",
@@ -637,7 +642,7 @@ export function createLangGraphChatRuntime({
       }
     }
 
-    if (body?.useDefectContext === true && !analyticsContext?.skipDefectContext && !isOidcScopedActor(state.actorScope)) {
+    if (!isExternalMcpIntent && body?.useDefectContext === true && !analyticsContext?.skipDefectContext && !isOidcScopedActor(state.actorScope)) {
       events.push(emit(config, { type: "defect-context-started", threadId: state.threadId }));
       defectContext = await resolveDefectContext({
         messages: body?.messages,
@@ -659,6 +664,7 @@ export function createLangGraphChatRuntime({
     const body = state.body || {};
     const selectedToolset = selectMainAgentToolset(body?.messages, state.toolCalls);
     const actorScopeConfigured = isAnalyticsActorScopeConfigured(state.actorScope);
+    const isJiraIntent = selectedToolset?.intent === "jira_query";
     const needsDataTools = body?.useAnalyticsContext === true
       && (shouldPlanTools(body?.messages) || selectedToolset.policyHints?.includes("resolve_defect_reporter_before_aggregate"));
     const directResponse = classifyDirectMainAgentIntent(state.queryText || extractLatestUserQuery(body?.messages))
@@ -666,11 +672,17 @@ export function createLangGraphChatRuntime({
     const governedPlanDenied = state.analyticsContext?.analysisPlan?.status === "denied";
     const shouldUseTools =
       !directResponse &&
-      actorScopeConfigured &&
       !governedPlanDenied &&
-      body?.useAnalyticsContext === true &&
       !state.analyticsContext?.skipDefectContext &&
-      (shouldPlanTools(body?.messages) || selectedToolset.policyHints?.includes("resolve_defect_reporter_before_aggregate"));
+      (
+        // External MCP tools (Jira) don't require analytics actor scope.
+        (isJiraIntent && shouldPlanTools(body?.messages)) ||
+        (
+          actorScopeConfigured &&
+          body?.useAnalyticsContext === true &&
+          (shouldPlanTools(body?.messages) || selectedToolset.policyHints?.includes("resolve_defect_reporter_before_aggregate"))
+        )
+      );
     const toolRouting = { shouldUseTools, selectedToolset };
     const compact = compactToolRouting(toolRouting);
     const event = emit(config, {
@@ -704,93 +716,101 @@ export function createLangGraphChatRuntime({
     const events = Number(state.toolStepIndex || 0) === 0
       ? [emit(config, { type: "tool-planning-started", threadId: state.threadId })]
       : [];
-    const defectReporterLookup = buildDefectReporterLookupToolCall(body?.messages, state.toolCalls);
-    if (defectReporterLookup) {
-      return {
-        plannedToolCalls: [defectReporterLookup],
-        plannedToolCallSource: "defect_reporter_lookup",
-        toolExecutionMode: "model",
-        stoppedReason: "",
-        runtimeEvents: events,
-      };
-    }
-    const defectReporterAliasLookup = buildDefectReporterAliasLookupToolCall({
-      messages: body?.messages,
-      toolMessages: state.toolMessages,
-      priorToolCalls: state.toolCalls,
-    });
-    if (defectReporterAliasLookup) {
-      return {
-        plannedToolCalls: [defectReporterAliasLookup],
-        plannedToolCallSource: "defect_reporter_alias_lookup",
-        toolExecutionMode: "model",
-        stoppedReason: "",
-        runtimeEvents: events,
-      };
-    }
-    const defectReporterAggregate = buildDefectReporterAggregateToolCall({
-      messages: body?.messages,
-      toolMessages: state.toolMessages,
-      priorToolCalls: state.toolCalls,
-      now: now(),
-    });
-    if (defectReporterAggregate) {
-      return {
-        plannedToolCalls: [defectReporterAggregate],
-        plannedToolCallSource: "defect_reporter_aggregate",
-        toolExecutionMode: "deterministic",
-        stoppedReason: "",
-        runtimeEvents: events,
-      };
-    }
-    const defectReporterClarification = buildDefectReporterClarificationToolCall({
-      messages: body?.messages,
-      toolMessages: state.toolMessages,
-      priorToolCalls: state.toolCalls,
-    });
-    if (defectReporterClarification) {
-      return {
-        plannedToolCalls: [defectReporterClarification],
-        plannedToolCallSource: "defect_reporter_clarification",
-        toolExecutionMode: "model",
-        stoppedReason: "",
-        runtimeEvents: events,
-      };
-    }
-    const governedPlanToolCalls = buildReadySemanticPlanToolCalls({
-      analyticsContext: state.analyticsContext,
-      actorScope: state.actorScope,
-      selectedToolset,
-    });
-    if (governedPlanToolCalls.length) {
-      return {
-        plannedToolCalls: governedPlanToolCalls,
-        plannedToolCallSource: "governed_semantic_plan",
-        toolExecutionMode: "deterministic",
-        stoppedReason: "",
-        runtimeEvents: events,
-      };
-    }
-    const deterministicPlan = Number(state.toolStepIndex || 0) === 0
-      ? resolveDeterministicQueryPlan({ analyticsContext: state.analyticsContext, actorScope: state.actorScope, selectedToolset })
-      : null;
-    if (deterministicPlan) {
-      const plannedToolCalls = canonicalToolCalls(deterministicPlan);
-      events.push(emit(config, {
-        type: "deterministic-tool-plan-ready",
-        threadId: state.threadId,
-        planId: deterministicPlan.planId,
-        toolNames: plannedToolCalls.map((toolCall) => toolCall.function.name),
-      }));
-      return {
-        plannedToolCalls,
-        plannedToolCallSource: "canonical_query_plan",
-        toolExecutionMode: "deterministic",
-        stoppedReason: "",
-        toolCalls: plannedToolCalls,
-        toolConversationMessages: [{ role: "assistant", content: "", tool_calls: plannedToolCalls }],
-        runtimeEvents: events,
-      };
+
+    // External MCP intents (e.g. jira_query) use model-driven planning only —
+    // skip the analytics deterministic paths (defect-reporter lookup chain,
+    // governed semantic plan, canonical query plan) which are analytics-specific
+    // and would never have the MCP tools in their allowlists anyway.
+    const isExternalMcpIntent = selectedToolset?.intent === "jira_query";
+    if (!isExternalMcpIntent) {
+      const defectReporterLookup = buildDefectReporterLookupToolCall(body?.messages, state.toolCalls);
+      if (defectReporterLookup) {
+        return {
+          plannedToolCalls: [defectReporterLookup],
+          plannedToolCallSource: "defect_reporter_lookup",
+          toolExecutionMode: "model",
+          stoppedReason: "",
+          runtimeEvents: events,
+        };
+      }
+      const defectReporterAliasLookup = buildDefectReporterAliasLookupToolCall({
+        messages: body?.messages,
+        toolMessages: state.toolMessages,
+        priorToolCalls: state.toolCalls,
+      });
+      if (defectReporterAliasLookup) {
+        return {
+          plannedToolCalls: [defectReporterAliasLookup],
+          plannedToolCallSource: "defect_reporter_alias_lookup",
+          toolExecutionMode: "model",
+          stoppedReason: "",
+          runtimeEvents: events,
+        };
+      }
+      const defectReporterAggregate = buildDefectReporterAggregateToolCall({
+        messages: body?.messages,
+        toolMessages: state.toolMessages,
+        priorToolCalls: state.toolCalls,
+        now: now(),
+      });
+      if (defectReporterAggregate) {
+        return {
+          plannedToolCalls: [defectReporterAggregate],
+          plannedToolCallSource: "defect_reporter_aggregate",
+          toolExecutionMode: "deterministic",
+          stoppedReason: "",
+          runtimeEvents: events,
+        };
+      }
+      const defectReporterClarification = buildDefectReporterClarificationToolCall({
+        messages: body?.messages,
+        toolMessages: state.toolMessages,
+        priorToolCalls: state.toolCalls,
+      });
+      if (defectReporterClarification) {
+        return {
+          plannedToolCalls: [defectReporterClarification],
+          plannedToolCallSource: "defect_reporter_clarification",
+          toolExecutionMode: "model",
+          stoppedReason: "",
+          runtimeEvents: events,
+        };
+      }
+      const governedPlanToolCalls = buildReadySemanticPlanToolCalls({
+        analyticsContext: state.analyticsContext,
+        actorScope: state.actorScope,
+        selectedToolset,
+      });
+      if (governedPlanToolCalls.length) {
+        return {
+          plannedToolCalls: governedPlanToolCalls,
+          plannedToolCallSource: "governed_semantic_plan",
+          toolExecutionMode: "deterministic",
+          stoppedReason: "",
+          runtimeEvents: events,
+        };
+      }
+      const deterministicPlan = Number(state.toolStepIndex || 0) === 0
+        ? resolveDeterministicQueryPlan({ analyticsContext: state.analyticsContext, actorScope: state.actorScope, selectedToolset })
+        : null;
+      if (deterministicPlan) {
+        const plannedToolCalls = canonicalToolCalls(deterministicPlan);
+        events.push(emit(config, {
+          type: "deterministic-tool-plan-ready",
+          threadId: state.threadId,
+          planId: deterministicPlan.planId,
+          toolNames: plannedToolCalls.map((toolCall) => toolCall.function.name),
+        }));
+        return {
+          plannedToolCalls,
+          plannedToolCallSource: "canonical_query_plan",
+          toolExecutionMode: "deterministic",
+          stoppedReason: "",
+          toolCalls: plannedToolCalls,
+          toolConversationMessages: [{ role: "assistant", content: "", tool_calls: plannedToolCalls }],
+          runtimeEvents: events,
+        };
+      }
     }
     const planningResult = await requestToolCompletion({
       messages: [

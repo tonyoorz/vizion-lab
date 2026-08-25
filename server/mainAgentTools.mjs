@@ -4,6 +4,13 @@ import {
   ACTOR_CAPABILITY_HEADER,
   createActorCapability,
 } from "./agentActorCapability.mjs";
+import {
+  callJiraMcp,
+  extractMcpContentText,
+  isJiraMcpConfigured,
+  listJiraMcpTools,
+  resolveJiraMcpTool,
+} from "./mcpClient/index.mjs";
 
 const DEFAULT_ANALYTICS_API_BASE = process.env.VIZION_ANALYTICS_API_BASE || "http://127.0.0.1:3003";
 
@@ -796,6 +803,46 @@ export const MAIN_AGENT_TOOLS = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "jira_search_issues",
+      description: "Search Jira issues on the configured Jira instance (e.g. https://jira.cc.bmwgroup.net) via the Jira MCP server. Use this when the user asks about Jira tickets, issues, epics, or work items by keyword, status, assignee, project, or JQL query. The query MUST be a valid JQL (Jira Query Language) expression. Returns issue summaries with key, summary, status, and other fields.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description: "A valid JQL (Jira Query Language) expression. Examples: 'project = IDCEVODEV AND status = \"In Progress\"', 'project = ABPIDM AND created >= 2026-08-01 ORDER BY created DESC', 'assignee = currentUser() AND status = Open'. Always use the exact project key (e.g. IDCEVODEV, not 'IDCevo'). If the user gives a project name, ask for clarification or use jira_get_issue to look it up first.",
+          },
+          limit: {
+            type: "number",
+            description: "Maximum number of issues to return. Use 10 unless the user asks for more. Max 50.",
+          },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "jira_get_issue",
+      description: "Fetch full details of a single Jira issue by its key (e.g. PROJ-123) via the Jira MCP server. Use this when the user references a specific Jira ticket by key and wants its status, description, comments, or other fields.",
+      parameters: {
+        type: "object",
+        properties: {
+          issue_key: {
+            type: "string",
+            description: "The Jira issue key, e.g. PROJ-123 or DTSV-456.",
+          },
+        },
+        required: ["issue_key"],
+        additionalProperties: false,
+      },
+    },
+  },
 ];
 
 function parseToolArguments(rawArguments) {
@@ -1067,12 +1114,62 @@ function buildActorScope(actor) {
   };
 }
 
+const MAX_TOOL_MESSAGE_CHARS = Number(process.env.VIZION_MAX_TOOL_MESSAGE_CHARS || 30000);
+const TOOL_MESSAGE_TRUNCATION_NOTE = "truncated due to size limit";
+
+function truncateSemanticToolContent(content, limit) {
+  // Semantic tool results are JSON envelopes ({ ok, tool, result: { ...provenance, data: [...] } }).
+  // A naive string slice breaks JSON parsability, which causes buildToolEvidence to lose every
+  // provenance field and trips the claim gate into "blocked" even though the backend returned a
+  // complete evidence package. Instead, truncate the data array (drop rows) while preserving every
+  // provenance field so the gate can still validate the claim.
+  let parsed;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    // Not a JSON envelope (or already corrupt) — fall back to a safe string slice.
+    return content.length > limit
+      ? content.slice(0, limit) + `\n{"note":"${TOOL_MESSAGE_TRUNCATION_NOTE}"}`
+      : content;
+  }
+  const envelope = parsed?.result && typeof parsed.result === "object" ? parsed.result : parsed;
+  const data = Array.isArray(envelope?.data) ? envelope.data : null;
+  if (!data) {
+    return content.length > limit
+      ? content.slice(0, limit) + `\n{"note":"${TOOL_MESSAGE_TRUNCATION_NOTE}"}`
+      : content;
+  }
+
+  let serialized = content;
+  let keep = data.length;
+  while (keep > 0 && serialized.length > limit) {
+    keep -= 1;
+    const trial = { ...envelope, data: data.slice(0, keep), _truncated: { kept: keep, total: data.length } };
+    const trialEnvelope = parsed?.result && typeof parsed.result === "object"
+      ? { ...parsed, result: trial }
+      : trial;
+    serialized = JSON.stringify(trialEnvelope);
+  }
+  if (keep === data.length) {
+    return content; // already within budget
+  }
+  return serialized;
+}
+
 function buildToolMessage(toolCall, content) {
+  const toolName = toolCall?.function?.name || "";
+  const overLimit = content.length > MAX_TOOL_MESSAGE_CHARS;
+  let trimmed = content;
+  if (overLimit) {
+    trimmed = SEMANTIC_TOOL_NAMES.has(toolName)
+      ? truncateSemanticToolContent(content, MAX_TOOL_MESSAGE_CHARS)
+      : content.slice(0, MAX_TOOL_MESSAGE_CHARS) + `\n{"note":"${TOOL_MESSAGE_TRUNCATION_NOTE}"}`;
+  }
   return {
     role: "tool",
     tool_call_id: toolCall?.id || "",
-    name: toolCall?.function?.name || "",
-    content,
+    name: toolName,
+    content: trimmed,
   };
 }
 
@@ -2261,6 +2358,120 @@ function executeAskClarification(toolCall) {
   };
 }
 
+/**
+ * Resolve a Jira MCP tool that matches the requested action, then call it.
+ *
+ * The Jira MCP server may name its tools differently across versions, so we use
+ * keyword matching (resolveJiraMcpTool) to find the right tool rather than
+ * hard-coding a name. If no matching tool is found, we fall back to listing
+ * available tools so the model can self-correct on the next turn.
+ *
+ * Parameter names are adapted to the matched tool's input schema — we inspect
+ * the schema's required/properties and map our generic arg names to whatever
+ * the tool expects (e.g. "query" → "jql", "issue_key" → "issue_key" or "key").
+ */
+async function executeJiraMcpAction(toolCall, keywords, args) {
+  if (!isJiraMcpConfigured()) {
+    const content = JSON.stringify({
+      error: "Jira MCP is not configured. Set JIRA_MCP_URL, JIRA_PERSONAL_TOKEN, and JIRA_URL in .env.",
+    });
+    return {
+      toolMessage: buildToolMessage(toolCall, content),
+      contextText: "# Main agent tool result\nTool: jira (MCP)\nResult: unavailable — Jira MCP is not configured.",
+    };
+  }
+
+  const tool = await resolveJiraMcpTool(keywords);
+  if (!tool) {
+    const available = await listJiraMcpTools().catch(() => []);
+    const names = Array.isArray(available) ? available.map((t) => t.name).join(", ") : "(failed to list)";
+    const content = JSON.stringify({ error: "No matching Jira MCP tool found", availableTools: names });
+    return {
+      toolMessage: buildToolMessage(toolCall, content),
+      contextText: `# Main agent tool result\nTool: jira (MCP)\nResult: no matching tool found for [${keywords.join(", ")}]. Available: ${names}`,
+    };
+  }
+
+  const adaptedArgs = adaptMcpToolArgs(args, tool);
+  const result = await callJiraMcp(tool.name, adaptedArgs);
+  const text = extractMcpContentText(result);
+  return {
+    toolMessage: buildToolMessage(toolCall, JSON.stringify({ tool: tool.name, args: adaptedArgs, result: text })),
+    contextText: `# Main agent tool result\nTool: jira__${tool.name} (MCP)\nResult:\n${text}`,
+  };
+}
+
+/**
+ * Map generic arg names to the actual parameter names expected by the MCP tool.
+ *
+ * The LLM uses our function-calling schema (query, limit, issue_key), but the
+ * MCP server's tool may use different names (e.g. jql, max_results, issue_key).
+ * We inspect the tool's inputSchema properties and try to find a match.
+ */
+function adaptMcpToolArgs(genericArgs, tool) {
+  const schemaProps = tool?.inputSchema?.properties || {};
+  const schemaKeys = new Set(Object.keys(schemaProps));
+  const adapted = {};
+
+  // Direct match: if the generic arg name exists in the schema, use it as-is.
+  for (const [key, value] of Object.entries(genericArgs)) {
+    if (schemaKeys.has(key)) {
+      adapted[key] = value;
+      continue;
+    }
+    // Try common aliases.
+    const aliasMap = {
+      query: ["jql", "q", "search", "search_query"],
+      limit: ["max_results", "maxResults", "count", "limit", "top", "num"],
+      issue_key: ["issue_key", "issueKey", "key", "issue_id", "issueId", "id"],
+    };
+    const aliases = aliasMap[key] || [];
+    const match = aliases.find((alias) => schemaKeys.has(alias));
+    if (match) {
+      adapted[match] = value;
+    } else if (schemaKeys.size === 0) {
+      // If the schema has no defined properties (or no schema), pass through.
+      adapted[key] = value;
+    }
+    // If no match found, skip the arg rather than sending an unknown parameter.
+  }
+
+  return adapted;
+}
+
+async function executeJiraSearchIssues(toolCall) {
+  const args = parseToolArguments(toolCall?.function?.arguments);
+  const query = String(args.query || "").trim();
+  const limit = Math.max(1, Math.min(50, Number(args.limit || 10)));
+  if (!query) {
+    const content = JSON.stringify({ error: "jira_search_issues requires query" });
+    return {
+      toolMessage: buildToolMessage(toolCall, content),
+      contextText: "# Main agent tool result\nTool: jira_search_issues\nResult: unavailable because query is empty.",
+    };
+  }
+  // Pass query as both "query" (generic) and "jql" (MCP param name).
+  // adaptMcpToolArgs will pick whichever the tool's schema accepts.
+  return executeJiraMcpAction(
+    toolCall,
+    ["search", "jql", "find", "list"],
+    { query, limit },
+  );
+}
+
+async function executeJiraGetIssue(toolCall) {
+  const args = parseToolArguments(toolCall?.function?.arguments);
+  const issueKey = String(args.issue_key || "").trim();
+  if (!issueKey) {
+    const content = JSON.stringify({ error: "jira_get_issue requires issue_key" });
+    return {
+      toolMessage: buildToolMessage(toolCall, content),
+      contextText: "# Main agent tool result\nTool: jira_get_issue\nResult: unavailable because issue_key is empty.",
+    };
+  }
+  return executeJiraMcpAction(toolCall, ["get", "issue", "detail", "fetch"], { issue_key: issueKey, issueKey });
+}
+
 export async function executeMainAgentToolCall(toolCall, {
   analyticsFetch = globalThis.fetch,
   analyticsApiBase = DEFAULT_ANALYTICS_API_BASE,
@@ -2343,6 +2554,12 @@ export async function executeMainAgentToolCall(toolCall, {
     }
     if (name === "search_duplicates") {
       return await executeDuplicateSearch(toolCall, { runDuplicateBridge, ensureDuplicateWarmup, actor });
+    }
+    if (name === "jira_search_issues") {
+      return await executeJiraSearchIssues(toolCall);
+    }
+    if (name === "jira_get_issue") {
+      return await executeJiraGetIssue(toolCall);
     }
     if (name === "ask_clarification") {
       return executeAskClarification(toolCall);

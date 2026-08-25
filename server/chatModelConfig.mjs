@@ -14,6 +14,26 @@ const GLM_PROXY_DEFAULT_MODELS = [
 
 const DEFAULT_GLM_PROXY_BASE_URL = "http://127.0.0.1:8001/v1";
 
+// Beacon personal channel (e.g. doubao-seed-2.1-turbo). Uses a dedicated
+// access code distinct from project-golive — the gateway rejects golive keys
+// on the personal endpoint and vice versa. Mirrors the GLM-proxy auth_mode
+// "beacon_personal" so vizion-lab can call doubao directly without the proxy.
+const DEFAULT_BEACON_PERSONAL_ENDPOINT = "https://beaconapi.bmwbrill.cn/personal/v1/chat/completions";
+const DOUBAO_PERSONAL_MODEL = "doubao-seed-2.1-turbo";
+
+// Beacon project-golive channel (glm-5.1, deepseek-v4-*, qwen3.7-*). Routes
+// directly to the golive endpoint with a Bearer golive key, bypassing the GLM
+// proxy. The upstream model name often differs from the dropdown id, so map
+// them explicitly (mirrors GLM-proxy's upstream_model field).
+const DEFAULT_BEACON_GOLIVE_ENDPOINT = "https://beaconapi.bmwbrill.cn/project-golive/v1/chat/completions";
+const BEACON_GOLIVE_MODELS = {
+  "glm-5.1": "GLM-5.1",
+  "deepseek-v4-pro": "DeepSeek-V4-Pro",
+  "deepseek-v4-flash": "DeepSeek-V4-Flash",
+  "qwen3.7-max": "qwen3.7-max",
+  "qwen3.7-flash": "qwen3.7-flash",
+};
+
 const DEFAULT_ENDPOINTS = {
   "deepseek-v4-flash": "https://aistudio.bmwbrill.cn/api/service/ssl/170/lm-platform/llm/v2/chat/completions",
   "qwen3.5-397b-a17b": "https://aistudio.bmwbrill.cn/api/service/164/ernie/v2/chat/completions",
@@ -77,6 +97,69 @@ function usesGlmProxy(env) {
   return Boolean(resolveGlmProxyBaseUrl(env));
 }
 
+function readBeaconPersonalApiKey(env) {
+  return readFirst(env, [
+    "DUPSEARCH_BEACON_PERSONAL_API_KEY",
+    "BEACON_PERSONAL_API_KEY",
+  ]);
+}
+
+function resolveBeaconPersonalEndpoint(env) {
+  const configured = readFirst(env, [
+    "DUPSEARCH_BEACON_PERSONAL_ENDPOINT",
+    "BEACON_PERSONAL_ENDPOINT",
+  ]);
+  return configured || DEFAULT_BEACON_PERSONAL_ENDPOINT;
+}
+
+// Doubao and other personal-channel models route directly to the beacon
+// personal endpoint with a Bearer personal key, bypassing the GLM proxy.
+function resolveBeaconPersonalModel(model) {
+  const normalized = String(model || "").trim().toLowerCase();
+  if (normalized === DOUBAO_PERSONAL_MODEL) {
+    return DOUBAO_PERSONAL_MODEL;
+  }
+  return "";
+}
+
+function readBeaconGoliveApiKey(env) {
+  return readFirst(env, [
+    "DUPSEARCH_BEACON_API_KEY",
+    "BEACON_API_KEY",
+  ]);
+}
+
+function resolveBeaconGoliveEndpoint(env) {
+  const configured = readFirst(env, [
+    "DUPSEARCH_BEACON_GOLIVE_ENDPOINT",
+    "BEACON_GOLIVE_ENDPOINT",
+  ]);
+  return configured || DEFAULT_BEACON_GOLIVE_ENDPOINT;
+}
+
+// GoLive models route directly to the project-golive beacon channel with a
+// Bearer golive key. Returns the upstream model name (which may differ from
+// the dropdown id) or "" if the model is not a golive model.
+function resolveBeaconGoliveUpstreamModel(model) {
+  const normalized = String(model || "").trim().toLowerCase();
+  for (const [dropdownId, upstreamModel] of Object.entries(BEACON_GOLIVE_MODELS)) {
+    if (dropdownId.toLowerCase() === normalized) {
+      return upstreamModel;
+    }
+  }
+  return "";
+}
+
+// Multimodal models accept image_url/file_data content parts natively, so the
+// OCR-based image-to-text expansion must be skipped for them — otherwise the
+// image is replaced by OCR text and the model never sees the actual image.
+const MULTIMODAL_MODEL_IDS = new Set([DOUBAO_PERSONAL_MODEL]);
+
+export function isMultimodalChatModel(model) {
+  const normalized = String(model || "").trim().toLowerCase();
+  return MULTIMODAL_MODEL_IDS.has(normalized);
+}
+
 export function getChatModelOptions(env = process.env) {
   const envRaw = readFirst(env, [
     "DUPSEARCH_CHAT_MODEL_OPTIONS",
@@ -116,6 +199,45 @@ export function getDefaultChatModel(env = process.env) {
 export function resolveChatModelConfig(selectedModel, env = process.env) {
   const model = String(selectedModel || "").trim() || getDefaultChatModel(env);
   const glmProxyBaseUrl = resolveGlmProxyBaseUrl(env);
+
+  // Direct beacon personal route (e.g. doubao-seed-2.1-turbo). Does not need
+  // the GLM proxy: the personal endpoint accepts a Bearer personal key and a
+  // plain OpenAI body. Falls through if the personal key is not configured.
+  const beaconPersonalModel = resolveBeaconPersonalModel(model);
+  const beaconPersonalApiKey = beaconPersonalModel ? readBeaconPersonalApiKey(env) : "";
+  if (beaconPersonalModel && beaconPersonalApiKey) {
+    return {
+      model,
+      endpoint: resolveBeaconPersonalEndpoint(env),
+      apiKey: beaconPersonalApiKey,
+      accessCode: "",
+      authScheme: "Bearer",
+      credential: beaconPersonalApiKey,
+      baseUrl: "",
+      usesInternalEndpoint: true,
+      upstreamModel: "",
+    };
+  }
+
+  // Direct beacon project-golive route (glm-5.1, deepseek-v4-*, qwen3.7-*).
+  // Bypasses the GLM proxy when the golive key is configured. The upstream
+  // model name may differ from the dropdown id and is rewritten in the body.
+  const beaconGoliveUpstreamModel = resolveBeaconGoliveUpstreamModel(model);
+  const beaconGoliveApiKey = beaconGoliveUpstreamModel ? readBeaconGoliveApiKey(env) : "";
+  if (beaconGoliveUpstreamModel && beaconGoliveApiKey) {
+    return {
+      model,
+      endpoint: resolveBeaconGoliveEndpoint(env),
+      apiKey: beaconGoliveApiKey,
+      accessCode: "",
+      authScheme: "Bearer",
+      credential: beaconGoliveApiKey,
+      baseUrl: "",
+      usesInternalEndpoint: true,
+      upstreamModel: beaconGoliveUpstreamModel,
+    };
+  }
+
   const endpointMap = glmProxyBaseUrl ? {} : parseEndpointMap(env);
   const endpointTemplate = String(endpointMap[model.toLowerCase()] || "").trim();
   const accessCode = readFirst(env, [
@@ -149,6 +271,7 @@ export function resolveChatModelConfig(selectedModel, env = process.env) {
     credential,
     baseUrl,
     usesInternalEndpoint: Boolean(endpoint),
+    upstreamModel: "",
   };
 }
 
@@ -174,10 +297,14 @@ export function buildChatCompletionRequest({
   stream = false,
   tools,
   toolChoice,
+  maxTokens,
 }) {
   const config = resolveChatModelConfig(selectedModel || "", env);
   const toolRequestFields = buildToolRequestFields(tools, toolChoice);
   const streamRequestFields = buildStreamRequestFields(stream);
+  // Only override the default token limit when the caller explicitly requests one.
+  const tokenLengthOverride = maxTokens != null ? { max_token_length: maxTokens } : {};
+  const maxTokensOverride = maxTokens != null ? { max_tokens: maxTokens } : {};
 
   if (config.usesInternalEndpoint) {
     return {
@@ -188,13 +315,14 @@ export function buildChatCompletionRequest({
         "Content-Type": "application/json",
       },
       body: {
-        model: config.model,
+        model: config.upstreamModel || config.model,
         messages,
         temperature: 0.2,
         max_token_length: 2048,
         stream,
         ...streamRequestFields,
         ...toolRequestFields,
+        ...tokenLengthOverride,
       },
       config,
     };
@@ -219,6 +347,7 @@ export function buildChatCompletionRequest({
       stream,
       ...streamRequestFields,
       ...toolRequestFields,
+      ...maxTokensOverride,
     },
     config,
   };

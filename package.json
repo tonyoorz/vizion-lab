@@ -12,7 +12,7 @@
     "build:dev": "vite build --mode development",
     "lint": "eslint .",
     "preview": "vite preview",
-    "start": "node ./server/index.mjs",
+    "start": "node ./scripts/start.mjs",
     "test": "vitest run",
     "benchmark:asr": "node ./scripts/benchmarkTranscription.mjs",
     "test:watch": "vitest",

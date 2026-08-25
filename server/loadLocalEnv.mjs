@@ -74,5 +74,16 @@ export function loadLocalEnv(env = process.env) {
     }
   }
 
+  // Beacon internal endpoints (e.g. doubao personal channel on
+  // beaconapi.bmwbrill.cn) are signed by the BBA enterprise root CA, which
+  // Node's default CA bundle does not trust. NODE_EXTRA_CA_CERTS must be set
+  // before the process starts, so propagate UPSTREAM_CA_BUNDLE into it when
+  // the caller has not set NODE_EXTRA_CA_CERTS explicitly. Only effective when
+  // the .env is loaded before the Node process spawns children (dev.mjs does
+  // this) or before the first TLS handshake.
+  if (env.UPSTREAM_CA_BUNDLE && !env.NODE_EXTRA_CA_CERTS) {
+    env.NODE_EXTRA_CA_CERTS = env.UPSTREAM_CA_BUNDLE;
+  }
+
   return loadedFiles;
 }

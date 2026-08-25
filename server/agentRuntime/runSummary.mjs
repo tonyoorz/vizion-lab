@@ -183,6 +183,7 @@ export function buildRuntimeRunSummary({ runId, threadId, actorScope, metrics, m
     intent: String(metrics?.toolRouting?.intent || "general"),
     outcome: outcomeFromStoppedReason(stoppedReason),
     evidenceStatus: String(evidenceGate.status || "not_required"),
+    evidenceGateViolations: Array.isArray(evidenceGate.violations) ? evidenceGate.violations : [],
     toolNames: unique(toolCalls.map((toolCall) => toolCall?.function?.name)),
     toolOutcomes: unique(toolEvents.filter((event) => /tool-(?:output|blocked)/.test(String(event?.type))).map((event) => event.type)),
     recoveryOutcomes: unique(recoveries.map((recovery) => recovery?.outcome)),

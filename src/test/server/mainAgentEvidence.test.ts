@@ -98,4 +98,34 @@ describe("main agent semantic evidence", () => {
       data: [{ defect_id: "D-1", "defect.count": 1 }],
     });
   });
+
+  it("surfaces an honest unparseable signal when the tool message is not valid JSON", () => {
+    const evidence = buildToolEvidence({
+      toolCall: { id: "semantic-1", function: { name: "query_semantic_metrics" } },
+      result: {
+        toolMessage: {
+          tool_call_id: "semantic-1",
+          name: "query_semantic_metrics",
+          // Simulates a naive string truncation that broke the JSON envelope.
+          content: '{"ok":true,"tool":"query_semantic_metrics","result":{"ontologyVersion":"v1","data":[{"id":"D-',
+        },
+      },
+      intent: "metric_query",
+    });
+
+    expect(evidence.unparseable).toBe(true);
+    expect(evidence.ontologyVersion).toBeUndefined();
+    const gate = evaluateSemanticEvidence([evidence]);
+    expect(gate.status).toBe("blocked");
+    expect(gate.violations).toEqual(["SEMANTIC_EVIDENCE_UNPARSEABLE"]);
+    expect(gate.violations).not.toContain("SEMANTIC_ONTOLOGY_VERSION_MISSING");
+    expect(formatSemanticEvidenceGate(gate)).toContain("Do not state numerical or record-level claims");
+  });
+
+  it("still blocks on a real tool failure even when provenance is present", () => {
+    const gate = evaluateSemanticEvidence([{ ...validEvidence, ok: false }]);
+    expect(gate.status).toBe("blocked");
+    expect(gate.violations).toEqual(expect.arrayContaining(["SEMANTIC_TOOL_RESULT_FAILED"]));
+    expect(gate.violations).not.toContain("SEMANTIC_EVIDENCE_UNPARSEABLE");
+  });
 });

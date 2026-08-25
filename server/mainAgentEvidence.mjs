@@ -1,8 +1,8 @@
-function parseJson(value) {
+function tryParseJson(value) {
   try {
-    return JSON.parse(String(value || ""));
+    return { value: JSON.parse(String(value || "")) };
   } catch {
-    return {};
+    return { unparseable: true };
   }
 }
 
@@ -11,7 +11,20 @@ function compactObject(value) {
 }
 
 export function buildToolEvidence({ toolCall, result, intent }) {
-  const payload = parseJson(result?.toolMessage?.content);
+  const parsed = tryParseJson(result?.toolMessage?.content);
+  // When the tool message content is not valid JSON (e.g. a naive string truncation broke the
+  // envelope), surface an explicit, honest signal instead of silently returning all-undefined
+  // provenance fields. evaluateSemanticEvidence turns this into a single
+  // SEMANTIC_EVIDENCE_UNPARSEABLE violation rather than a misleading swarm of *_MISSING ones.
+  if (parsed.unparseable) {
+    return compactObject({
+      tool: result?.toolMessage?.name || toolCall?.function?.name || "unknown_tool",
+      toolCallId: toolCall?.id || result?.toolMessage?.tool_call_id || "",
+      intent,
+      unparseable: true,
+    });
+  }
+  const payload = parsed.value;
   const body = payload?.result && typeof payload.result === "object" ? payload.result : payload;
   return compactObject({
     tool: payload?.tool || result?.toolMessage?.name || toolCall?.function?.name || "unknown_tool",
@@ -46,6 +59,14 @@ export function evaluateSemanticEvidence(items) {
   const warnings = [];
   const revisionsByAnalysisRef = new Map();
   for (const item of semanticItems) {
+    if (item?.unparseable) {
+      // The evidence envelope was not valid JSON — typically a transport-layer truncation broke
+      // it. This is a single, honest signal that points at the transport defect, rather than the
+      // misleading swarm of *_MISSING violations that an all-undefined evidence object would
+      // otherwise produce. Still blocked: we genuinely cannot verify the claim.
+      violations.push("SEMANTIC_EVIDENCE_UNPARSEABLE");
+      continue;
+    }
     if (item?.ok !== true) violations.push("SEMANTIC_TOOL_RESULT_FAILED");
     if (!item?.ontologyVersion) violations.push("SEMANTIC_ONTOLOGY_VERSION_MISSING");
     if (!item?.schemaFingerprint) violations.push("SEMANTIC_SCHEMA_FINGERPRINT_MISSING");
