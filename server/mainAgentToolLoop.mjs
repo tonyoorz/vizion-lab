@@ -19,7 +19,7 @@ export async function resolveMainAgentToolContext({
   executeToolCall = executeMainAgentToolCall,
   toolDependencies = {},
   selectedToolset: providedToolset,
-  maxSteps = 4,
+  maxSteps = 8,
   now = new Date(),
 } = {}) {
   const allToolCalls = [];

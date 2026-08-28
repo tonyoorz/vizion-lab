@@ -23,6 +23,7 @@ Object.assign(process.env, resolveLocalApiEnvironment(process.env));
 const analyticsPort = Number(process.env.VIZION_ANALYTICS_PORT || "3003");
 const apiPort = Number(process.env.VIZION_API_PORT || "3004");
 const webPort = Number(process.env.VIZION_WEB_PORT || "8080");
+const sessionKeeperPort = Number(process.env.VIZION_SESSION_KEEPER_PORT || "8090");
 
 assertSupportedNodeVersion();
 
@@ -126,6 +127,34 @@ async function launchIfNeeded({ name, command, args, port, expectedService, isHe
   launch(command, args, name, isHealthy);
 }
 
+// session_keeper (BmwLogin) — 多用户 BMW SSO session 缓存保活服务
+// 其 /health 返回 {"status":"ok"}（无 ok/service 字段），需自定义健康检查
+process.env.SESSION_KEEPER_URL = `http://127.0.0.1:${sessionKeeperPort}`;
+process.env.SESSION_STORE_DIR = process.env.SESSION_STORE_DIR || path.join(repoRoot, ".session_cache");
+await launchIfNeeded({
+  name: "session-keeper",
+  command: resolvePythonCommand(),
+  args: [
+    "-m",
+    "uvicorn",
+    "session_keeper.app:app",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    String(sessionKeeperPort),
+  ],
+  port: sessionKeeperPort,
+  isHealthy: async () => {
+    try {
+      const resp = await fetch(`http://127.0.0.1:${sessionKeeperPort}/health`);
+      if (!resp.ok) return false;
+      const data = await resp.json();
+      return data?.status === "ok";
+    } catch {
+      return false;
+    }
+  },
+});
 await launchIfNeeded({
   name: "analytics-api",
   command: resolvePythonCommand(),

@@ -679,3 +679,40 @@ def build_default_octane_client() -> OctaneApiClient:
         workspace_id=get_octane_workspace_id(),
         session=build_cookie_session(resolve_octane_cookie_file_path()),
     )
+
+
+def build_octane_client_for_user(username: str) -> OctaneApiClient:
+    """构建按用户身份的 Octane client。
+
+    通过 session_keeper 拿到该用户的 BMW SSO session（各自独立 cookie），
+    复用 auth.py 的 cookie 注入逻辑确保 cookie 注入到 Octane domain。
+    返回的 session 设置 trust_env=False（内网直连不走代理）。
+
+    如果 keeper 不可用或用户未登录（密码缓存过期），回退到共享身份
+    build_default_octane_client()。
+    """
+    import logging
+
+    log = logging.getLogger("vizion.client")
+
+    # 延迟 import，避免 session_keeper 未安装时影响整个模块
+    try:
+        from backend.analytics.auth_routes import get_user_octane_session
+    except ImportError:
+        log.debug("auth_routes 不可用，回退到共享 Octane client")
+        return build_default_octane_client()
+
+    session = get_user_octane_session(username)
+    if session is None:
+        log.info("用户 %s 无有效 session，回退到共享 Octane client", username)
+        return build_default_octane_client()
+
+    # session_keeper 返回的 requests.Session 已带 cookie，但要确保 Octane domain
+    # 和 trust_env=False（keeper 已设 trust_env=False，这里再确认一次）
+    session.trust_env = False
+    return OctaneApiClient(
+        base_url=get_octane_base_url(),
+        shared_space_id=get_octane_shared_space_id(),
+        workspace_id=get_octane_workspace_id(),
+        session=session,
+    )

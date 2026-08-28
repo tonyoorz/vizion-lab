@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import DashboardSidebar from "@/components/dashboard/DashboardSidebar";
 import LanguageSwitcher from "@/components/dashboard/LanguageSwitcher";
 import ThemeToggle from "@/components/dashboard/ThemeToggle";
+import UserMenu from "@/components/dashboard/UserMenu";
 import ProjectAnalysis from "@/components/dashboard/pages/ProjectAnalysis";
 import DefectHighFreq from "@/components/dashboard/pages/DefectHighFreq";
 import LongRunnerAnalysis from "@/components/dashboard/pages/LongRunnerAnalysis";
@@ -97,6 +98,7 @@ const Index = () => {
           <div className="flex items-center gap-3 text-xs text-muted-foreground">
             <LanguageSwitcher />
             <ThemeToggle />
+            <UserMenu />
             <div className="flex items-center gap-2">
               <span className="flex h-2 w-2 rounded-full bg-success" />
               {`${t("sync.synced")} · ${formattedMainDashboardSyncDate ?? t("sync.noDate")}`}

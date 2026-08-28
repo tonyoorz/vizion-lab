@@ -557,7 +557,7 @@ export function createLangGraphChatRuntime({
   shouldPlanTools = shouldPlanMainAgentTools,
   requestToolCompletion = requestCompanyChatCompletion,
   executeToolCall,
-  maxToolSteps = 4,
+  maxToolSteps = 8,
   checkpointer = new MemorySaver(),
   runtimeStore = null,
   now = () => new Date(),
@@ -615,7 +615,8 @@ export function createLangGraphChatRuntime({
     // External MCP intents (e.g. Jira) don't need governed analytics context or
     // defect context — skip both to avoid wasting work and to prevent the
     // governed semantic plan from interfering with model-driven MCP tool choice.
-    const isExternalMcpIntent = selectMainAgentToolset(body?.messages)?.intent === "jira_query";
+    const queryTextForMcp = extractLatestUserQuery(body?.messages) || "";
+    const isExternalMcpIntent = /\bjira\b|jira\s*(?:issue|ticket|工单|问题)|atlassian/i.test(queryTextForMcp);
 
     if (!isExternalMcpIntent && body?.useAnalyticsContext === true) {
       if (!isAnalyticsActorScopeConfigured(state.actorScope)) {
@@ -717,11 +718,42 @@ export function createLangGraphChatRuntime({
       ? [emit(config, { type: "tool-planning-started", threadId: state.threadId })]
       : [];
 
-    // External MCP intents (e.g. jira_query) use model-driven planning only —
-    // skip the analytics deterministic paths (defect-reporter lookup chain,
-    // governed semantic plan, canonical query plan) which are analytics-specific
-    // and would never have the MCP tools in their allowlists anyway.
-    const isExternalMcpIntent = selectedToolset?.intent === "jira_query";
+    // Model-driven planning is the primary path. The deterministic shortcuts
+    // (defect-reporter lookup chain, governed semantic plan, canonical query
+    // plan) are now fallbacks used only when the model returns no tool calls.
+    const isExternalMcpIntent = /\bjira\b|jira\s*(?:issue|ticket|工单|问题)|atlassian/i
+      .test(extractLatestUserQuery(body?.messages) || "");
+
+    const planningResult = await requestToolCompletion({
+      messages: [
+        ...(Array.isArray(body?.messages) ? body.messages : []),
+        ...(state.toolConversationMessages || []).slice(Number(state.turnToolConversationStart || 0)),
+      ],
+      model: body?.model,
+      context: mergeContext(
+        state.baseContext,
+        buildToolPlanningContext(now()),
+        buildSelectedToolsetContext(selectedToolset),
+        buildSemanticContinuationContext(state.toolEvidence || [], state.actorScope),
+      ),
+      tools: selectedToolset.tools,
+      toolChoice: "auto",
+    });
+    const modelToolCalls = Array.isArray(planningResult.toolCalls) ? planningResult.toolCalls.slice(0, 3) : [];
+    const { uniqueToolCalls: plannedToolCalls, removedDuplicate } = removeRepeatedToolCalls(modelToolCalls, state.toolCalls);
+
+    if (plannedToolCalls.length) {
+      return {
+        plannedToolCalls,
+        plannedToolCallSource: "model",
+        toolExecutionMode: "model",
+        stoppedReason: "",
+        runtimeEvents: events,
+      };
+    }
+
+    // --- Deterministic fallback paths (only when model produced no tool calls) ---
+
     if (!isExternalMcpIntent) {
       const defectReporterLookup = buildDefectReporterLookupToolCall(body?.messages, state.toolCalls);
       if (defectReporterLookup) {
@@ -794,55 +826,30 @@ export function createLangGraphChatRuntime({
         ? resolveDeterministicQueryPlan({ analyticsContext: state.analyticsContext, actorScope: state.actorScope, selectedToolset })
         : null;
       if (deterministicPlan) {
-        const plannedToolCalls = canonicalToolCalls(deterministicPlan);
+        const detPlannedToolCalls = canonicalToolCalls(deterministicPlan);
         events.push(emit(config, {
           type: "deterministic-tool-plan-ready",
           threadId: state.threadId,
           planId: deterministicPlan.planId,
-          toolNames: plannedToolCalls.map((toolCall) => toolCall.function.name),
+          toolNames: detPlannedToolCalls.map((toolCall) => toolCall.function.name),
         }));
         return {
-          plannedToolCalls,
+          plannedToolCalls: detPlannedToolCalls,
           plannedToolCallSource: "canonical_query_plan",
           toolExecutionMode: "deterministic",
           stoppedReason: "",
-          toolCalls: plannedToolCalls,
-          toolConversationMessages: [{ role: "assistant", content: "", tool_calls: plannedToolCalls }],
+          toolCalls: detPlannedToolCalls,
+          toolConversationMessages: [{ role: "assistant", content: "", tool_calls: detPlannedToolCalls }],
           runtimeEvents: events,
         };
       }
     }
-    const planningResult = await requestToolCompletion({
-      messages: [
-        ...(Array.isArray(body?.messages) ? body.messages : []),
-        ...(state.toolConversationMessages || []).slice(Number(state.turnToolConversationStart || 0)),
-      ],
-      model: body?.model,
-      context: mergeContext(
-        state.baseContext,
-        buildToolPlanningContext(now()),
-        buildSelectedToolsetContext(selectedToolset),
-        buildSemanticContinuationContext(state.toolEvidence || [], state.actorScope),
-      ),
-      tools: selectedToolset.tools,
-      toolChoice: "auto",
-    });
-    const modelToolCalls = Array.isArray(planningResult.toolCalls) ? planningResult.toolCalls.slice(0, 3) : [];
-    const { uniqueToolCalls: plannedToolCalls, removedDuplicate } = removeRepeatedToolCalls(modelToolCalls, state.toolCalls);
-    if (!plannedToolCalls.length) {
-      return {
-        plannedToolCalls: [],
-        plannedToolCallSource: "",
-        stoppedReason: removedDuplicate ? "duplicate_tool_call" : "no_tool_calls",
-        toolExecutionMode: "model",
-        runtimeEvents: events,
-      };
-    }
+
     return {
-      plannedToolCalls,
-      plannedToolCallSource: "model",
+      plannedToolCalls: [],
+      plannedToolCallSource: "",
+      stoppedReason: removedDuplicate ? "duplicate_tool_call" : "no_tool_calls",
       toolExecutionMode: "model",
-      stoppedReason: "",
       runtimeEvents: events,
     };
   }

@@ -88,6 +88,20 @@ def get_octane_cookie_file_path() -> Path:
     return Path(configured) if configured else _repo_root() / "cookie.txt"
 
 
+def get_password_cache_file_path() -> Path:
+    """Encrypted password cache file for multi-user Octane sessions.
+
+    Stores per-user BMW SSO passwords (Fernet-encrypted with VIZION_SESSION_SECRET)
+    so the analytics-api process can survive restarts without forcing every user
+    to re-login. The file itself is ciphertext — but it is still a credential store,
+    so it must never be committed (already covered by ``backend/cache/`` gitignore).
+    """
+    configured = str(os.environ.get("VIZION_PASSWORD_CACHE_FILE", "")).strip()
+    if configured:
+        return Path(configured)
+    return _repo_root() / "backend" / "cache" / "password_cache.json"
+
+
 def get_octane_login_file_path() -> Path:
     configured = str(os.environ.get("VIZION_OCTANE_LOGIN_FILE", "")).strip()
     return Path(configured) if configured else _repo_root() / "login_info.txt"

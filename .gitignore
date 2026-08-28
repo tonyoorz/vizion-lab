@@ -40,6 +40,7 @@ graphify-out/
 cookie.txt
 cookie.txt.candidate
 login_info.txt
+.session_cache/
 vite.config.ts.timestamp-*
 database/hot/*.db-shm
 database/hot/*.db-wal

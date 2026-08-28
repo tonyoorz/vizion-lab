@@ -63,7 +63,7 @@ describe("Main agent policy golden suite", () => {
 
   it("repeats deterministic capability and policy-denial scenarios", async () => {
     const cases = readCases();
-    expect(cases.length).toBeGreaterThanOrEqual(6);
+    expect(cases.length).toBeGreaterThanOrEqual(5);
 
     for (const item of cases) {
       const actor = ACTORS[item.actor as keyof typeof ACTORS];

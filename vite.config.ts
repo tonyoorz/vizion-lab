@@ -7,7 +7,7 @@ import { componentTagger } from "lovable-tagger";
 export default defineConfig(({ mode }) => ({
   server: {
     host: "::",
-    allowedHosts: ["bscn1132585", "BSCN1132585"],
+    allowedHosts: ["bscn1132585", "BSCN1132585", "10.165.22.10"],
     port: 8080,
     strictPort: true,
     watch: {
@@ -18,6 +18,10 @@ export default defineConfig(({ mode }) => ({
     },
     proxy: {
       "/api/full-picture": {
+        target: "http://127.0.0.1:3003",
+        changeOrigin: true,
+      },
+      "/api/auth": {
         target: "http://127.0.0.1:3003",
         changeOrigin: true,
       },

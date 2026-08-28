@@ -98,7 +98,7 @@ const ANALYTICS_QUERY_PROPERTIES = {
   dataset: { type: "string", enum: ["defects"], description: "Analytics dataset. Phase 1 supports defects." },
   intent: { type: "string", enum: ["aggregate", "trend", "rank"], description: "Question shape. Phase 1 executes these through defect aggregate semantics." },
   metrics: { type: "array", items: { type: "string", enum: DEFECT_METRIC_VALUES } },
-  dimensions: { type: "array", items: { type: "string", enum: DEFECT_DIMENSION_VALUES }, maxItems: 1 },
+  dimensions: { type: "array", items: { type: "string", enum: DEFECT_DIMENSION_VALUES }, maxItems: 3 },
   derived_metrics: { type: "array", items: { type: "string", enum: ["delta", "growth_pct"] } },
   filters: { type: "object", properties: DEFECT_FILTER_PROPERTIES, additionalProperties: false },
   time: {
@@ -1178,7 +1178,7 @@ function formatSemanticContext(name, payload) {
   const metricLines = Object.entries(metrics).map(([metricId, value]) => `${metricId}: ${value}`);
   const data = Array.isArray(payload?.data) ? payload.data : [];
   const rows = data.length;
-  const rowLines = data.slice(0, 20).map((row) => JSON.stringify(row));
+  const rowLines = data.slice(0, 50).map((row) => JSON.stringify(row));
   const lineagePath = Array.isArray(payload?.lineage?.path) ? payload.lineage.path : [];
   const lineageText = lineagePath.map((relationship) => {
     const id = String(relationship?.id || "unknown");
@@ -1679,7 +1679,7 @@ function formatCoverageAidaStatusContext(url, payload) {
 
 function formatTestingTeamFvAnalysisContext(url, payload) {
   const rows = Array.isArray(payload?.rows) ? payload.rows : [];
-  const rowLines = rows.slice(0, 20).map((row) => (
+  const rowLines = rows.slice(0, 50).map((row) => (
     `FV ${row?.fv || "unknown"}: executions=${Number(row?.total_runs || 0)}, passed=${Number(row?.passed_runs || 0)}, linked_defects=${Number(row?.linked_defects || 0)}, pass_rate=${Number(row?.pass_rate || 0)}%, defect_discovery_rate=${Number(row?.defect_discovery_rate || 0)}%`
   ));
   return [
@@ -1829,7 +1829,7 @@ async function executeTestCaseContext(toolCall, { analyticsFetch, analyticsApiBa
 function formatDefectHighFrequencyContext(url, payload) {
   const rows = Array.isArray(payload?.frequency_rows) ? payload.frequency_rows : [];
   const overview = payload?.overview || {};
-  const rowLines = rows.slice(0, 8).map((row, index) => {
+  const rowLines = rows.slice(0, 30).map((row, index) => {
     const moduleName = String(row.module || "未归类 ECU").trim();
     return `${index + 1}. ${moduleName}: ${Number(row.count || 0)} (${row.severity || "severity unknown"})`;
   });
@@ -1873,7 +1873,7 @@ function formatDefectAggregateContext(payload, { toolName = "query_defect_aggreg
   const derivedMetrics = Array.isArray(payload?.applied_query?.derived_metrics) ? payload.applied_query.derived_metrics : [];
   const dimensions = Array.isArray(payload?.applied_query?.dimensions) ? payload.applied_query.dimensions : [];
   const dimension = dimensions[0] || "scope";
-  const rowLines = rows.slice(0, 8).map((row, index) => {
+  const rowLines = rows.slice(0, 30).map((row, index) => {
     const label = String(row[dimension] || row.business_module || row.assigned_ecu || row.project || "all_defects").trim();
     const comparisonText = [];
     if (derivedMetrics.length) {
@@ -2100,7 +2100,7 @@ function formatAnalyticsFallbackContext(url, payload) {
   const columns = Array.isArray(payload?.columns) ? payload.columns.map(String) : [];
   const metricColumns = columns.filter((column) => /count|rate|total|rows/i.test(column));
   const labelColumns = columns.filter((column) => !metricColumns.includes(column));
-  const rowLines = rows.slice(0, 8).map((row, index) => {
+  const rowLines = rows.slice(0, 30).map((row, index) => {
     const label = labelColumns.map((column) => String(row?.[column] ?? "").trim()).filter(Boolean).join(" / ") || "all_rows";
     const metricText = (metricColumns.length ? metricColumns : columns)
       .map((column) => `${column} ${row?.[column] ?? "N/A"}`)
@@ -2168,7 +2168,7 @@ function buildDetectedByAliasFilters(baseFilters) {
 
 function formatDefectRecordsContext(payload) {
   const rows = Array.isArray(payload?.rows) ? payload.rows : [];
-  const rowLines = rows.slice(0, 8).map((row, index) => {
+  const rowLines = rows.slice(0, 30).map((row, index) => {
     const ticketId = String(row.ticket_id || "N/A").trim();
     const ticketName = String(row.ticket_name || "Untitled").replace(/\s+/g, " ").trim();
     return `${index + 1}. ${ticketId}: ${ticketName}`;

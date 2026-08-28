@@ -99,13 +99,14 @@ If you need browser-based Octane cookie refresh, install Chromium once:
 npm run dev
 ```
 
-The dev command starts three local services:
+The dev command starts four local services:
 
 | Service | URL | Purpose |
 | --- | --- | --- |
 | Frontend | `http://127.0.0.1:8080` | dashboard UI |
 | Local Node API | `http://127.0.0.1:3004` | AI chat, duplicate search, transcription |
 | Analytics API | `http://127.0.0.1:3003` | full-picture and analytics endpoints |
+| Session Keeper | `http://127.0.0.1:8090` | multi-user BMW SSO session cache + keep-alive (Octane cookie) |
 
 ### 5. Verify Services
 
@@ -184,6 +185,29 @@ $env:VIZION_OCTANE_SHARED_SPACE_ID = "1002"
 $env:VIZION_OCTANE_WORKSPACE_ID = "2001"
 $env:VIZION_OCTANE_COOKIE_FILE = "C:\path\to\cookie.txt"
 ```
+
+### Multi-User Login (BMW SSO)
+
+The dashboard supports per-user BMW SSO login. Each user logs in with their BMW credentials on the Login page; the backend delegates SSO to the **Session Keeper** service (BmwLogin), which caches each user's Octane session cookie separately and pings it every 2 minutes to keep it alive.
+
+**How it works:**
+
+1. User logs in on the dashboard → backend sends credentials to Session Keeper.
+2. Keeper performs BMW SSO, stores the Octane cookie under `(tool_key, username)`, and keeps it alive.
+3. The backend encrypts the user's password (Fernet, key derived from `VIZION_SESSION_SECRET`) and persists it to `backend/cache/password_cache.json` (TTL 7 days). This file is gitignored.
+4. When the dashboard calls an Octane API, the backend retrieves the user's session from the keeper. If the cookie has expired, the backend re-sends the cached password to the keeper, which re-logs in and mints a fresh cookie — automatically, no user action required.
+
+**Environment variables:**
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `VIZION_SESSION_SECRET` | dev fallback key | Signs dashboard session tokens + encrypts the password cache file. **Must be set in production.** |
+| `VIZION_PASSWORD_CACHE_FILE` | `backend/cache/password_cache.json` | Encrypted password cache file path |
+| `SESSION_KEEPER_URL` | `http://localhost:8090` | Session Keeper service URL |
+| `VIZION_OCTANE_KEEPER_TOOL_KEY` | `octane` | Keeper tool key for Octane |
+| `SESSION_STORE_DIR` | `.session_cache` | Keeper session store directory |
+
+> **Security:** The password cache file stores Fernet-encrypted passwords. It is a credential store — never commit it. In production, `VIZION_SESSION_SECRET` must be set to a strong secret. If your security policy disallows persisting passwords to disk, do not use this feature (fall back to re-login on every process restart).
 
 ### AI Model Access
 
@@ -552,3 +576,80 @@ Set `DUPSEARCH_CHAT_ACCESS_CODE`, or set `DUPSEARCH_CHAT_API_KEY` and `DUPSEARCH
 .\.venv\Scripts\python.exe -m playwright install chromium
 .\.venv\Scripts\python.exe -m backend.analytics_cli refresh-octane-cookie --headless
 ```
+
+### Restart The Dev Stack
+
+Use this when a code change requires restarting services, or when a service is misbehaving.
+
+**Stop the stack** — in the terminal where `npm run dev` is running, press `Ctrl+C`. If that terminal is gone, kill the processes by port (paste this entire block into PowerShell):
+
+```powershell
+# Find and kill all dev stack processes listening on the four ports
+foreach ($port in 3003, 3004, 8080, 8090) {
+    $lines = netstat -ano | Select-String ":$port " | Select-String "LISTENING"
+    foreach ($line in $lines) {
+        $pid = ($line -split '\s+')[-1].Trim()
+        if ($pid -and $pid -ne '0') {
+            Write-Host "Killing PID $pid on port $port"
+            taskkill /PID $pid /F
+        }
+    }
+}
+
+# Also kill the dev.mjs parent process (Node)
+Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
+    Where-Object { $_.CommandLine -match 'dev\.mjs' } |
+    ForEach-Object { Write-Host "Killing dev.mjs PID $($_.ProcessId)"; Stop-Process -Id $_.ProcessId -Force }
+```
+
+Or, to just list the PIDs without killing (if you prefer to kill them manually):
+
+```powershell
+netstat -ano | Select-String ":3003 |:3004 |:8080 |:8090 " | Select-String "LISTENING"
+```
+
+**Restart:**
+
+```powershell
+npm run dev
+```
+
+The dev launcher automatically reuses a service if it is already running and healthy on its port. To force a clean restart of one service, kill its process first (so the port is free), then run `npm run dev` — only the missing service is relaunched.
+
+**Verify all four services are up:**
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:3003/health   # analytics-api → {"ok":true,...}
+Invoke-RestMethod http://127.0.0.1:8090/health   # session-keeper → {"status":"ok",...}
+Invoke-WebRequest  http://127.0.0.1:8080         # frontend → 200
+Invoke-WebRequest  http://127.0.0.1:3004/health  # local-api → 200
+```
+
+### Octane API Returns 401 Unauthorized
+
+This happens when the Octane SSO cookie used to call the API has expired and cannot be refreshed. The authentication chain is:
+
+```text
+dashboard login → backend caches password → Session Keeper holds Octane cookie
+                                                          ↓ (expires / keep-alive fails)
+                                       backend sends cached password → Keeper re-logs in → fresh cookie
+```
+
+**If the password cache is missing (e.g. after backend restart before this fix was applied):**
+
+1. Restart the dev stack (see above).
+2. Open `http://127.0.0.1:8080` and log in with your BMW credentials.
+3. The backend persists the encrypted password to `backend/cache/password_cache.json` (TTL 7 days). Future restarts reload it automatically — re-login is only needed every 7 days.
+
+**If the Session Keeper has no active sessions:**
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8090/health
+# active_sessions: 0 means no cached cookies — re-login on the dashboard
+```
+
+**If the Session Keeper service is down:**
+
+The backend falls back to the shared `cookie.txt` file. If that cookie is also expired, all Octane calls return 401. Fix by ensuring the Session Keeper is running (`npm run dev` starts it), then re-login on the dashboard.
+
+> **Note:** Octane is configured with weak auth (no second factor). Users requiring strong auth must extend the login form to pass `strong_auth=true`.

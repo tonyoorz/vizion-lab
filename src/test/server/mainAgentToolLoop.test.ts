@@ -7,24 +7,26 @@ import {
   selectMainAgentToolset,
   shouldPlanMainAgentTools,
 } from "../../../server/mainAgentToolPlanning.mjs";
+import { MAIN_AGENT_TOOLS } from "../../../server/mainAgentTools.mjs";
+
+const ALL_TOOL_NAMES = MAIN_AGENT_TOOLS.map((tool) => tool.function?.name).filter(Boolean);
 
 describe("main agent tool loop", () => {
   const toolNames = (tools: Array<{ function?: { name?: string } }>) => tools.map((tool) => tool.function?.name);
 
-  it("selects a compact semantic metric toolset for metric questions", () => {
+  it("returns the full governed tool set for metric questions", () => {
     const selected = selectMainAgentToolset([{ role: "user", content: "最近一周 DTSV 新增缺陷按 ECU Top 5" }]);
     const names = toolNames(selected.tools);
 
-    expect(selected.intent).toBe("metric_query");
-    expect(selected.confidence).toBeGreaterThanOrEqual(0.8);
-    expect(selected.reason).toContain("metric");
-    expect(selected.requiredSlots).toEqual(expect.arrayContaining(["metric", "time_window"]));
+    // Model-driven: all governed tools are available.
+    expect(selected.intent).toBe("general");
     expect(selected.toolNames).toEqual(names);
+    expect(names).toEqual(ALL_TOOL_NAMES);
+    // Key analytics tools are present.
     expect(names).toEqual(expect.arrayContaining(["resolve_business_terms", "search_analytics_filter_values", "query_analytics", "diagnose_analytics_empty", "query_semantic_metrics", "ask_clarification"]));
-    expect(names).not.toContain("search_duplicates");
-    expect(names).not.toContain("get_test_case_context");
-    expect(names).not.toContain("search_octane_fields");
-    expect(names.length).toBeLessThanOrEqual(8);
+    // All tools are available — model decides which to call.
+    expect(names).toContain("search_duplicates");
+    expect(names).toContain("get_test_case_context");
   });
 
   it("does not plan analytics tools for a vague testing-status question", () => {
@@ -39,32 +41,33 @@ describe("main agent tool loop", () => {
     });
   });
 
-  it("exposes testing coverage tools for coverage threshold questions", () => {
+  it("exposes all tools including testing coverage tools for coverage questions", () => {
     const selected = selectMainAgentToolset([{ role: "user", content: "覆盖率低于70%的模块有哪些？请按业务影响排序，并建议本周补测顺序" }]);
     const clarification = selectMainAgentToolset([{ role: "user", content: "测试执行覆盖率 — manual-run 的通过率/执行率（按模块/ECU 统计）" }]);
     const aidaCoverage = selectMainAgentToolset([{ role: "user", content: "测试执行覆盖率 AIDA 低于70% 关联缺陷数量 排序" }]);
 
-    expect(selected.intent).toBe("coverage_query");
+    // All return general intent with full tool set.
+    expect(selected.intent).toBe("general");
     expect(selected.toolNames).toContain("query_testing_coverage_project_status");
     expect(selected.toolNames).toContain("query_testing_coverage_aida_status");
-    expect(clarification.intent).toBe("coverage_query");
+    expect(clarification.intent).toBe("general");
     expect(clarification.toolNames).toContain("query_testing_coverage_project_status");
     expect(clarification.toolNames).toContain("query_testing_coverage_aida_status");
-    expect(aidaCoverage.intent).toBe("coverage_query");
+    expect(aidaCoverage.intent).toBe("general");
     expect(aidaCoverage.toolNames).toContain("query_testing_coverage_aida_status");
     expect(aidaCoverage.toolNames).toContain("query_analytics");
   });
 
-  it("routes internal test-group efficiency and defect discovery to FV coverage analysis", () => {
+  it("exposes FV coverage analysis in the full tool set for test-group efficiency", () => {
     const selected = selectMainAgentToolset([
       { role: "user", content: "对比 DTSV_China 内部测试小组的执行效率与缺陷发现率" },
     ]);
 
-    expect(selected.intent).toBe("coverage_query");
+    expect(selected.intent).toBe("general");
     expect(selected.toolNames).toContain("query_testing_team_fv_analysis");
   });
 
-  it("exposes governed fallback only for analytics toolsets", () => {
+  it("exposes all governed tools including fallback and filter search for analytics queries", () => {
     const analyticsQueries = [
       "最近一周 DTSV 新增缺陷按 ECU Top 5",
       "覆盖率低于70%的模块有哪些？",
@@ -74,37 +77,38 @@ describe("main agent tool loop", () => {
     ];
 
     for (const query of analyticsQueries) {
-      expect(selectMainAgentToolset([{ role: "user", content: query }]).toolNames, query).toContain("query_analytics_fallback");
-      expect(selectMainAgentToolset([{ role: "user", content: query }]).toolNames, query).toContain("search_analytics_filter_values");
+      const selected = selectMainAgentToolset([{ role: "user", content: query }]);
+      expect(selected.toolNames, query).toContain("query_analytics_fallback");
+      expect(selected.toolNames, query).toContain("search_analytics_filter_values");
     }
 
-    expect(selectMainAgentToolset([{ role: "user", content: "这个 camera black screen 缺陷是不是重复？" }]).toolNames).not.toContain("query_analytics_fallback");
-    expect(selectMainAgentToolset([{ role: "user", content: "这个 camera black screen 缺陷是不是重复？" }]).toolNames).not.toContain("search_analytics_filter_values");
-    expect(selectMainAgentToolset([{ role: "user", content: "Octane defect 字段能不能更新？" }]).toolNames).not.toContain("query_analytics_fallback");
-    expect(selectMainAgentToolset([{ role: "user", content: "Octane defect 字段能不能更新？" }]).toolNames).not.toContain("search_analytics_filter_values");
+    // All tools are also available for duplicate and action queries.
+    const dupSelected = selectMainAgentToolset([{ role: "user", content: "这个 camera black screen 缺陷是不是重复？" }]);
+    expect(dupSelected.toolNames).toContain("query_analytics_fallback");
+    expect(dupSelected.toolNames).toContain("search_analytics_filter_values");
+    const actionSelected = selectMainAgentToolset([{ role: "user", content: "Octane defect 字段能不能更新？" }]);
+    expect(actionSelected.toolNames).toContain("query_analytics_fallback");
+    expect(actionSelected.toolNames).toContain("search_analytics_filter_values");
   });
 
-  it("selects action and schema tools for write capability questions", () => {
+  it("selects all tools including action and schema tools for write capability questions", () => {
     const selected = selectMainAgentToolset([{ role: "user", content: "Octane defect 字段能不能更新？能不能删除缺陷单？" }]);
     const names = toolNames(selected.tools);
 
-    expect(selected.intent).toBe("action_capability");
-    expect(selected.policyHints).toEqual(expect.arrayContaining(["use_action_ontology", "block_disabled_or_blocked_actions"]));
+    expect(selected.intent).toBe("general");
     expect(names).toEqual(expect.arrayContaining(["get_ontology_catalog", "search_octane_fields", "ask_clarification"]));
-    expect(names).not.toContain("query_semantic_metrics");
-    expect(names).not.toContain("search_duplicates");
-    expect(names.length).toBeLessThan(7);
+    expect(names).toContain("query_semantic_metrics");
+    expect(names).toContain("search_duplicates");
   });
 
-  it("selects duplicate tools without exposing analytics query tools", () => {
+  it("selects all tools including duplicate tools for duplicate search", () => {
     const selected = selectMainAgentToolset([{ role: "user", content: "这个 camera black screen 缺陷是不是重复？" }]);
     const names = toolNames(selected.tools);
 
-    expect(selected.intent).toBe("duplicate_search");
+    expect(selected.intent).toBe("general");
     expect(names).toEqual(expect.arrayContaining(["search_duplicates", "ask_clarification"]));
-    expect(names).not.toContain("query_semantic_metrics");
-    expect(names).not.toContain("query_full_picture_module");
-    expect(names.length).toBeLessThan(6);
+    expect(names).toContain("query_semantic_metrics");
+    expect(names).toContain("query_full_picture_module");
   });
 
   it("plans tools only for likely dashboard metric questions", () => {
@@ -119,20 +123,20 @@ describe("main agent tool loop", () => {
     expect(shouldPlanMainAgentTools([{ role: "user", content: "请润色这段话" }])).toBe(false);
   });
 
-  it("routes weak person ticket and empty-result wording to analytics tools", () => {
+  it("routes weak person ticket and empty-result wording to general intent with analytics tools", () => {
     const personTicket = selectMainAgentToolset([{ role: "user", content: "Size Li 今年提票情况" }]);
     const emptyData = selectMainAgentToolset([{ role: "user", content: "这个数据为什么为空？" }]);
 
-    expect(personTicket.intent).toBe("metric_query");
+    expect(personTicket.intent).toBe("general");
     expect(personTicket.toolNames).toEqual(expect.arrayContaining(["resolve_business_terms", "query_analytics", "diagnose_analytics_empty"]));
-    expect(emptyData.intent).toBe("metric_query");
+    expect(emptyData.intent).toBe("general");
     expect(emptyData.toolNames).toEqual(expect.arrayContaining(["query_analytics", "diagnose_analytics_empty", "ask_clarification"]));
   });
 
-  it("routes a named defect reporter away from team-only semantic metrics", () => {
+  it("routes a named defect reporter to a narrowed defect-reporter toolset", () => {
     const selected = selectMainAgentToolset([{ role: "user", content: "xumiao 提票情况" }]);
 
-    expect(selected.intent).toBe("metric_query");
+    // Defect-reporter guard still narrows the toolset for named reporters.
     expect(selected.requiredSlots).toContain("defect_reporter");
     expect(selected.policyHints).toContain("resolve_defect_reporter_before_aggregate");
     expect(selected.toolNames).toEqual(expect.arrayContaining([
@@ -145,11 +149,11 @@ describe("main agent tool loop", () => {
     expect(selected.toolNames).not.toContain("query_dashboard_summary");
   });
 
-  it("routes broad risk questions to an ontology-backed assessment toolset", () => {
+  it("exposes all tools including ontology-backed assessment tools for risk questions", () => {
     const selected = selectMainAgentToolset([{ role: "user", content: "DTSV 当前风险怎么看？" }]);
 
     expect(shouldPlanMainAgentTools([{ role: "user", content: "DTSV 当前风险怎么看？" }])).toBe(true);
-    expect(selected.intent).toBe("business_risk_assessment");
+    expect(selected.intent).toBe("general");
     expect(selected.toolNames).toEqual(expect.arrayContaining([
       "get_ontology_catalog",
       "resolve_business_terms",
@@ -158,8 +162,6 @@ describe("main agent tool loop", () => {
       "query_defect_high_frequency_analysis",
       "ask_clarification",
     ]));
-    expect(selected.toolNames).not.toContain("query_defect_aggregate");
-    expect(selected.toolNames).not.toContain("search_duplicates");
   });
 
   it("runs planned tool calls and returns factual context", async () => {
@@ -206,7 +208,7 @@ describe("main agent tool loop", () => {
     expect(requestChatCompletion).toHaveBeenCalledTimes(2);
     expect(executeToolCall).toHaveBeenCalledWith(toolCalls[0], { runDuplicateBridge: "bridge" });
     expect(resolved.contextText).toContain("Result: 12 defects");
-    expect(resolved.selectedToolset.intent).toBe("metric_query");
+    expect(resolved.selectedToolset.intent).toBe("general");
     expect(resolved.toolCalls).toEqual(toolCalls);
     expect(resolved.toolEvents).toEqual([
       {
@@ -237,37 +239,40 @@ describe("main agent tool loop", () => {
     ]);
   });
 
-  it("blocks model-requested tools outside the selected toolset", async () => {
-    const disallowedToolCall = {
-      id: "bad-call",
+  it("allows all model-requested tools since the full tool set is exposed", async () => {
+    // With model-driven tool selection, search_duplicates is available for any query.
+    // The model is free to combine tools across what were previously isolated intents.
+    const allowedToolCall = {
+      id: "cross-domain-call",
       type: "function",
       function: {
         name: "search_duplicates",
         arguments: '{"query":"DTSV 最近一周新增缺陷"}',
       },
     };
-    const requestChatCompletion = vi.fn().mockResolvedValue({
-      content: "",
-      toolCalls: [disallowedToolCall],
-      answerModel: "deepseek-v4-flash",
+    const requestChatCompletion = vi
+      .fn()
+      .mockResolvedValueOnce({ content: "", toolCalls: [allowedToolCall], answerModel: "deepseek-v4-flash" })
+      .mockResolvedValueOnce({ content: "Done.", toolCalls: [], answerModel: "deepseek-v4-flash" });
+    const executeToolCall = vi.fn().mockResolvedValue({
+      toolMessage: {
+        role: "tool",
+        tool_call_id: "cross-domain-call",
+        name: "search_duplicates",
+        content: '{"ok":true}',
+      },
+      contextText: "# Main agent tool result\nTool: search_duplicates\nResult: no duplicates",
     });
-    const executeToolCall = vi.fn();
 
     const resolved = await resolveMainAgentToolContext({
-      messages: [{ role: "user", content: "DTSV 最近一周新增缺陷是多少？" }],
+      messages: [{ role: "user", content: "DTSV 最近一周新增缺陷是多少？顺便看看有没有重复的" }],
       requestChatCompletion,
       executeToolCall,
     });
 
-    expect(executeToolCall).not.toHaveBeenCalled();
-    expect(resolved.stoppedReason).toBe("tool_not_allowed");
-    expect(resolved.contextText).toContain("not allowed for intent metric_query");
-    expect(resolved.toolEvents).toContainEqual(expect.objectContaining({
-      type: "tool-blocked",
-      toolCallId: "bad-call",
-      toolName: "search_duplicates",
-      intent: "metric_query",
-    }));
+    expect(executeToolCall).toHaveBeenCalledWith(allowedToolCall, expect.anything());
+    expect(resolved.stoppedReason).not.toBe("tool_not_allowed");
+    expect(resolved.contextText).toContain("no duplicates");
   });
 
   it("blocks a team-only aggregate for a named defect reporter", async () => {
@@ -431,7 +436,7 @@ describe("main agent tool loop", () => {
       expect.objectContaining({
         tool: "query_semantic_metrics",
         toolCallId: "semantic-call",
-        intent: "metric_query",
+        intent: "general",
         ontologyVersion: "v1",
         schemaFingerprint: "f".repeat(64),
         sourceRevision: { revisionId: "snap-1", status: "pinned" },
@@ -649,7 +654,7 @@ describe("main agent tool loop", () => {
     });
 
     const requestArgs = requestChatCompletion.mock.calls[0][0];
-    expect(selected.intent).toBe("dashboard_fallback");
+    expect(selected.intent).toBe("general");
     expect(requestArgs.context).toContain("query_full_picture_module");
     expect(requestArgs.context).toContain("fallback");
     expect(requestArgs.context).toContain("query_analytics");
@@ -853,7 +858,6 @@ describe("main agent tool loop", () => {
 
     const requestArgs = requestChatCompletion.mock.calls[0][0];
     expect(requestArgs.context).toContain("query_analytics");
-    expect(requestArgs.context).not.toContain("query_defect_aggregate");
     expect(requestArgs.context).toContain("Top Issue");
     expect(requestArgs.context).toContain("comparison");
     expect(requestArgs.context).toContain("query_analytics as the canonical high-level tool");
@@ -863,8 +867,7 @@ describe("main agent tool loop", () => {
     expect(requestArgs.tools.map((tool: { function?: { name?: string } }) => tool.function?.name)).toContain(
       "diagnose_analytics_empty",
     );
-    expect(requestArgs.tools.map((tool: { function?: { name?: string } }) => tool.function?.name)).not.toContain(
-      "query_defect_aggregate",
-    );
+    // query_defect_aggregate is still in the full tool set (it's a governed tool).
+    // The model is told to prefer query_analytics, but both are available.
   });
 });
