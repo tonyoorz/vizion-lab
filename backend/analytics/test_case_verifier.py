@@ -217,3 +217,91 @@ def verify_test_case(
     feedback_parts = [f"- {c.name}: {c.evidence}" for c in failed]
     feedback = "Regeneration needed — the following criteria failed:\n" + "\n".join(feedback_parts)
     return VerificationResult(passed=False, criteria=criteria, feedback=feedback)
+
+
+def verify_reusable_pattern_test_case(
+    *,
+    defect: Mapping[str, Any],
+    pattern_id: str,
+    member_defect_ids: Sequence[str],
+    parameter_matrix: Mapping[str, Any],
+    description_html: str,
+    steps_text: str,
+) -> VerificationResult:
+    """Extend ordinary testcase checks for one reviewed, reusable defect pattern."""
+    base_result = verify_test_case(
+        defect=defect,
+        description_html=description_html,
+        steps_text=steps_text,
+    )
+    criteria = list(base_result.criteria)
+    defect_id = str(defect.get("defect_id") or "")
+    normalized_pattern_id = str(pattern_id or "").strip()
+    if normalized_pattern_id and normalized_pattern_id in description_html and defect_id in description_html:
+        criteria.append(
+            VerificationCriterion(
+                name="pattern_traceability",
+                passed=True,
+                evidence=f"description references pattern {normalized_pattern_id} and representative defect {defect_id}",
+            )
+        )
+    else:
+        criteria.append(
+            VerificationCriterion(
+                name="pattern_traceability",
+                passed=False,
+                evidence="description must reference the pattern ID and representative defect ID",
+            )
+        )
+
+    retained_member_ids = [str(member_id or "").strip() for member_id in member_defect_ids if str(member_id or "").strip()]
+    if retained_member_ids:
+        criteria.append(
+            VerificationCriterion(
+                name="pattern_member_mapping",
+                passed=True,
+                evidence=f"{len(retained_member_ids)} member defect IDs are retained in the reviewed mapping",
+            )
+        )
+    else:
+        criteria.append(
+            VerificationCriterion(
+                name="pattern_member_mapping",
+                passed=False,
+                evidence="reusable pattern requires at least one mapped member defect ID",
+            )
+        )
+
+    required_values: list[str] = []
+    for values in parameter_matrix.values():
+        if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+            continue
+        normalized_values = [str(value or "").strip() for value in values if str(value or "").strip()]
+        if len(set(normalized_values)) > 1:
+            required_values.extend(normalized_values)
+    combined_content = f"{description_html}\n{steps_text}"
+    missing_values = [value for value in required_values if value not in combined_content]
+    if not missing_values:
+        criteria.append(
+            VerificationCriterion(
+                name="pattern_parameterization",
+                passed=True,
+                evidence="all supplied multi-value parameters appear in the testcase draft",
+            )
+        )
+    else:
+        criteria.append(
+            VerificationCriterion(
+                name="pattern_parameterization",
+                passed=False,
+                evidence=f"missing parameter values: {', '.join(missing_values)}",
+            )
+        )
+
+    failed = [criterion for criterion in criteria if not criterion.passed]
+    if not failed:
+        return VerificationResult(passed=True, criteria=criteria, feedback="")
+    feedback = "Regeneration needed — the following criteria failed:\n" + "\n".join(
+        f"- {criterion.name}: {criterion.evidence}" for criterion in failed
+    )
+    return VerificationResult(passed=False, criteria=criteria, feedback=feedback)

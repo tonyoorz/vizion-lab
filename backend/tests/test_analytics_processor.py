@@ -2,7 +2,13 @@ import sqlite3
 import json
 
 from backend.analytics.ingest.source_store import OctaneSourceStore
-from backend.analytics.processor import backfill_defect_projects, run_processor_pipeline, sync_dimension_fields
+from backend.analytics.processor import (
+    backfill_defect_projects,
+    build_business_project_audit_payload,
+    infer_final_defect_project,
+    run_processor_pipeline,
+    sync_dimension_fields,
+)
 from backend.analytics.schema import ensure_schema
 
 
@@ -63,6 +69,146 @@ def test_sync_dimension_fields_backfills_defects_and_runs(tmp_path):
 
     assert defect == ("IDCEVO", "CN", "PU1", "Speech", "Tony", "DTSV_China", "NA5")
     assert run == ("IDCEVO", "Speech", "Tony", "DTSV_China", "NA5")
+
+
+def test_infer_final_defect_project_overrides_legacy_idcevo_with_consistent_technical_signals():
+    project = infer_final_defect_project(
+        {
+            "project": "IDCEVO",
+            "top_aida": "CarPlay [01.04.01.07.02]",
+            "product_areas": "CarPlay [01.04.01.07.02]",
+            "solution_cluster": "SDI",
+            "assigned_ecu": "HU-MGU_02_A",
+            "software_version": "BMWIDC23;mainline-24w49.5-1-nodex_IDC23_24w49.5-1-2;idc23",
+            "lead_model": "G48",
+            "ecu_to_modul": "CD",
+            "function_responsible": "",
+        },
+        mapped_project="IDCEVO",
+    )
+
+    assert project == "IDC"
+
+
+def test_infer_final_defect_project_overrides_legacy_idcevo_with_matching_feature_and_ecu():
+    project = infer_final_defect_project(
+        {
+            "project": "IDCEVO",
+            "top_aida": "Use Rear Seat Entertainment [01.04.01.09.02]",
+            "product_areas": "Use Rear Seat Entertainment [01.04.01.09.02]",
+            "solution_cluster": "PEnt Functions & UI",
+            "assigned_ecu": "RSE_EXBX-02",
+            "software_version": "",
+            "lead_model": "G70",
+            "ecu_to_modul": "CD",
+            "function_responsible": "",
+        },
+        mapped_project="IDCEVO",
+    )
+
+    assert project == "RSE"
+
+
+def test_infer_final_defect_project_keeps_known_project_with_single_ecu_signal():
+    project = infer_final_defect_project(
+        {
+            "project": "IDCEVO",
+            "top_aida": "",
+            "product_areas": "",
+            "solution_cluster": "",
+            "assigned_ecu": "HU-MGU_02_A",
+            "software_version": "",
+            "lead_model": "G48",
+            "ecu_to_modul": "CD",
+            "function_responsible": "",
+        }
+    )
+
+    assert project == "IDCEVO"
+
+
+def test_build_business_project_audit_payload_reports_corrections_and_unknowns(tmp_path):
+    db_path = tmp_path / "qgate_data.db"
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE octane_defects (
+                defect_id TEXT PRIMARY KEY,
+                project TEXT,
+                tproject TEXT,
+                top_aida TEXT,
+                product_areas TEXT,
+                solution_cluster TEXT,
+                assigned_ecu TEXT,
+                software_version TEXT,
+                lead_model TEXT,
+                ecu_to_modul TEXT,
+                function_responsible TEXT
+            )
+            """
+        )
+        conn.executemany(
+            """
+            INSERT INTO octane_defects(
+                defect_id, project, tproject, top_aida, product_areas, solution_cluster,
+                assigned_ecu, software_version, lead_model, ecu_to_modul, function_responsible
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "D-CORRECT",
+                    "IDCEVO",
+                    "",
+                    "CarPlay [01.04.01.07.02]",
+                    "CarPlay [01.04.01.07.02]",
+                    "SDI",
+                    "HU-MGU_02_A",
+                    "BMWIDC23;mainline-24w49.5-1-nodex_IDC23_24w49.5-1-2;idc23",
+                    "G48",
+                    "CD",
+                    "",
+                ),
+                (
+                    "D-UNKNOWN",
+                    "Unknown",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                ),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    payload = build_business_project_audit_payload(db_path)
+
+    assert payload["summary"]["total_rows"] == 2
+    assert payload["summary"]["final_tproject_counts"] == {"IDC": 1, "Unknown": 1}
+    assert payload["summary"]["correction_candidate_count"] == 1
+    assert payload["summary"]["unresolved_count"] == 1
+    assert payload["correction_candidates"] == [
+        {
+            "defect_id": "D-CORRECT",
+            "project": "IDCEVO",
+            "tproject": "",
+            "final_tproject": "IDC",
+            "classification_source": "technical_consensus",
+            "evidence_sources": ["assigned_ecu", "software_version"],
+            "top_aida": "CarPlay [01.04.01.07.02]",
+            "assigned_ecu": "HU-MGU_02_A",
+            "software_version": "BMWIDC23;mainline-24w49.5-1-nodex_IDC23_24w49.5-1-2;idc23",
+        }
+    ]
+    assert [row["defect_id"] for row in payload["unresolved_records"]] == ["D-UNKNOWN"]
 
 
 def test_run_processor_pipeline_backfills_defect_pu_from_first_use_sop(tmp_path):
@@ -201,7 +347,7 @@ def test_backfill_defect_projects_updates_unknown_rows_from_signals(tmp_path):
                 ("D-IDC", "Unknown", "Unknown", "", "HU-MGU_02_A", "", "G48"),
                 ("D-IDCEVO", "Unknown", "Unknown", "", "IDCEVO-25", "", "NA8"),
                 ("D-MGU", "Unknown", "Unknown", "", "", "BMWMGU22;MGU22_25w36.3-1-2;mgu22", ""),
-                ("D-RSU", "Unknown", "Unknown", "Use Rear Seat Entertainment [01.04.01.09.02]", "", "", ""),
+                ("D-RSE", "Unknown", "Unknown", "Use Rear Seat Entertainment [01.04.01.09.02]", "", "", ""),
                 ("D-APP", "Unknown", "Unknown", "", "APP_Mobile_2_0_Android_CN", "", ""),
                 ("D-LEAD", "Unknown", "Unknown", "", "", "", "U12"),
                 ("D-KEEP", "MGU", "MGU", "", "HU-MGU_02_A", "", "G48"),
@@ -229,7 +375,7 @@ def test_backfill_defect_projects_updates_unknown_rows_from_signals(tmp_path):
         "IDC": 2,
         "IDCEVO": 1,
         "MGU": 1,
-        "RSU": 1,
+        "RSE": 1,
         "Unknown": 1,
     }
     assert rows == [
@@ -239,9 +385,173 @@ def test_backfill_defect_projects_updates_unknown_rows_from_signals(tmp_path):
         ("D-KEEP", "MGU", "MGU"),
         ("D-LEAD", "IDC", "IDC"),
         ("D-MGU", "MGU", "MGU"),
-        ("D-RSU", "RSU", "RSU"),
+        ("D-RSE", "RSE", "RSE"),
         ("D-UNKNOWN", "Unknown", "Unknown"),
     ]
+
+
+def test_backfill_defect_projects_corrects_final_tproject_for_legacy_idcevo(tmp_path):
+    db_path = tmp_path / "qgate_data.db"
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE octane_defects (
+                defect_id TEXT PRIMARY KEY,
+                project TEXT,
+                tproject TEXT,
+                top_aida TEXT,
+                assigned_ecu TEXT,
+                software_version TEXT,
+                lead_model TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO octane_defects(
+                defect_id, project, tproject, top_aida, assigned_ecu, software_version, lead_model
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "D-LEGACY-IDCEVO",
+                "IDCEVO",
+                "",
+                "CarPlay [01.04.01.07.02]",
+                "HU-MGU_02_A",
+                "BMWIDC23;mainline-24w49.5-1-nodex_IDC23_24w49.5-1-2;idc23",
+                "G48",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    summary = backfill_defect_projects(db_path, apply=True, only_unknown=False)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT project, tproject FROM octane_defects WHERE defect_id = 'D-LEGACY-IDCEVO'"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert summary["updated_rows"] == 1
+    assert row == ("IDCEVO", "IDC")
+
+
+def test_backfill_defect_projects_adds_tproject_to_legacy_table_when_applying(tmp_path):
+    db_path = tmp_path / "qgate_data.db"
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE octane_defects (
+                defect_id TEXT PRIMARY KEY,
+                project TEXT,
+                top_aida TEXT,
+                assigned_ecu TEXT,
+                software_version TEXT,
+                lead_model TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO octane_defects(
+                defect_id, project, top_aida, assigned_ecu, software_version, lead_model
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "D-LEGACY-IDCEVO",
+                "IDCEVO",
+                "CarPlay [01.04.01.07.02]",
+                "HU-MGU_02_A",
+                "BMWIDC23;mainline-24w49.5-1-nodex_IDC23_24w49.5-1-2;idc23",
+                "G48",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    summary = backfill_defect_projects(db_path, apply=True, only_unknown=False)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(octane_defects)").fetchall()}
+        row = conn.execute(
+            "SELECT project, tproject FROM octane_defects WHERE defect_id = 'D-LEGACY-IDCEVO'"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert "tproject" in columns
+    assert summary["updated_rows"] == 1
+    assert row == ("IDCEVO", "IDC")
+
+
+def test_backfill_defect_projects_uses_aida_business_mapping(tmp_path):
+    db_path = tmp_path / "qgate_data.db"
+    asset_root = tmp_path / "assets"
+    asset_root.mkdir()
+    (asset_root / "top_aida_project_fv_mapping.json").write_text(
+        json.dumps(
+            [
+                {
+                    "top_aida": "Business Feature",
+                    "project": "IDCEVO",
+                    "fv": "",
+                    "fvp": "",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (asset_root / "vin_project_mapping.json").write_text("[]", encoding="utf-8")
+    (asset_root / "mr_nonstandard_platform_ids.json").write_text("[]", encoding="utf-8")
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE octane_defects (
+                defect_id TEXT PRIMARY KEY,
+                project TEXT,
+                tproject TEXT,
+                top_aida TEXT,
+                assigned_ecu TEXT,
+                software_version TEXT,
+                lead_model TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO octane_defects(
+                defect_id, project, tproject, top_aida, assigned_ecu, software_version, lead_model
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("D-AIDA-MAPPED", "Unknown", "", "Business Feature", "", "", ""),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    backfill_defect_projects(db_path, asset_root=asset_root, apply=True, only_unknown=False)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT project, tproject FROM octane_defects WHERE defect_id = 'D-AIDA-MAPPED'"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row == ("IDCEVO", "IDCEVO")
 
 
 def test_backfill_defect_projects_dry_run_does_not_modify_database(tmp_path):
@@ -533,20 +843,20 @@ def test_backfill_defect_projects_uses_conservative_software_version_tokens(tmp_
     finally:
         conn.close()
 
-    assert summary["updated_rows"] == 5
+    assert summary["updated_rows"] == 4
     assert summary["candidate_rows"] == 6
     assert summary["predicted_counts"] == {
         "IDC": 1,
-        "IDCEVO": 2,
+        "IDCEVO": 1,
         "MGU": 1,
-        "RSU": 1,
-        "Unknown": 1,
+        "RSE": 1,
+        "Unknown": 2,
     }
     assert rows == [
         ("D-AMB", "Unknown", "Unknown"),
         ("D-CDE", "IDCEVO", "IDCEVO"),
         ("D-IDC23", "IDC", "IDC"),
         ("D-MGU22", "MGU", "MGU"),
-        ("D-MIXED", "IDCEVO", "IDCEVO"),
-        ("D-RSE26", "RSU", "RSU"),
+        ("D-MIXED", "Unknown", "Unknown"),
+        ("D-RSE26", "RSE", "RSE"),
     ]

@@ -13,6 +13,7 @@ from backend.analytics.test_case_index import (
 )
 from backend.analytics.test_case_verifier import (
     VerificationResult,
+    verify_reusable_pattern_test_case,
     verify_test_case,
 )
 
@@ -164,3 +165,29 @@ def test_verify_feedback_lists_all_failures() -> None:
     assert result.passed is False
     assert "format_compliance" in result.feedback
     assert "Regeneration needed" in result.feedback
+
+
+def test_verify_reusable_pattern_requires_pattern_traceability_and_parameter_values() -> None:
+    description = (
+        "<html><body>Reference: defect D2804379; Pattern ID: pattern-rsu-1. "
+        "Parameter matrix: software versions 25-07 and 25-11; releases R-25-07 and R-25-11."
+        "</body></html>"
+    )
+    result = verify_reusable_pattern_test_case(
+        defect=_good_defect(),
+        pattern_id="pattern-rsu-1",
+        member_defect_ids=["2804379", "2804380"],
+        parameter_matrix={
+            "softwareVersions": ["25-07", "25-11"],
+            "detectedInReleases": ["R-25-07", "R-25-11"],
+        },
+        description_html=description,
+        steps_text=_good_steps(),
+    )
+
+    assert result.passed is True
+    assert {criterion.name for criterion in result.criteria} >= {
+        "pattern_traceability",
+        "pattern_member_mapping",
+        "pattern_parameterization",
+    }

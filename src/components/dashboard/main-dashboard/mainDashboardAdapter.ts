@@ -114,6 +114,7 @@ function adaptTicketRow(row: MainDashboardPayload["ticket_rows"][number]): MainD
     problemFinderTeam: row.problem_finder_team,
     classification: row.classification ?? null,
     problemSeverity: row.problem_severity ?? null,
+    topIssuePriority: row.top_issue_priority ?? null,
     group: row.group,
     phase: row.phase,
     requirement: normalizeRequirementDisplayOrder(row.requirement),

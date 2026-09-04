@@ -97,6 +97,7 @@ describe("adaptMainDashboardPayload", () => {
           aida: "Digital",
           classification: "Showstopper_Candidate",
           problem_severity: "05-unsatisfactory",
+          top_issue_priority: "Top_Issue_High_Prio",
           defect_category: "CN Speech",
           solution_cluster: "",
           pu: "PU1",
@@ -148,6 +149,7 @@ describe("adaptMainDashboardPayload", () => {
     expect(viewModel.ticketRows[0].creationTime).toBe("2026-03-18T09:30:00Z");
     expect(viewModel.ticketRows[0].classification).toBe("Showstopper_Candidate");
     expect(viewModel.ticketRows[0].problemSeverity).toBe("05-unsatisfactory");
+    expect(viewModel.ticketRows[0].topIssuePriority).toBe("Top_Issue_High_Prio");
     expect(viewModel.ticketRows[0].requirement).toBe("DOC_PreCon_A | DOC_PreCon_B");
     expect(viewModel.ticketRows[0].defectCategory).toBe("CN Speech");
     expect(viewModel.ticketRows[0].isResolvedForward).toBe(true);

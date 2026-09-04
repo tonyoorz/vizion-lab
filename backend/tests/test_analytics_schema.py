@@ -27,6 +27,10 @@ DEFECT_REQUIREMENT_COLUMNS = {
     "requirements_json",
 }
 
+DEFECT_FINAL_PROJECT_COLUMNS = {
+    "tproject",
+}
+
 
 def _seed_source_testing_coverage_tables(db_path: Path) -> None:
     conn = sqlite3.connect(db_path)
@@ -44,6 +48,8 @@ def _seed_source_testing_coverage_tables(db_path: Path) -> None:
                 team TEXT,
                 lead_model TEXT,
                 market TEXT,
+                solution_cluster TEXT,
+                defect_category TEXT,
                 raw_json TEXT,
                 fetched_at TEXT
             );
@@ -83,8 +89,9 @@ def _seed_source_testing_coverage_tables(db_path: Path) -> None:
         conn.execute(
             """
             INSERT INTO octane_defects(
-                defect_id, top_aida, test_week, project, pu, fv, fvp, team, lead_model, market, raw_json, fetched_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                defect_id, top_aida, test_week, project, pu, fv, fvp, team, lead_model, market,
+                solution_cluster, defect_category, raw_json, fetched_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 "D-HOT-CLI-1",
@@ -97,6 +104,8 @@ def _seed_source_testing_coverage_tables(db_path: Path) -> None:
                 "DTSV_China",
                 "NA5",
                 "CN",
+                "",
+                "",
                 "{}",
                 "2026-05-25T00:00:00Z",
             ),
@@ -183,6 +192,22 @@ def test_ensure_schema_includes_requirement_columns_on_defects(tmp_path):
         conn.close()
 
     assert DEFECT_REQUIREMENT_COLUMNS.issubset(columns)
+
+
+def test_ensure_schema_includes_final_tproject_column_on_defects(tmp_path):
+    db_path = tmp_path / "octane_data.db"
+
+    ensure_schema(db_path)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(octane_defects)").fetchall()
+        }
+    finally:
+        conn.close()
+
+    assert DEFECT_FINAL_PROJECT_COLUMNS.issubset(columns)
 
 
 def test_ensure_schema_includes_tap_manual_run_columns(tmp_path):
@@ -350,6 +375,121 @@ def test_cli_backfill_projects_command_updates_unknown_defect_projects(tmp_path)
     assert row == ("IDC", "IDC")
 
 
+def test_cli_backfill_projects_command_corrects_final_project_for_legacy_idcevo(tmp_path):
+    db_path = tmp_path / "qgate_data.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE octane_defects (
+                defect_id TEXT PRIMARY KEY,
+                project TEXT,
+                tproject TEXT,
+                top_aida TEXT,
+                assigned_ecu TEXT,
+                software_version TEXT,
+                lead_model TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO octane_defects(
+                defect_id, project, tproject, top_aida, assigned_ecu, software_version, lead_model
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "D-LEGACY-IDCEVO",
+                "IDCEVO",
+                "",
+                "CarPlay [01.04.01.07.02]",
+                "HU-MGU_02_A",
+                "BMWIDC23;mainline-24w49.5-1-nodex_IDC23_24w49.5-1-2;idc23",
+                "G48",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    exit_code = main(["backfill-projects", "--db-path", str(db_path), "--apply"])
+
+    assert exit_code == 0
+
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT project, tproject FROM octane_defects WHERE defect_id = 'D-LEGACY-IDCEVO'"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row == ("IDCEVO", "IDC")
+
+
+def test_cli_audit_business_projects_writes_report_without_mutating_source(tmp_path):
+    db_path = tmp_path / "qgate_data.db"
+    output_path = tmp_path / "business-project-audit.json"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE octane_defects (
+                defect_id TEXT PRIMARY KEY,
+                project TEXT,
+                tproject TEXT,
+                top_aida TEXT,
+                assigned_ecu TEXT,
+                software_version TEXT,
+                lead_model TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO octane_defects(
+                defect_id, project, tproject, top_aida, assigned_ecu, software_version, lead_model
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "D-LEGACY-IDCEVO",
+                "IDCEVO",
+                "",
+                "CarPlay [01.04.01.07.02]",
+                "HU-MGU_02_A",
+                "BMWIDC23;mainline-24w49.5-1-nodex_IDC23_24w49.5-1-2;idc23",
+                "G48",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    exit_code = main(
+        [
+            "audit-business-projects",
+            "--db-path",
+            str(db_path),
+            "--output-path",
+            str(output_path),
+        ]
+    )
+
+    assert exit_code == 0
+    report = json.loads(output_path.read_text(encoding="utf-8"))
+    assert report["summary"]["correction_candidate_count"] == 1
+
+    conn = sqlite3.connect(db_path)
+    try:
+        tproject = conn.execute(
+            "SELECT tproject FROM octane_defects WHERE defect_id = 'D-LEGACY-IDCEVO'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    assert tproject == ""
+
+
 def test_cli_refresh_full_picture_outcomes_command_populates_hot_db(tmp_path, monkeypatch, capsys):
     source_db = tmp_path / "qgate_data.db"
     hot_db = tmp_path / "database" / "hot" / "vizion_serving.db"
@@ -460,13 +600,13 @@ def test_cli_refresh_testing_coverage_hot_populates_hot_db(tmp_path, monkeypatch
         "IDCEVO",
         "2026-CW22",
         "Use Speech operation [01.04.02.01.01.05]",
-        "China Specific",
+        "Global",
     )
     assert snapshot_state == (1, "ready")
     assert active_pointer == (printed["snapshot_version"],)
 
 
-def test_cli_refresh_testing_coverage_hot_uses_tpmdashboard_feature_region_mapping(
+def test_cli_refresh_testing_coverage_hot_ignores_market_and_top_aida(
     tmp_path,
     monkeypatch,
     capsys,
@@ -504,7 +644,7 @@ def test_cli_refresh_testing_coverage_hot_uses_tpmdashboard_feature_region_mappi
     finally:
         conn.close()
 
-    assert row == ("China Specific",)
+    assert row == ("Global",)
 
 
 def test_cli_refresh_testing_coverage_hot_uses_tpmdashboard_project_and_finished_rules(

@@ -86,8 +86,8 @@ def update_entities():
          "labels": {"zh-CN": "顶级AIDA", "en-US": "Top AIDA"},
          "description": "缺陷关联的主要AIDA需求节点"},
         {"id": "tproject", "type": "string", "nullable": True, "sensitivity": "internal",
-         "labels": {"zh-CN": "测试项目", "en-US": "TProject"},
-         "description": "Octane中的测试项目字段"},
+            "labels": {"zh-CN": "最终业务项目", "en-US": "Final Business Project"},
+            "description": "本地处理后的最终缺陷业务项目分类，供Full Picture项目筛选使用"},
     ]
     added_defect = 0
     for p in missing_defect_props:

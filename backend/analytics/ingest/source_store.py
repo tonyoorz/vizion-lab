@@ -260,6 +260,12 @@ def _preserve_dimension(existing: sqlite3.Row | None, column_name: str, incoming
     return current if not _is_missing_dimension(current) else incoming
 
 
+def _preserve_processed_tproject(existing: sqlite3.Row | None) -> str:
+    if existing is None or "tproject" not in existing.keys():
+        return ""
+    return str(existing["tproject"] or "").strip()
+
+
 def _normalize_relation_subtype(value: object) -> str:
     return str(value or "").strip().lower()
 
@@ -666,7 +672,7 @@ class OctaneSourceStore:
                     _coalesce(_first_named_value(row.get("first_use_sop_of_function_udf")), _scalar_text(row.get("first_use_sop_of_function"))),
                     _scalar_text(row.get("tolerated_count")),
                     _scalar_text(row.get("reprel_changes")),
-                    _scalar_text(row.get("tproject")),
+                    _preserve_processed_tproject(existing),
                     _scalar_text(row.get("function2modul")),
                     _first_named_value(row.get("model_series")),
                     _coalesce(_first_named_value(row.get("problem_category_udf")), _first_named_value(row.get("defect_category"))),

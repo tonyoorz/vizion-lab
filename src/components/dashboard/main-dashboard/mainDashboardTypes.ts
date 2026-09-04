@@ -153,6 +153,7 @@ export type MainDashboardTicketRowPayload = {
   aida: string;
   classification?: string | null;
   problem_severity?: string | null;
+  top_issue_priority?: string | null;
   defect_category?: string | null;
   solution_cluster: string;
   pu: string;
@@ -242,6 +243,7 @@ export type MainDashboardTicketRow = {
   problemFinderTeam: string;
   classification?: string | null;
   problemSeverity?: string | null;
+  topIssuePriority?: string | null;
   group: string;
   phase: string;
   requirement?: string | null;

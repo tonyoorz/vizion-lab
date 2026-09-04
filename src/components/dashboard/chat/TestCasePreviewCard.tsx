@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { CheckCircle2, AlertCircle, Loader2, FlaskConical, ExternalLink } from "lucide-react";
-import type { TestCaseResult } from "./testCaseTypes";
+import { CheckCircle2, AlertCircle, Loader2, FlaskConical, ExternalLink, RefreshCw } from "lucide-react";
+import type { TestCaseResult, TestCaseVerification } from "./testCaseTypes";
 
 interface Props {
   result: TestCaseResult;
@@ -11,10 +11,54 @@ const OCTANE_BASE = "https://octane-prod.bmwgroup.net/ui/entity-navigation?p=100
 export default function TestCasePreviewCard({ result }: Props) {
   const DEFAULT_OWNER_ID = "138017";
 
+  // Editable copies of the generated content — user can modify before committing.
+  const [editedName, setEditedName] = useState(result.name);
+  const [editedDescription, setEditedDescription] = useState(result.descriptionHtml);
+  const [editedSteps, setEditedSteps] = useState(result.stepsText);
+  const [descMode, setDescMode] = useState<"preview" | "edit">("preview");
+
+  // Verification state — refreshed when user clicks "重新校验" after editing.
+  const [verification, setVerification] = useState<TestCaseVerification>(result.verification);
+  const [verifyState, setVerifyState] = useState<"idle" | "verifying" | "done">("idle");
+  const [verifyError, setVerifyError] = useState("");
+
   const [commitState, setCommitState] = useState<"idle" | "submitting" | "success" | "error">("idle");
   const [commitError, setCommitError] = useState("");
   const [createdUrl, setCreatedUrl] = useState("");
   const [featureId, setFeatureId] = useState("");
+
+  const handleReverify = async () => {
+    setVerifyState("verifying");
+    setVerifyError("");
+    try {
+      const defectInfo = {
+        defect_id: result.defectId,
+        name: result.defectName,
+        severity: result.defectSeverity,
+        software_version: result.defectSoftwareVersion || "",
+        assigned_ecu: result.defectAssignedEcu || "",
+      };
+      const response = await fetch("/api/create-testcase/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          defect_info: defectInfo,
+          description_html: editedDescription,
+          steps_text: editedSteps,
+        }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (response.ok && payload.success) {
+        setVerification(payload.verification);
+      } else {
+        setVerifyError(payload.error || "校验失败");
+      }
+    } catch (err) {
+      setVerifyError(String(err?.message || err));
+    } finally {
+      setVerifyState("done");
+    }
+  };
 
   const handleCommit = async () => {
     setCommitState("submitting");
@@ -25,9 +69,9 @@ export default function TestCasePreviewCard({ result }: Props) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           test_case_data: {
-            name: result.name,
-            description_html: result.descriptionHtml,
-            steps_text: result.stepsText,
+            name: editedName,
+            description_html: editedDescription,
+            steps_text: editedSteps,
             defectId: result.defectId,
             owner_workspace_user_id: DEFAULT_OWNER_ID,
           },
@@ -49,8 +93,6 @@ export default function TestCasePreviewCard({ result }: Props) {
     }
   };
 
-  const steps = result.stepsText.split("\n").filter((l) => l.trim());
-
   return (
     <div className="mt-3 rounded-xl border border-border bg-card overflow-hidden">
       {/* header */}
@@ -63,7 +105,7 @@ export default function TestCasePreviewCard({ result }: Props) {
       </div>
 
       <div className="space-y-4 p-4">
-        {/* defect info */}
+        {/* defect info (read-only) */}
         <div className="space-y-1">
           <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">缺陷信息</p>
           <div className="flex flex-wrap gap-2 text-xs">
@@ -76,13 +118,18 @@ export default function TestCasePreviewCard({ result }: Props) {
           <p className="text-sm text-foreground mt-1">{result.defectName}</p>
         </div>
 
-        {/* test case name */}
+        {/* test case name (editable) */}
         <div className="space-y-1">
           <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">用例名称</p>
-          <p className="text-sm font-medium text-foreground">{result.name}</p>
+          <input
+            type="text"
+            value={editedName}
+            onChange={(e) => setEditedName(e.target.value)}
+            className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm font-medium text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+          />
         </div>
 
-        {/* similar cases (RAG) */}
+        {/* similar cases (RAG, read-only) */}
         {result.similarCases.length > 0 && (
           <div className="space-y-1">
             <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
@@ -106,40 +153,70 @@ export default function TestCasePreviewCard({ result }: Props) {
           </div>
         )}
 
-        {/* description preview */}
+        {/* description (editable, preview/edit toggle) */}
         <div className="space-y-1">
-          <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">描述 (Description)</p>
-          <div
-            className="rounded-lg border border-border bg-muted/20 p-3 text-xs prose prose-sm max-w-none"
-            dangerouslySetInnerHTML={{ __html: result.descriptionHtml }}
-          />
+          <div className="flex items-center gap-2">
+            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">描述 (Description)</p>
+            <button
+              onClick={() => setDescMode(descMode === "preview" ? "edit" : "preview")}
+              className="ml-auto text-xs text-blue-600 hover:underline"
+            >
+              {descMode === "preview" ? "编辑" : "预览"}
+            </button>
+          </div>
+          {descMode === "preview" ? (
+            <div
+              className="rounded-lg border border-border bg-muted/20 p-3 text-xs prose prose-sm max-w-none"
+              dangerouslySetInnerHTML={{ __html: editedDescription }}
+            />
+          ) : (
+            <textarea
+              value={editedDescription}
+              onChange={(e) => setEditedDescription(e.target.value)}
+              className="w-full h-64 rounded-lg border border-border bg-background p-3 text-xs font-mono text-foreground focus:outline-none focus:ring-1 focus:ring-primary resize-y"
+              placeholder="HTML 源码 — 编辑后切回预览查看渲染效果"
+            />
+          )}
         </div>
 
-        {/* steps preview */}
+        {/* steps (editable textarea) */}
         <div className="space-y-1">
           <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">步骤 (Steps)</p>
-          <pre className="rounded-lg border border-border bg-muted/20 p-3 text-xs overflow-x-auto whitespace-pre-wrap font-mono">
-            {steps.map((line, i) => {
-              const isPrecon = line.includes("[PreCon]");
-              const isCheckpoint = line.includes("?");
-              const color = isPrecon ? "text-blue-600" : isCheckpoint ? "text-green-600" : "text-foreground";
-              return (
-                <span key={i} className={color}>
-                  {line}
-                  {"\n"}
-                </span>
-              );
-            })}
-          </pre>
+          <textarea
+            value={editedSteps}
+            onChange={(e) => setEditedSteps(e.target.value)}
+            className="w-full h-48 rounded-lg border border-border bg-background p-3 text-xs font-mono text-foreground focus:outline-none focus:ring-1 focus:ring-primary resize-y whitespace-pre-wrap"
+            placeholder={"每行一步：\n- [PreCon] 前置条件\n- 操作步骤\n- ? 预期结果"}
+          />
+          <p className="text-[10px] text-muted-foreground">
+            格式：<span className="text-blue-600">- [PreCon]</span> 前置条件 · <span className="text-foreground">-</span> 操作步骤 · <span className="text-green-600">- ?</span> 预期结果
+          </p>
         </div>
 
-        {/* verification badges */}
+        {/* verification badges + re-verify button */}
         <div className="space-y-1">
-          <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            质量验证 ({result.verification.passed ? "全部通过" : `${result.verification.criteria.filter((c) => c.passed).length}/${result.verification.criteria.length} 通过`})
-          </p>
+          <div className="flex items-center gap-2">
+            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              质量验证 ({verification.passed ? "全部通过" : `${verification.criteria.filter((c) => c.passed).length}/${verification.criteria.length} 通过`})
+            </p>
+            <button
+              onClick={handleReverify}
+              disabled={verifyState === "verifying"}
+              className="ml-auto inline-flex items-center gap-1 text-xs text-blue-600 hover:underline disabled:opacity-50"
+            >
+              {verifyState === "verifying" ? (
+                <>
+                  <Loader2 className="h-3 w-3 animate-spin" /> 校验中…
+                </>
+              ) : (
+                <>
+                  <RefreshCw className="h-3 w-3" /> 重新校验
+                </>
+              )}
+            </button>
+          </div>
           <div className="flex flex-wrap gap-1.5">
-            {result.verification.criteria.map((c) => (
+            {verification.criteria.map((c) => (
               <span
                 key={c.name}
                 title={c.evidence}
@@ -154,6 +231,12 @@ export default function TestCasePreviewCard({ result }: Props) {
               </span>
             ))}
           </div>
+          {verifyError && (
+            <p className="text-xs text-red-600 dark:text-red-400">{verifyError}</p>
+          )}
+          {verifyState === "done" && !verifyError && (
+            <p className="text-[10px] text-muted-foreground">已重新校验编辑后的内容</p>
+          )}
         </div>
 
         {/* commit section */}

@@ -5,6 +5,7 @@ import pytest
 
 from backend.analytics import config as analytics_config
 from backend.analytics.api import app
+from backend.analytics.china_scope import CHINA_SCOPE_RULE_VERSION
 from backend.analytics.schema import ensure_schema
 from backend.analytics.testing_coverage_hot import refresh_materialized_testing_coverage
 
@@ -41,6 +42,8 @@ def _seed_source_testing_tables(db_path):
                 team TEXT,
                 lead_model TEXT,
                 market TEXT,
+                solution_cluster TEXT,
+                defect_category TEXT,
                 raw_json TEXT,
                 fetched_at TEXT
             );
@@ -76,8 +79,8 @@ def _seed_source_testing_tables(db_path):
             """
             INSERT INTO octane_defects(
                 defect_id, top_aida, test_week, project, pu, fv, fvp,
-                team, lead_model, market, raw_json, fetched_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                team, lead_model, market, solution_cluster, defect_category, raw_json, fetched_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 "D-1",
@@ -90,6 +93,8 @@ def _seed_source_testing_tables(db_path):
                 "DTSV_China",
                 "NA5",
                 "CN",
+                "",
+                "",
                 "{}",
                 "2026-05-25T00:00:00Z",
             ),
@@ -149,6 +154,7 @@ def _publish_testing_coverage_snapshot(source_db_path, database_root):
 
 
 def _seed_hot_testing_coverage_rows(db_path):
+    snapshot_version = f"testing-coverage-{CHINA_SCOPE_RULE_VERSION}-hot-1"
     conn = sqlite3.connect(db_path)
     try:
         conn.executescript(
@@ -197,7 +203,7 @@ def _seed_hot_testing_coverage_rows(db_path):
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                "testing-snapshot-hot-1",
+                snapshot_version,
                 "MR-HOT-1",
                 "D-HOT-1",
                 "T-HOT-1",
@@ -223,7 +229,7 @@ def _seed_hot_testing_coverage_rows(db_path):
             ) VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
-                "testing-snapshot-hot-1",
+                snapshot_version,
                 "sig-hot",
                 1,
                 "ready",
@@ -236,7 +242,7 @@ def _seed_hot_testing_coverage_rows(db_path):
             INSERT INTO testing_coverage_snapshot_pointer(pointer_name, snapshot_version)
             VALUES (?, ?)
             """,
-            ("active", "testing-snapshot-hot-1"),
+            ("active", snapshot_version),
         )
         conn.commit()
     finally:
@@ -363,7 +369,7 @@ def test_testing_coverage_analysis_returns_503_when_hot_rows_exist_without_activ
     }
 
 
-def test_testing_coverage_analysis_uses_tpmdashboard_feature_region_mapping(
+def test_testing_coverage_analysis_ignores_market_and_top_aida_for_feature_region(
     tmp_path,
     monkeypatch,
 ):
@@ -371,16 +377,6 @@ def test_testing_coverage_analysis_uses_tpmdashboard_feature_region_mapping(
     source_db_path = database_root / "source" / "qgate_raw.db"
     source_db_path.parent.mkdir(parents=True, exist_ok=True)
     _seed_source_testing_tables(source_db_path)
-
-    conn = sqlite3.connect(source_db_path)
-    try:
-        conn.execute(
-            "UPDATE octane_defects SET market = ? WHERE defect_id = ?",
-            ("DE", "D-1"),
-        )
-        conn.commit()
-    finally:
-        conn.close()
 
     _publish_testing_coverage_snapshot(source_db_path, database_root)
 
@@ -393,7 +389,7 @@ def test_testing_coverage_analysis_uses_tpmdashboard_feature_region_mapping(
     response = client.get("/api/testing/coverage-analysis/filters")
 
     assert response.status_code == 200
-    assert response.json()["feature_regions"] == ["China Specific"]
+    assert response.json()["feature_regions"] == ["Global"]
 
 
 def test_testing_coverage_analysis_falls_back_from_legacy_columns_when_feature_region_values_are_blank(
@@ -419,6 +415,8 @@ def test_testing_coverage_analysis_falls_back_from_legacy_columns_when_feature_r
                 team TEXT,
                 lead_model TEXT,
                 market TEXT,
+                solution_cluster TEXT,
+                defect_category TEXT,
                 raw_json TEXT,
                 fetched_at TEXT
             );
@@ -462,8 +460,8 @@ def test_testing_coverage_analysis_falls_back_from_legacy_columns_when_feature_r
             """
             INSERT INTO octane_defects(
                 defect_id, top_aida, test_week, project, pu, fv, fvp,
-                team, lead_model, market, raw_json, fetched_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                team, lead_model, market, solution_cluster, defect_category, raw_json, fetched_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 "D-LEGACY-BLANK-1",
@@ -476,6 +474,8 @@ def test_testing_coverage_analysis_falls_back_from_legacy_columns_when_feature_r
                 "DTSV_China",
                 "NA5",
                 "CN",
+                "",
+                "CN Speech",
                 "{}",
                 "2026-05-25T00:00:00Z",
             ),
@@ -989,7 +989,7 @@ def test_testing_coverage_analysis_source_queries_prefer_manual_run_dimensions_w
         "pus": ["ICV"],
         "aidas": ["Use Speech operation [01.04.02.01.01.05]"],
         "statuses": ["Passed"],
-        "feature_regions": ["China Specific"],
+        "feature_regions": ["Global"],
         "fvps": ["Voice Experience"],
         "fvs": ["Speech"],
     }
@@ -1136,7 +1136,7 @@ def test_testing_coverage_analysis_endpoints_return_grouped_data(tmp_path, monke
         "pus": ["PU1", "PU2"],
         "aidas": ["AIDA-1", "AIDA-2"],
         "statuses": ["Failed", "Passed"],
-        "feature_regions": ["China", "Global"],
+        "feature_regions": ["Global"],
         "fvps": ["Entertainment", "Voice"],
         "fvs": ["Media", "Speech"],
     }
@@ -1555,7 +1555,7 @@ def test_testing_coverage_analysis_repeated_query_params_preserve_commas_in_valu
 
     response = client.get(
         "/api/testing/coverage-analysis/project-status",
-        params=[("projects", "Audio,Platform"), ("feature_regions", "North,America")],
+        params=[("projects", "Audio,Platform"), ("feature_regions", "Global")],
     )
 
     assert response.status_code == 200

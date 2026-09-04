@@ -204,6 +204,220 @@ describe("AIChat duplicate search integration", () => {
     expect(screen.getByText("最可能的重复问题是 DTV-1024，请优先复核。")).toBeInTheDocument();
   });
 
+  it("discovers reusable testcase patterns from the selected topic-filter defects without generating drafts", async () => {
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/create-testcase/analyze-intent") {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ success: true, mode: "filter_defects", keyword: "RSU" }),
+        });
+      }
+      if (url === "/api/create-testcase/filter-defects") {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            success: true,
+            total: 1,
+            candidates: [{
+              defectId: "2113731",
+              name: "RSU activation timeout",
+              project: "RSU",
+              phase: "05-In Testing",
+              statusPhase: "05-In Testing",
+              hasLinkedTest: false,
+            }],
+            summary: { matched_total: 1, linked_excluded: 0, without_linked_testcase: 1 },
+          }),
+        });
+      }
+      if (url === "/api/create-testcase/discover-patterns") {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            success: true,
+            sourceSnapshot: {
+              runId: "pattern-discovery-abc123",
+              sourceFingerprint: "abc123",
+              generatedAt: "2026-09-01T00:00:00Z",
+              keyword: "RSU",
+              project: "RSU",
+              matchedTotal: 1,
+              linkedExcluded: 0,
+              selectedCount: 1,
+              snapshotPath: "exports/testcases/pattern-discovery/pattern-discovery-abc123.json",
+            },
+            similarityThreshold: 0.84,
+            summary: {
+              source_count: 1,
+              eligible_count: 1,
+              needs_evidence_count: 0,
+              pattern_count: 1,
+              clustered_member_count: 1,
+              singleton_pattern_count: 1,
+              estimated_llm_generations_avoided: 0,
+            },
+            patterns: [{
+              patternId: "pattern-1",
+              confidence: 1,
+              requiresManualReview: false,
+              context: { project: "RSU", assignedEcu: "RSE", leadModel: "G68" },
+              representative: {
+                defectId: "2113731",
+                name: "RSU activation timeout",
+                project: "RSU",
+                assignedEcu: "RSE",
+                leadModel: "G68",
+                softwareVersion: "25-07",
+                detectedInRelease: "R-25-07",
+                similarityToRepresentative: 1,
+              },
+              members: [{
+                defectId: "2113731",
+                name: "RSU activation timeout",
+                project: "RSU",
+                assignedEcu: "RSE",
+                leadModel: "G68",
+                softwareVersion: "25-07",
+                detectedInRelease: "R-25-07",
+                similarityToRepresentative: 1,
+              }],
+              parameterMatrix: { softwareVersions: ["25-07"], detectedInReleases: ["R-25-07"] },
+              evidencePreview: "Activation times out after the restart.",
+            }],
+            needsEvidence: [],
+          }),
+        });
+      }
+      if (url === "/api/create-testcase/audit-pattern-coverage") {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            success: true,
+            sourceSnapshot: {
+              runId: "pattern-discovery-abc123",
+              sourceFingerprint: "abc123",
+              generatedAt: "2026-09-01T00:00:00Z",
+              keyword: "RSU",
+              project: "RSU",
+              matchedTotal: 1,
+              linkedExcluded: 0,
+              selectedCount: 1,
+              snapshotPath: "exports/testcases/pattern-discovery/pattern-discovery-abc123.json",
+            },
+            audits: [{
+              patternId: "pattern-1",
+              directLinks: [],
+              semanticCandidates: [{
+                testId: "900",
+                name: "Similar RSU activation testcase",
+                score: 0.91,
+                source: "semantic",
+              }],
+              recommendedDisposition: "review_existing_testcase",
+            }],
+            summary: {
+              audited_pattern_count: 1,
+              direct_linked_member_count: 0,
+              semantic_candidate_pattern_count: 1,
+              review_existing_testcase_count: 1,
+              review_generate_reusable_testcase_count: 0,
+              requires_manual_review_count: 0,
+            },
+            auditPath: "exports/testcases/pattern-discovery/pattern-discovery-abc123-coverage-audit.json",
+          }),
+        });
+      }
+      if (url === "/api/create-testcase/generate-pattern-drafts") {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            success: true,
+            sourceSnapshot: {
+              runId: "pattern-discovery-abc123",
+              sourceFingerprint: "abc123",
+              generatedAt: "2026-09-01T00:00:00Z",
+              keyword: "RSU",
+              project: "RSU",
+              matchedTotal: 1,
+              linkedExcluded: 0,
+              selectedCount: 1,
+              snapshotPath: "exports/testcases/pattern-discovery/pattern-discovery-abc123.json",
+            },
+            results: [{
+              patternId: "pattern-1",
+              representativeDefectId: "2113731",
+              memberDefectIds: ["2113731"],
+              memberCount: 1,
+              commonAnchorTerms: ["activation", "reboot"],
+              parameterMatrix: { softwareVersions: ["25-07"], detectedInReleases: ["R-25-07"] },
+              name: "[RSU] Regression - activation after reboot",
+              descriptionHtml: "<p>Pattern ID: pattern-1</p>",
+              stepsText: "- [PreCon] RSU ready\n- Start activation\n- ? Completes within 30 seconds",
+              verification: { passed: true, criteria: [], feedback: "" },
+              similarCases: [],
+              generatedAt: "2026-09-01T00:00:00Z",
+              error: null,
+            }],
+            summary: { total: 1, succeeded: 1, failed: 0 },
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({ success: true }) });
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+    render(<AIChat moduleKey="ai-chat" moduleLabel="AI Chat" />);
+
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "/创建测试用例 RSU 相关的所有缺陷" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+
+    const discoverButton = await screen.findByRole("button", { name: "发现复用模式 (1)" });
+    fireEvent.click(discoverButton);
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/create-testcase/discover-patterns",
+        expect.objectContaining({ method: "POST" }),
+      );
+    });
+    const request = fetchMock.mock.calls.find(([url]) => url === "/api/create-testcase/discover-patterns");
+    expect(JSON.parse(String(request?.[1]?.body))).toEqual({ keyword: "RSU", defect_ids: ["2113731"] });
+    expect(await screen.findByRole("region", { name: "可复用 testcase 模式" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("checkbox", { name: "选择模式 pattern-1" }));
+    fireEvent.click(screen.getByRole("button", { name: "检查已有 testcase 候选 (1)" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/create-testcase/audit-pattern-coverage",
+        expect.objectContaining({ method: "POST" }),
+      );
+    });
+    const auditRequest = fetchMock.mock.calls.find(([url]) => url === "/api/create-testcase/audit-pattern-coverage");
+    expect(JSON.parse(String(auditRequest?.[1]?.body))).toEqual({
+      run_id: "pattern-discovery-abc123",
+      pattern_ids: ["pattern-1"],
+    });
+    fireEvent.click(screen.getByRole("button", { name: "生成参数化草稿 (1)" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/create-testcase/generate-pattern-drafts",
+        expect.objectContaining({ method: "POST" }),
+      );
+    });
+    const generationRequest = fetchMock.mock.calls.find(([url]) => url === "/api/create-testcase/generate-pattern-drafts");
+    expect(JSON.parse(String(generationRequest?.[1]?.body))).toEqual({
+      run_id: "pattern-discovery-abc123",
+      pattern_ids: ["pattern-1"],
+      skip_export: true,
+    });
+    expect(await screen.findByRole("region", { name: "参数化 testcase 草稿" })).toBeInTheDocument();
+    expect(screen.queryByText("正在批量生成 1 个测试用例")).not.toBeInTheDocument();
+  });
+
   it("uses a concise local duplicate fallback summary when the API omits summary text", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,

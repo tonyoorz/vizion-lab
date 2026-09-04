@@ -167,7 +167,6 @@ class FullPictureDashboardQuery:
     projects: tuple[str, ...] = ()
     assigned_ecus: tuple[str, ...] = ()
     problem_finder_teams: tuple[str, ...] = ()
-    detected_by: tuple[str, ...] = ()
     aidas: tuple[str, ...] = ()
     phases: tuple[str, ...] = ()
     solution_clusters: tuple[str, ...] = ()
@@ -211,7 +210,6 @@ def normalize_query(**kwargs: Any) -> FullPictureDashboardQuery:
         projects=_normalize_multi_value(kwargs.get("projects")),
         assigned_ecus=_normalize_multi_value(kwargs.get("assigned_ecus")),
         problem_finder_teams=_normalize_multi_value(kwargs.get("problem_finder_teams")),
-        detected_by=_normalize_multi_value(kwargs.get("detected_by")),
         aidas=_normalize_multi_value(kwargs.get("aidas")),
         phases=_normalize_multi_value(kwargs.get("phases")),
         solution_clusters=_normalize_multi_value(kwargs.get("solution_clusters")),
@@ -509,15 +507,6 @@ def _extract_reference_names(value: Any) -> list[str]:
     return [name] if name else []
 
 
-def _extract_detected_by(raw_payload: dict[str, Any]) -> str:
-    return _first_non_empty(
-        _extract_reference_name(raw_payload.get("detected_by")),
-        _extract_reference_name(raw_payload.get("author")),
-        _extract_reference_name(raw_payload.get("reporter")),
-        _extract_reference_name(raw_payload.get("creator")),
-    )
-
-
 def _parse_string_list(raw_value: Any) -> list[str]:
     if isinstance(raw_value, list):
         return [str(item).strip() for item in raw_value if str(item or "").strip()]
@@ -563,7 +552,6 @@ def _matches_query_filters(row: dict[str, Any], query: FullPictureDashboardQuery
         (query.projects, row.get("project")),
         (query.assigned_ecus, row.get("assigned_ecu")),
         (query.problem_finder_teams, row.get("problem_finder_team")),
-        (query.detected_by, row.get("detected_by")),
         (query.aidas, row.get("aida")),
         (query.phases, row.get("phase")),
         (query.solution_clusters, row.get("solution_cluster")),
@@ -600,7 +588,6 @@ def _load_local_analytics_defect_rows(
             "status": _first_non_empty(raw_payload.get("status_phase"), raw_payload.get("phase")),
             "creation_time": _first_non_empty(raw_payload.get("creation_time")),
             "problem_finder_team": _first_non_empty(raw_payload.get("problem_finder_team"), row["team"]),
-            "detected_by": _extract_detected_by(raw_payload),
             "ticket_date": _first_non_empty(
                 raw_payload.get("last_modified"),
                 raw_payload.get("creation_time"),
@@ -700,7 +687,6 @@ def _load_defect_rows(
         (optional_text_expr("project"), query.projects),
         (optional_text_expr("assigned_ecu"), query.assigned_ecus),
         (optional_text_expr("problem_finder_team"), query.problem_finder_teams),
-        (optional_text_expr("detected_by"), query.detected_by),
         (aida_expr, query.aidas),
         (optional_text_expr("phase"), query.phases),
         (optional_text_expr("solution_cluster"), query.solution_clusters),
@@ -731,7 +717,6 @@ def _load_defect_rows(
             {optional_text_expr('status_phase')} AS status,
             {optional_text_expr('creation_time')} AS creation_time,
             {optional_text_expr('problem_finder_team')} AS problem_finder_team,
-            {optional_text_expr('detected_by')} AS detected_by,
             {ticket_date_expr} AS ticket_date,
             {optional_text_expr('year', cast_text=True)} AS year,
             {optional_text_expr('project')} AS project,
@@ -781,10 +766,6 @@ def _load_defect_rows(
             normalized["creation_time"] = _first_non_empty(
                 normalized.get("creation_time"),
                 raw_payload.get("creation_time"),
-            )
-            normalized["detected_by"] = _first_non_empty(
-                normalized.get("detected_by"),
-                _extract_detected_by(raw_payload),
             )
             normalized["classification"] = _first_non_empty(
                 normalized.get("classification"),
@@ -963,7 +944,6 @@ def _build_ticket_rows(
             "ticket_date": ticket_date,
             "month": _get_ticket_month_value(creation_time),
             "problem_finder_team": str(row.get("problem_finder_team") or "").strip(),
-            "detected_by": str(row.get("detected_by") or "").strip(),
             "classification": str(row.get("classification") or "").strip(),
             "problem_severity": str(row.get("problem_severity") or "").strip(),
             "group": group,
@@ -1022,7 +1002,6 @@ def _build_filters(ticket_rows: list[dict[str, Any]]) -> dict[str, list[str]]:
         "projects": _unique_sorted(row.get("project") for row in ticket_rows),
         "assigned_ecus": _unique_sorted(row.get("assigned_ecu") for row in ticket_rows),
         "problem_finder_teams": _unique_sorted(row.get("problem_finder_team") for row in ticket_rows),
-        "detected_by": _unique_sorted(row.get("detected_by") for row in ticket_rows),
         "aidas": _unique_sorted(row.get("aida") for row in ticket_rows),
         "phases": _unique_sorted(row.get("phase") for row in ticket_rows),
         "solution_clusters": _unique_sorted(row.get("solution_cluster") for row in ticket_rows),
@@ -1041,7 +1020,6 @@ FILTER_QUERY_FIELD_NAMES = (
     "projects",
     "assigned_ecus",
     "problem_finder_teams",
-    "detected_by",
     "aidas",
     "phases",
     "solution_clusters",
@@ -1059,7 +1037,6 @@ MATERIALIZED_FILTER_COLUMNS = {
     "projects": "project",
     "assigned_ecus": "assigned_ecu",
     "problem_finder_teams": "problem_finder_team",
-    "detected_by": "detected_by",
     "aidas": "aida",
     "phases": "phase",
     "solution_clusters": "solution_cluster",
@@ -1176,7 +1153,6 @@ def _serialize_query_filters(query: FullPictureDashboardQuery) -> dict[str, list
         "projects": list(query.projects),
         "assigned_ecus": list(query.assigned_ecus),
         "problem_finder_teams": list(query.problem_finder_teams),
-        "detected_by": list(query.detected_by),
         "aidas": list(query.aidas),
         "phases": list(query.phases),
         "solution_clusters": list(query.solution_clusters),
@@ -1298,7 +1274,6 @@ CREATE TABLE IF NOT EXISTS dashboard_ticket_snapshot_rows (
     ticket_month TEXT NOT NULL,
     china_scope TEXT NOT NULL,
     problem_finder_team TEXT NOT NULL,
-    detected_by TEXT NOT NULL,
     classification TEXT NOT NULL,
     problem_severity TEXT NOT NULL,
     group_name TEXT NOT NULL,
@@ -1336,7 +1311,6 @@ MATERIALIZED_TICKET_SORT_COLUMNS = {
     "creation_time": "creation_time",
     "ticket_date": "ticket_date",
     "problem_finder_team": "problem_finder_team",
-    "detected_by": "detected_by",
     "classification": "classification",
     "problem_severity": "problem_severity",
     "group": "group_name",
@@ -1365,7 +1339,6 @@ def _ensure_dashboard_ticket_store(conn: sqlite3.Connection) -> bool:
         ("creation_time", "TEXT NOT NULL DEFAULT ''"),
         ("classification", "TEXT NOT NULL DEFAULT ''"),
         ("problem_severity", "TEXT NOT NULL DEFAULT ''"),
-        ("detected_by", "TEXT NOT NULL DEFAULT ''"),
         ("requirement", "TEXT NOT NULL DEFAULT ''"),
         ("requirements_json", "TEXT NOT NULL DEFAULT '[]'"),
     ):
@@ -1442,7 +1415,6 @@ def _materialize_snapshot_ticket_rows(
                 ticket_month,
                 china_scope,
                 problem_finder_team,
-                detected_by,
                 classification,
                 problem_severity,
                 group_name,
@@ -1460,7 +1432,7 @@ def _materialize_snapshot_ticket_rows(
                 pu,
                 market,
                 lead_model
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -1473,7 +1445,6 @@ def _materialize_snapshot_ticket_rows(
                     str(row.get("month") or ""),
                     str(row.get("china_scope") or ""),
                     str(row.get("problem_finder_team") or ""),
-                    str(row.get("detected_by") or ""),
                     str(row.get("classification") or ""),
                     str(row.get("problem_severity") or ""),
                     str(row.get("group") or ""),
@@ -1569,7 +1540,6 @@ def _build_materialized_ticket_where_clause(
         ("project", query.projects),
         ("assigned_ecu", query.assigned_ecus),
         ("problem_finder_team", query.problem_finder_teams),
-        ("detected_by", query.detected_by),
         ("aida", query.aidas),
         ("phase", query.phases),
         ("solution_cluster", query.solution_clusters),
@@ -1603,7 +1573,6 @@ def _build_materialized_ticket_where_clause(
             "ticket_name",
             "creation_time",
             "problem_finder_team",
-            "detected_by",
             "classification",
             "problem_severity",
             "status",
@@ -1643,7 +1612,6 @@ def _load_materialized_ticket_rows(
                 ticket_month AS month,
                 china_scope,
                 problem_finder_team,
-                detected_by,
                 classification,
                 problem_severity,
                 group_name AS "group",
@@ -1769,7 +1737,6 @@ def _list_materialized_ticket_rows(
                 ticket_month AS month,
                 china_scope,
                 problem_finder_team,
-                detected_by,
                 classification,
                 problem_severity,
                 group_name AS "group",
@@ -1898,21 +1865,10 @@ def _build_full_picture_dataset(
 def build_full_picture_summary_payload(**kwargs: Any) -> dict[str, Any]:
     query = normalize_query(**kwargs)
     snapshot_metadata = _read_snapshot_metadata()
-    serialized_filters = _serialize_query_filters(query)
-    active_snapshot_version = _resolve_snapshot_version(snapshot_metadata)
-    if active_snapshot_version:
-        active_cache_key = normalize_summary_cache_key(
-            snapshot_version=active_snapshot_version,
-            filters=serialized_filters,
-        )
-        cached_active_payload = get_summary_cache().get(active_cache_key)
-        if cached_active_payload is not None:
-            return cached_active_payload
-
     snapshot_version = _resolve_effective_snapshot_version(snapshot_metadata)
     cache_key = normalize_summary_cache_key(
         snapshot_version=snapshot_version,
-        filters=serialized_filters,
+        filters=_serialize_query_filters(query),
     )
     cached_payload = get_summary_cache().get(cache_key)
     if cached_payload is not None:
@@ -2444,18 +2400,6 @@ def build_defect_high_frequency_analysis_payload(**kwargs: Any) -> dict[str, Any
     }
 
 
-def build_defect_aggregate_payload(**kwargs: Any) -> dict[str, Any]:
-    from backend.analytics.defect_query_models import build_defect_aggregate_payload as build_payload
-
-    return build_payload(**kwargs)
-
-
-def build_defect_records_payload(**kwargs: Any) -> dict[str, Any]:
-    from backend.analytics.defect_query_models import build_defect_records_payload as build_payload
-
-    return build_payload(**kwargs)
-
-
 def build_top_issue_analysis_payload(**kwargs: Any) -> dict[str, Any]:
     query = normalize_query(**kwargs)
     requested_snapshot_version = str(kwargs.get("snapshot_version") or "").strip()
@@ -2514,54 +2458,6 @@ def build_full_picture_payload(**kwargs: Any) -> dict[str, Any]:
         "overview": _build_overview(ticket_rows),
         "outcome_summary": _build_outcome_summary(ticket_rows),
         "team_outcome_rows": _build_team_outcome_rows(ticket_rows),
-        "ticket_rows": ticket_rows,
-    }
-
-
-def build_semantic_defect_payload(**kwargs: Any) -> dict[str, Any]:
-    """Return all governed defect rows from one stable dashboard snapshot.
-
-    Semantic aggregate and records execution share this provider so a follow-up
-    can either reuse the exact active revision or fail closed after a refresh.
-    """
-
-    query = normalize_query(**kwargs)
-    requested_snapshot_version = str(kwargs.get("snapshot_version") or "").strip()
-    snapshot_metadata = _read_snapshot_metadata()
-    snapshot_version = _resolve_effective_snapshot_version(snapshot_metadata)
-    if requested_snapshot_version and snapshot_version and requested_snapshot_version != snapshot_version:
-        raise FullPictureDashboardRequestError(
-            f"Requested snapshot version is stale: {requested_snapshot_version}"
-        )
-
-    if snapshot_version:
-        if snapshot_version.startswith("live-"):
-            _materialize_snapshot_ticket_rows(snapshot_version)
-        snapshot_metadata = _read_snapshot_metadata()
-        snapshot_version_after = _resolve_effective_snapshot_version(snapshot_metadata)
-        if snapshot_version_after != snapshot_version:
-            raise FullPictureDashboardRequestError("Dashboard snapshot changed during request")
-        if requested_snapshot_version and requested_snapshot_version != snapshot_version_after:
-            raise FullPictureDashboardRequestError(
-                f"Requested snapshot version is stale: {requested_snapshot_version}"
-            )
-        generated_from = _build_generated_from_payload(query)
-        ticket_rows = _load_materialized_ticket_rows(
-            snapshot_version=snapshot_version_after,
-            query=query,
-        )
-        snapshot_version = snapshot_version_after
-    else:
-        snapshot_metadata, generated_from, ticket_rows = _build_snapshot_bound_dataset(
-            query,
-            requested_snapshot_version=requested_snapshot_version,
-        )
-        snapshot_version = _resolve_snapshot_version(snapshot_metadata)
-
-    return {
-        "snapshot_version": snapshot_version,
-        "generated_from": generated_from,
-        "refresh_metadata": snapshot_metadata,
         "ticket_rows": ticket_rows,
     }
 
@@ -2686,75 +2582,6 @@ def build_filter_metadata() -> dict[str, list[str]]:
     }
 
 
-FILTER_VALUE_SEARCH_FIELDS = frozenset({"detected_by", "assigned_ecu", "business_module", "problem_finder_team"})
-
-
-def _normalize_filter_value_limit(value: Any) -> int:
-    if value in {None, ""}:
-        return 20
-    try:
-        limit = int(str(value).strip())
-    except (TypeError, ValueError) as exc:
-        raise FullPictureDashboardRequestError(f"Invalid filter value search limit: {value}") from exc
-    if limit <= 0:
-        raise FullPictureDashboardRequestError(f"Invalid filter value search limit: {value}")
-    return min(limit, 50)
-
-
-def _filter_value_from_ticket_row(row: dict[str, Any], field: str) -> str:
-    if field == "business_module":
-        return str(row.get("solution_cluster") or row.get("defect_category") or "UNCLASSIFIED").strip()
-    return str(row.get(field) or "").strip()
-
-
-def build_analytics_filter_value_search_payload(**kwargs: Any) -> dict[str, object]:
-    dataset = str(kwargs.get("dataset") or "defects").strip()
-    if dataset != "defects":
-        raise FullPictureDashboardRequestError(f"Unsupported filter value dataset: {dataset or 'empty'}")
-    field = str(kwargs.get("field") or "").strip()
-    if field not in FILTER_VALUE_SEARCH_FIELDS:
-        raise FullPictureDashboardRequestError(f"Unsupported filter value field: {field or 'empty'}")
-
-    snapshot_metadata = _read_snapshot_metadata()
-    snapshot_version = _resolve_effective_snapshot_version(snapshot_metadata)
-    if not snapshot_version:
-        raise FullPictureDashboardDataError("No active dashboard snapshot is available for filter value search")
-    if snapshot_version.startswith("live-"):
-        _materialize_snapshot_ticket_rows(snapshot_version)
-
-    query_text = str(kwargs.get("query") or "").strip()
-    normalized_query = query_text.casefold()
-    limit = _normalize_filter_value_limit(kwargs.get("limit"))
-    filters = kwargs.get("filters") if isinstance(kwargs.get("filters"), dict) else {}
-    ticket_rows = _load_materialized_ticket_rows(
-        snapshot_version=snapshot_version,
-        query=normalize_query(**filters),
-    )
-
-    counts: dict[str, int] = {}
-    for row in ticket_rows:
-        value = _filter_value_from_ticket_row(row, field)
-        if not value:
-            continue
-        if normalized_query and normalized_query not in value.casefold():
-            continue
-        counts[value] = counts.get(value, 0) + 1
-
-    ranked_values = sorted(counts.items(), key=lambda item: (-item[1], _sortable_value(item[0])))
-    returned_values = ranked_values[:limit]
-    return {
-        "schema_version": "1.0",
-        "dataset": dataset,
-        "field": field,
-        "query": query_text,
-        "snapshot_version": snapshot_version,
-        "values": [{"value": value, "count": count} for value, count in returned_values],
-        "total_values": len(ranked_values),
-        "returned_values": len(returned_values),
-        "truncated": len(ranked_values) > limit,
-    }
-
-
 def build_defect_test_correlation(defect_id: str) -> dict[str, object]:
     conn = _connect()
     try:
@@ -2771,58 +2598,3 @@ def build_defect_test_correlation(defect_id: str) -> dict[str, object]:
             test_ids.append(row["test_id"])
 
     return {"defect_id": defect_id, "test_ids": test_ids}
-
-
-def _resolve_recent_defects_date_range(days: int, *, reference_date: str = "") -> tuple[str, str]:
-    """Return the [start, end] ISO date window for the last ``days`` days.
-
-    ``reference_date`` is a YYYY-MM-DD anchor used by tests for deterministic
-    output; in production it defaults to today (UTC).
-    """
-    anchor = _parse_iso_date_value(reference_date)
-    if anchor is None:
-        anchor = datetime.now(timezone.utc).date()
-    window = max(int(days), 1)
-    start_date = anchor - timedelta(days=window - 1)
-    return start_date.isoformat(), anchor.isoformat()
-
-
-def build_recent_defects_payload(
-    *,
-    days: int = 7,
-    team: str | None = None,
-    page: int = 1,
-    page_size: int = 50,
-    reference_date: str = "",
-    **kwargs: Any,
-) -> dict[str, Any]:
-    """Return defects created within the last ``days`` days, optionally by team.
-
-    Reuses the governed dashboard snapshot path so the result is consistent
-    with ``/api/full-picture/dashboard/tickets`` (same snapshot version,
-    pagination, and creation-time filtering semantics).
-    """
-    creation_time_start, creation_time_end = _resolve_recent_defects_date_range(
-        days,
-        reference_date=reference_date,
-    )
-    team_filter = str(team or "").strip()
-    extra_filters: dict[str, Any] = {
-        "creation_time_start": creation_time_start,
-        "creation_time_end": creation_time_end,
-        "page": page,
-        "page_size": page_size,
-    }
-    if team_filter:
-        extra_filters["problem_finder_teams"] = (team_filter,)
-    extra_filters.update(kwargs)
-
-    payload = list_full_picture_ticket_rows(**extra_filters)
-    payload["date_range"] = {
-        "days": max(int(days), 1),
-        "creation_time_start": creation_time_start,
-        "creation_time_end": creation_time_end,
-    }
-    if team_filter:
-        payload["team"] = team_filter
-    return payload

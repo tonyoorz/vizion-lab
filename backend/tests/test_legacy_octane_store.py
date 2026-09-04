@@ -479,6 +479,123 @@ def test_octane_source_store_load_existing_rows_chunks_large_parameter_lists(tmp
     assert rows == {}
 
 
+def test_octane_source_store_preserves_processed_tproject_during_reingest(tmp_path: Path) -> None:
+    db_path = tmp_path / "qgate_raw.db"
+    ensure_schema(db_path)
+
+    store = OctaneSourceStore(db_path)
+    try:
+        store.create_tables()
+        store.upsert_defects(
+            [
+                {
+                    "id": "D-TPROJECT-1",
+                    "name": "Defect with processed project",
+                    "team": {"name": "DTSV_China"},
+                    "tproject": "IDCEVO",
+                }
+            ],
+            team="DTSV_China",
+            year=2026,
+        )
+    finally:
+        store.close()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("UPDATE octane_defects SET tproject = ? WHERE defect_id = ?", ("IDC", "D-TPROJECT-1"))
+        conn.commit()
+    finally:
+        conn.close()
+
+    store = OctaneSourceStore(db_path)
+    try:
+        store.upsert_defects(
+            [
+                {
+                    "id": "D-TPROJECT-1",
+                    "name": "Defect with processed project",
+                    "team": {"name": "DTSV_China"},
+                    "tproject": "IDCEVO",
+                }
+            ],
+            team="DTSV_China",
+            year=2026,
+        )
+    finally:
+        store.close()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        tproject = conn.execute(
+            "SELECT tproject FROM octane_defects WHERE defect_id = ?",
+            ("D-TPROJECT-1",),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    assert tproject == "IDC"
+
+
+def test_octane_source_store_preserves_unknown_tproject_during_reingest(tmp_path: Path) -> None:
+    db_path = tmp_path / "qgate_raw.db"
+    ensure_schema(db_path)
+
+    store = OctaneSourceStore(db_path)
+    try:
+        store.create_tables()
+        store.upsert_defects(
+            [
+                {
+                    "id": "D-TPROJECT-UNKNOWN",
+                    "name": "Defect with unresolved processed project",
+                    "team": {"name": "DTSV_China"},
+                }
+            ],
+            team="DTSV_China",
+            year=2026,
+        )
+    finally:
+        store.close()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE octane_defects SET tproject = ? WHERE defect_id = ?",
+            ("Unknown", "D-TPROJECT-UNKNOWN"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    store = OctaneSourceStore(db_path)
+    try:
+        store.upsert_defects(
+            [
+                {
+                    "id": "D-TPROJECT-UNKNOWN",
+                    "name": "Defect with unresolved processed project",
+                    "team": {"name": "DTSV_China"},
+                }
+            ],
+            team="DTSV_China",
+            year=2026,
+        )
+    finally:
+        store.close()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        tproject = conn.execute(
+            "SELECT tproject FROM octane_defects WHERE defect_id = ?",
+            ("D-TPROJECT-UNKNOWN",),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    assert tproject == "Unknown"
+
+
 def test_octane_source_store_flattens_requirement_names_from_defect_payload(tmp_path: Path) -> None:
     db_path = tmp_path / "qgate_raw.db"
     ensure_schema(db_path)

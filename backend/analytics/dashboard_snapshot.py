@@ -6,6 +6,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
+from backend.analytics.china_scope import CHINA_SCOPE_RULE_VERSION
 from backend.analytics.db import connect
 
 
@@ -35,8 +36,11 @@ def build_snapshot_source_signature(db_path: Path | str) -> str:
 
 
 def build_full_picture_snapshot_version(source_db_path: Path | str) -> str:
-    digest = hashlib.sha1(build_snapshot_source_signature(source_db_path).encode("utf-8")).hexdigest()[:16]
-    return f"snapshot-{digest}"
+    versioned_source_signature = (
+        f"{CHINA_SCOPE_RULE_VERSION}|{build_snapshot_source_signature(source_db_path)}"
+    )
+    digest = hashlib.sha1(versioned_source_signature.encode("utf-8")).hexdigest()[:16]
+    return f"snapshot-{CHINA_SCOPE_RULE_VERSION}-{digest}"
 
 
 def _normalize_filter_values(values: object) -> list[str]:

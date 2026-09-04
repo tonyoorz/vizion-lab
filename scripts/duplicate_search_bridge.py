@@ -624,29 +624,10 @@ def _build_defect_df(repo_root: Path) -> pd.DataFrame:
     return df
 
 
-def _sqlite_data_fingerprint(sqlite_path: Path) -> tuple[int, str, str]:
-    """Content fingerprint for octane_defects, independent of the SQLite file mtime.
-
-    Returns ``(row_count, max_last_modified, max_fetched_at)``. These only change
-    when actual defect data changes — not when the DB file is touched, vacuumed,
-    or written by unrelated tables. ``last_modified`` is trusted to advance on
-    every real row mutation (the upstream ingestion script updates it).
-    """
-    if not sqlite_path.exists():
-        return (0, '', '')
-    with sqlite3.connect(str(sqlite_path)) as connection:
-        row = connection.execute(
-            'SELECT COUNT(*), COALESCE(MAX(last_modified), \'\'), COALESCE(MAX(fetched_at), \'\') '
-            'FROM octane_defects'
-        ).fetchone()
-    return (int(row[0] or 0), str(row[1] or ''), str(row[2] or ''))
-
-
 def _build_cache_key(repo_root: Path, df: pd.DataFrame) -> str:
     sqlite_path = _resolve_sqlite_path()
     if sqlite_path and sqlite_path.exists():
-        row_count, max_last_modified, _ = _sqlite_data_fingerprint(sqlite_path)
-        return f'dupsearch-agent:sqlite:{row_count}:{max_last_modified}'
+        return f"dupsearch-agent:sqlite:{len(df)}:{int(sqlite_path.stat().st_mtime)}"
 
     defect_dir = _resolve_data_dir(repo_root)
     files = [defect_dir / '2026_defect.json', defect_dir / '2025_defect.json']
@@ -662,8 +643,8 @@ def _build_cache_key(repo_root: Path, df: pd.DataFrame) -> str:
 def _build_defect_source_signature(repo_root: Path) -> str:
     sqlite_path = _resolve_sqlite_path()
     if sqlite_path and sqlite_path.exists():
-        row_count, max_last_modified, max_fetched_at = _sqlite_data_fingerprint(sqlite_path)
-        return f"sqlite:{sqlite_path.resolve()}:{row_count}:{max_last_modified}:{max_fetched_at}"
+        stat = sqlite_path.stat()
+        return f"sqlite:{sqlite_path.resolve()}:{stat.st_size}:{stat.st_mtime_ns}"
 
     defect_dir = _resolve_data_dir(repo_root)
     files = [defect_dir / '2026_defect.json', defect_dir / '2025_defect.json']
@@ -866,13 +847,6 @@ def _warmup(payload: Dict[str, Any], repo_root: Path) -> Dict[str, Any]:
             },
         },
     }
-
-
-def warmup_duplicate_search(
-    payload: Optional[Dict[str, Any]] = None,
-    repo_root: Path = REPO_ROOT,
-) -> Dict[str, Any]:
-    return _warmup(dict(payload or {}), repo_root)
 
 
 def _feedback(payload: Dict[str, Any], repo_root: Path) -> Dict[str, Any]:

@@ -94,13 +94,115 @@ def test_run_processor_pipeline_replaces_unknown_defect_project_with_derived_val
 
     conn = sqlite3.connect(db_path)
     try:
-        project = conn.execute(
-            "SELECT project FROM octane_defects WHERE defect_id='D-UNKNOWN-PROJECT'"
-        ).fetchone()[0]
+        project, tproject = conn.execute(
+            "SELECT project, tproject FROM octane_defects WHERE defect_id='D-UNKNOWN-PROJECT'"
+        ).fetchone()
     finally:
         conn.close()
 
-    assert project == "IDCEVO"
+    assert (project, tproject) == ("IDCEVO", "IDCEVO")
+
+
+def test_run_processor_pipeline_writes_technical_correction_to_tproject(tmp_path: Path) -> None:
+    db_path = tmp_path / "qgate_raw.db"
+    asset_root = tmp_path / "assets"
+    asset_root.mkdir(parents=True)
+    (asset_root / "top_aida_project_fv_mapping.json").write_text(
+        json.dumps(
+            [
+                {
+                    "top_aida": "CarPlay [01.04.01.07.02]",
+                    "project": "IDCEVO",
+                    "fv": "",
+                    "fvp": "",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (asset_root / "vin_project_mapping.json").write_text(json.dumps([]), encoding="utf-8")
+    (asset_root / "mr_nonstandard_platform_ids.json").write_text(json.dumps([]), encoding="utf-8")
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE octane_defects (
+                defect_id TEXT PRIMARY KEY,
+                project TEXT,
+                tproject TEXT,
+                top_aida TEXT,
+                assigned_ecu TEXT,
+                software_version TEXT,
+                lead_model TEXT,
+                product_areas TEXT,
+                solution_cluster TEXT,
+                ecu_to_modul TEXT,
+                function_responsible TEXT,
+                market TEXT,
+                pu TEXT,
+                fv TEXT,
+                fvp TEXT,
+                team TEXT
+            );
+            CREATE TABLE octane_manual_runs (
+                mr_id TEXT PRIMARY KEY,
+                defect_id TEXT,
+                test_id TEXT,
+                test_name TEXT,
+                status TEXT,
+                project TEXT,
+                fv TEXT,
+                fvp TEXT,
+                team TEXT,
+                lead_model TEXT,
+                raw_json TEXT,
+                fetched_at TEXT
+            );
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO octane_defects(
+                defect_id, project, tproject, top_aida, assigned_ecu, software_version,
+                lead_model, product_areas, solution_cluster, ecu_to_modul,
+                function_responsible, market, pu, fv, fvp, team
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "D-LEGACY-IDCEVO",
+                "IDCEVO",
+                "",
+                "CarPlay [01.04.01.07.02]",
+                "HU-MGU_02_A",
+                "BMWIDC23;mainline-24w49.5-1-nodex_IDC23_24w49.5-1-2;idc23",
+                "G48",
+                "CarPlay [01.04.01.07.02]",
+                "SDI",
+                "CD",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    run_processor_pipeline(db_path, asset_root=asset_root)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        project, tproject = conn.execute(
+            "SELECT project, tproject FROM octane_defects WHERE defect_id = 'D-LEGACY-IDCEVO'"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert (project, tproject) == ("IDCEVO", "IDC")
 
 
 def test_run_processor_pipeline_replaces_unknown_manual_run_project_with_derived_value(tmp_path: Path) -> None:

@@ -27,4 +27,17 @@ describe("Vite dependency optimization", () => {
       ignored: expect.arrayContaining(["**/.venv/**"]),
     });
   });
+
+  it("ignores generated review exports so audit artifacts do not reload the active page", () => {
+    const config = viteConfig({
+      command: "serve",
+      mode: "development",
+      isSsrBuild: false,
+      isPreview: false,
+    });
+
+    expect(config.server?.watch).toMatchObject({
+      ignored: expect.arrayContaining(["**/exports/**"]),
+    });
+  });
 });

@@ -5,6 +5,7 @@ import hashlib
 from pathlib import Path
 import sqlite3
 
+from backend.analytics.china_scope import CHINA_SCOPE_RULE_VERSION
 from backend.analytics.full_picture_outcomes import ensure_outcome_store
 from backend.analytics.testing_coverage_reference import (
     build_feature_region_sql_expr,
@@ -88,8 +89,9 @@ def ensure_testing_coverage_store(db_path: Path | str) -> Path:
 
 
 def _build_testing_coverage_snapshot_version(source_signature: str) -> str:
-    digest = hashlib.sha1(source_signature.encode("utf-8")).hexdigest()[:16]
-    return f"testing-coverage-{digest}"
+    versioned_source_signature = f"{CHINA_SCOPE_RULE_VERSION}|{source_signature}"
+    digest = hashlib.sha1(versioned_source_signature.encode("utf-8")).hexdigest()[:16]
+    return f"testing-coverage-{CHINA_SCOPE_RULE_VERSION}-{digest}"
 
 
 def _open_read_only_connection(db_path: Path | str) -> sqlite3.Connection:
@@ -136,17 +138,12 @@ def _coalesced_expr(*expressions: str) -> str:
 
 
 def _feature_region_expr(manual_run_columns: set[str], defect_columns: set[str]) -> str:
-    market_expr = _optional_expr("d", defect_columns, "market")
     solution_cluster_expr = _optional_expr("d", defect_columns, "solution_cluster")
-    feature_area_expr = _coalesced_expr(
-        _optional_expr("mr", manual_run_columns, "top_aida", "product_areas"),
-        _optional_expr("d", defect_columns, "top_aida", "product_areas"),
-    )
+    defect_category_expr = _optional_expr("d", defect_columns, "defect_category")
 
     return build_feature_region_sql_expr(
-        feature_area_expr,
-        market_expr=market_expr,
         solution_cluster_expr=solution_cluster_expr,
+        defect_category_expr=defect_category_expr,
     )
 
 
@@ -158,7 +155,8 @@ def _derive_testing_coverage_rows(
     try:
         manual_run_columns = _table_columns(conn, "octane_manual_runs")
         defect_columns = _table_columns(conn, "octane_defects") if _table_exists(conn, "octane_defects") else set()
-        testcase_columns = _table_columns(conn, "octane_testcases") if _table_exists(conn, "octane_testcases") else set()
+        has_testcase_table = _table_exists(conn, "octane_testcases")
+        testcase_columns = _table_columns(conn, "octane_testcases") if has_testcase_table else set()
 
         year_expr = _optional_expr("mr", manual_run_columns, "year")
         if year_expr != "''" and "year" in defect_columns:
@@ -172,6 +170,11 @@ def _derive_testing_coverage_rows(
         elif "test_name" in testcase_columns:
             test_name_expr = f"COALESCE({test_name_expr}, CAST(tc.test_name AS TEXT), '')"
 
+        testcase_join = """
+            LEFT JOIN octane_testcases tc
+                ON tc.test_id = mr.test_id
+        """ if has_testcase_table else ""
+
         top_aida_expr = _coalesced_expr(
             _optional_expr("mr", manual_run_columns, "top_aida", "product_areas"),
             _optional_expr("d", defect_columns, "top_aida", "product_areas"),
@@ -179,13 +182,19 @@ def _derive_testing_coverage_rows(
 
         test_week_expr = build_iso_test_week_sql_expr(
             finished_expr=_optional_expr("mr", manual_run_columns, "finished", "finished_udf"),
-            fallback_test_week_expr=_optional_expr("d", defect_columns, "test_week"),
+            fallback_test_week_expr=_coalesced_expr(
+                f"NULLIF({_optional_expr('d', defect_columns, 'test_week')}, '')",
+                f"NULLIF({_optional_expr('mr', manual_run_columns, 'test_week')}, '')",
+            ),
         )
         project_expr = build_reference_project_sql_expr(
             name_expr=_optional_expr("mr", manual_run_columns, "name", "test_name"),
             target_ecu_conf_expr=_optional_expr("mr", manual_run_columns, "target_ecu_conf", "target_ecu_conf_udf"),
             top_aida_expr=top_aida_expr,
-            fallback_project_expr=_optional_expr("d", defect_columns, "project"),
+            fallback_project_expr=_coalesced_expr(
+                f"NULLIF({_optional_expr('d', defect_columns, 'project')}, '')",
+                f"NULLIF({_optional_expr('mr', manual_run_columns, 'project')}, '')",
+            ),
         )
 
         rows = conn.execute(
@@ -208,8 +217,7 @@ def _derive_testing_coverage_rows(
             FROM octane_manual_runs mr
             LEFT JOIN octane_defects d
                 ON d.defect_id = mr.defect_id
-            LEFT JOIN octane_testcases tc
-                ON tc.test_id = mr.test_id
+            {testcase_join}
             ORDER BY mr.mr_id
             '''
         ).fetchall()

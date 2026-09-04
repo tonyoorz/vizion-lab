@@ -93,6 +93,20 @@ describe("TicketDetailTable", () => {
     expect(ticketIdHeader.getAttribute("style") ?? "").toContain("width");
   });
 
+  it("shows formal Top Issue priority tags in the Topissue column", () => {
+    const rows = createRows(2).map((row, index) => ({
+      ...row,
+      topIssuePriority: index === 0 ? "Top_Issue_High_Prio" : "Top_issue_Mid_Prio",
+    }));
+
+    renderTicketDetailTable(rows);
+
+    expect(screen.getByRole("columnheader", { name: "Topissue" })).toBeInTheDocument();
+    expect(screen.queryByRole("columnheader", { name: "Problem Severity" })).not.toBeInTheDocument();
+    expect(screen.getByText("Top_Issue_High_Prio")).toBeInTheDocument();
+    expect(screen.getByText("Top_issue_Mid_Prio")).toBeInTheDocument();
+  });
+
   it("delegates page changes and page-size changes to the parent", () => {
     const { onPageChange, onPageSizeChange } = renderTicketDetailTable(createRows(50));
 
@@ -127,7 +141,7 @@ describe("TicketDetailTable", () => {
     expect(screen.getByRole("columnheader", { name: "Creation Time" })).toBeInTheDocument();
     expect(screen.getByRole("columnheader", { name: "Classification" })).toBeInTheDocument();
     expect(screen.getByRole("columnheader", { name: "Requirement" })).toBeInTheDocument();
-    expect(screen.getByRole("columnheader", { name: "Problem Severity" })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Topissue" })).toBeInTheDocument();
     expect(screen.queryByRole("columnheader", { name: "Phase" })).not.toBeInTheDocument();
     expect(screen.queryByRole("columnheader", { name: "Status" })).not.toBeInTheDocument();
     expect(screen.queryByRole("columnheader", { name: "Group" })).not.toBeInTheDocument();

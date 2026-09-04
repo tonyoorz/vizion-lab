@@ -449,6 +449,7 @@ _PROJECT_KEYWORDS: List[Tuple[str, str]] = [
     ("idc", "idc"),
     ("app", "app"),
     ("rsu", "rsu"),
+    ("rse", "rse"),
 ]
 
 

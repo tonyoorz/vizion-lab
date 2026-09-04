@@ -3,11 +3,16 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from datetime import datetime
+from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
 
 from backend.analytics.asset_loader import load_mapping_assets
+
+
+BUSINESS_PROJECT_RULE_VERSION = "2026-09-03-v1"
+from backend.analytics.schema import ensure_schema
 
 
 def _normalize_text(value: object) -> str:
@@ -34,8 +39,10 @@ def _normalize_project_name(value: object) -> str:
         return "MGU"
     if normalized.startswith("APP"):
         return "App"
-    if "RSU" in normalized or "RSE" in normalized:
+    if "RSU" in normalized:
         return "RSU"
+    if "RSE" in normalized:
+        return "RSE"
     return text
 
 
@@ -52,35 +59,61 @@ def _software_version_tokens(value: object) -> set[str]:
     return tokens
 
 
-def _project_from_software_version(value: object) -> str:
+def _software_version_project_candidates(value: object) -> set[str]:
     tokens = _software_version_tokens(value)
     if not tokens:
-        return ""
+        return set()
 
+    projects: set[str] = set()
     if "IDCEVO" in tokens or "CDE" in tokens:
-        return "IDCEVO"
+        projects.add("IDCEVO")
     if "IDC23" in tokens:
-        return "IDC"
+        projects.add("IDC")
     if "MGU22" in tokens:
-        return "MGU"
+        projects.add("MGU")
     if "RSE26" in tokens:
-        return "RSU"
+        projects.add("RSE")
     if tokens.intersection({"MOBILE", "ANDROID", "IOS", "HARMONYOS"}):
-        return "App"
+        projects.add("App")
+    return projects
+
+
+def _project_from_software_version(value: object) -> str:
+    projects = _software_version_project_candidates(value)
+    if len(projects) == 1:
+        return next(iter(projects))
     return ""
 
 
-def infer_defect_project(row: dict[str, object]) -> str:
-    existing_project = _normalize_project_name(row.get("project"))
-    if existing_project and existing_project != "Unknown":
-        return existing_project
+def _project_from_assigned_ecu(value: object) -> str:
+    assigned_ecu = _normalize_text(value).upper()
+    if assigned_ecu == "IPN-15":
+        return "IDCEVO"
+    if assigned_ecu == "UCAP-10":
+        return "MGU"
 
+    for project, signals in (
+        ("IDCEVO", ("IDCEVO", "ENTRYEVO", "NBTEVO", "CDE-01", "ICON-25", "BMTH-01", "IPN-10", "IPN-10_DE", "SD-AMAP")),
+        ("IDC", ("IDC23", "HU-MGU_02_A")),
+        ("MGU", ("MGU", "HU-MGU_02_L", "HU-MGU_01", "SP_NAVINFO", "BMT")),
+        ("RSU", ("RSU",)),
+        ("RSE", ("RSE",)),
+        ("App", ("APP", "MOBILE", "MY BMW", "ANDROID", "IOS", "HARMONYOS", "BYOD")),
+    ):
+        if any(signal in assigned_ecu for signal in signals):
+            return project
+    return ""
+
+
+def _project_from_feature_area(row: dict[str, object]) -> str:
     top_aida = _normalize_text(row.get("top_aida"))
     product_areas = _normalize_text(row.get("product_areas"))
     solution_cluster = _normalize_text(row.get("solution_cluster"))
     feature_area = top_aida or product_areas
 
     if feature_area == "Use Rear Seat Entertainment [01.04.01.09.02]":
+        return "RSE"
+    if "[sys_rsu]" in feature_area.lower() or "remote software update" in feature_area.lower():
         return "RSU"
     if feature_area in {
         "Provide Navigation 2.0 [01.04.03.01.03.06]",
@@ -96,34 +129,48 @@ def infer_defect_project(row: dict[str, object]) -> str:
         return "IDC"
     if solution_cluster == "Navigation Asia":
         return "MGU"
+    return ""
 
-    assigned_ecu = _normalize_text(row.get("assigned_ecu")).upper()
+
+def _technical_project_evidence(row: dict[str, object]) -> tuple[tuple[str, str], ...]:
+    return (
+        ("feature_area", _project_from_feature_area(row)),
+        ("assigned_ecu", _project_from_assigned_ecu(row.get("assigned_ecu"))),
+        ("software_version", _project_from_software_version(row.get("software_version"))),
+    )
+
+
+def _technical_project_consensus(row: dict[str, object]) -> tuple[str, tuple[str, ...]]:
+    sources_by_project: dict[str, list[str]] = {}
+    for source, project in _technical_project_evidence(row):
+        if not project:
+            continue
+        sources_by_project.setdefault(project, []).append(source)
+
+    for project, sources in sources_by_project.items():
+        if len(sources) >= 2:
+            return project, tuple(sources)
+    return "", ()
+
+
+def infer_defect_project(row: dict[str, object]) -> str:
+    existing_project = _normalize_project_name(row.get("project"))
+    if existing_project and existing_project != "Unknown":
+        return existing_project
+
+    feature_project = _project_from_feature_area(row)
+    if feature_project:
+        return feature_project
+
     ecu_to_modul = _normalize_text(row.get("ecu_to_modul")).upper()
     function_responsible = _normalize_text(row.get("function_responsible")).upper()
     software_version = _normalize_text(row.get("software_version"))
     lead_model = _normalize_text(row.get("lead_model")).upper()
+    assigned_ecu_project = _project_from_assigned_ecu(row.get("assigned_ecu"))
     software_version_project = _project_from_software_version(software_version)
 
-    idcevo_signals = ["IDCEVO", "ENTRYEVO", "NBTEVO", "CDE-01", "ICON-25", "BMTH-01", "IPN-10", "IPN-10_DE", "SD-AMAP"]
-    idc_signals = ["IDC23", "HU-MGU_02_A"]
-    mgu_signals = ["MGU", "HU-MGU_02_L", "HU-MGU_01", "SP_NAVINFO", "BMT"]
-    rsu_signals = ["RSE", "RSU"]
-    app_signals = ["APP", "MOBILE", "MY BMW", "ANDROID", "IOS", "HARMONYOS", "BYOD"]
-
-    if assigned_ecu == "IPN-15":
-        return "IDCEVO"
-    if assigned_ecu == "UCAP-10":
-        return "MGU"
-    if any(signal in assigned_ecu for signal in idcevo_signals):
-        return "IDCEVO"
-    if any(signal in assigned_ecu for signal in idc_signals):
-        return "IDC"
-    if any(signal in assigned_ecu for signal in mgu_signals):
-        return "MGU"
-    if any(signal in assigned_ecu for signal in rsu_signals):
-        return "RSU"
-    if any(signal in assigned_ecu for signal in app_signals):
-        return "App"
+    if assigned_ecu_project:
+        return assigned_ecu_project
     if software_version_project:
         return software_version_project
 
@@ -147,10 +194,188 @@ def infer_defect_project(row: dict[str, object]) -> str:
     return "Unknown"
 
 
+def _classify_final_defect_project(
+    row: dict[str, object],
+    *,
+    mapped_project: object = "",
+) -> dict[str, object]:
+    technical_consensus_project, evidence_sources = _technical_project_consensus(row)
+    if technical_consensus_project:
+        return {
+            "project": technical_consensus_project,
+            "classification_source": "technical_consensus",
+            "evidence_sources": list(evidence_sources),
+        }
+
+    feature_project = _project_from_feature_area(row)
+    if feature_project:
+        return {
+            "project": feature_project,
+            "classification_source": "explicit_feature",
+            "evidence_sources": ["feature_area"],
+        }
+
+    normalized_mapped_project = _normalize_project_name(mapped_project)
+    if normalized_mapped_project and normalized_mapped_project != "Unknown":
+        return {
+            "project": normalized_mapped_project,
+            "classification_source": "business_mapping",
+            "evidence_sources": ["top_aida"],
+        }
+
+    existing_project = _normalize_project_name(row.get("project"))
+    if existing_project and existing_project != "Unknown":
+        return {
+            "project": existing_project,
+            "classification_source": "legacy_project",
+            "evidence_sources": ["project"],
+        }
+
+    fallback_project = infer_defect_project({**row, "project": ""})
+    if fallback_project == "Unknown":
+        return {
+            "project": "Unknown",
+            "classification_source": "unknown",
+            "evidence_sources": [],
+        }
+
+    for source, project in _technical_project_evidence(row):
+        if project == fallback_project:
+            return {
+                "project": fallback_project,
+                "classification_source": "technical_fallback",
+                "evidence_sources": [source],
+            }
+    return {
+        "project": fallback_project,
+        "classification_source": "heuristic_fallback",
+        "evidence_sources": [],
+    }
+
+
+def infer_final_defect_project(
+    row: dict[str, object],
+    *,
+    mapped_project: object = "",
+) -> str:
+    return str(_classify_final_defect_project(row, mapped_project=mapped_project)["project"])
+
+
+def build_business_project_audit_payload(
+    db_path: Path | str,
+    *,
+    asset_root: Path | str | None = None,
+) -> dict[str, object]:
+    assets = load_mapping_assets(asset_root)
+    aida_map = _aida_dimension_map(assets.aida_rows)
+    resolved_db_path = Path(db_path).resolve()
+    connection_uri = f"{resolved_db_path.as_uri()}?mode=ro"
+    conn = sqlite3.connect(connection_uri, uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        columns = _table_columns(conn, "octane_defects")
+        if "defect_id" not in columns:
+            raise ValueError("octane_defects missing required column: defect_id")
+
+        def optional_text_expr(column_name: str) -> str:
+            if column_name not in columns:
+                return f"'' AS {column_name}"
+            return f"COALESCE({column_name}, '') AS {column_name}"
+
+        rows = conn.execute(
+            f"""
+            SELECT
+                defect_id,
+                {optional_text_expr('project')},
+                {optional_text_expr('tproject')},
+                {optional_text_expr('top_aida')},
+                {optional_text_expr('product_areas')},
+                {optional_text_expr('solution_cluster')},
+                {optional_text_expr('assigned_ecu')},
+                {optional_text_expr('software_version')},
+                {optional_text_expr('lead_model')},
+                {optional_text_expr('ecu_to_modul')},
+                {optional_text_expr('function_responsible')}
+            FROM octane_defects
+            ORDER BY defect_id
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+
+    current_project_counts: Counter[str] = Counter()
+    current_tproject_counts: Counter[str] = Counter()
+    final_tproject_counts: Counter[str] = Counter()
+    classification_source_counts: Counter[str] = Counter()
+    correction_candidates: list[dict[str, object]] = []
+    unresolved_records: list[dict[str, object]] = []
+    tproject_update_count = 0
+
+    for row in rows:
+        values = dict(row)
+        current_project = _normalize_project_name(values.get("project")) or "Unknown"
+        current_tproject = _normalize_project_name(values.get("tproject"))
+        mapped = aida_map.get(_normalize_text(values.get("top_aida")), {})
+        classification = _classify_final_defect_project(
+            values,
+            mapped_project=mapped.get("project"),
+        )
+        final_tproject = str(classification["project"])
+        classification_source = str(classification["classification_source"])
+        evidence_sources = list(classification["evidence_sources"])
+
+        current_project_counts[current_project] += 1
+        current_tproject_counts[current_tproject or "<blank>"] += 1
+        final_tproject_counts[final_tproject] += 1
+        classification_source_counts[classification_source] += 1
+        if current_tproject != final_tproject:
+            tproject_update_count += 1
+
+        record = {
+            "defect_id": str(values.get("defect_id") or ""),
+            "project": current_project,
+            "tproject": current_tproject,
+            "final_tproject": final_tproject,
+            "classification_source": classification_source,
+            "evidence_sources": evidence_sources,
+            "top_aida": _normalize_text(values.get("top_aida")),
+            "assigned_ecu": _normalize_text(values.get("assigned_ecu")),
+            "software_version": _normalize_text(values.get("software_version")),
+        }
+        if (
+            classification_source == "technical_consensus"
+            and not _is_missing_dimension(values.get("project"))
+            and current_project != final_tproject
+        ):
+            correction_candidates.append(record)
+        if final_tproject == "Unknown":
+            unresolved_records.append(record)
+
+    return {
+        "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        "db_path": str(resolved_db_path),
+        "rule_version": BUSINESS_PROJECT_RULE_VERSION,
+        "summary": {
+            "total_rows": len(rows),
+            "current_project_counts": dict(sorted(current_project_counts.items())),
+            "current_tproject_counts": dict(sorted(current_tproject_counts.items())),
+            "final_tproject_counts": dict(sorted(final_tproject_counts.items())),
+            "classification_source_counts": dict(sorted(classification_source_counts.items())),
+            "tproject_update_count": tproject_update_count,
+            "correction_candidate_count": len(correction_candidates),
+            "unresolved_count": len(unresolved_records),
+        },
+        "correction_candidates": correction_candidates,
+        "unresolved_records": unresolved_records,
+    }
+
+
 def infer_manual_run_project(raw_payload: dict[str, object], *, top_aida: str) -> str:
     name = _normalize_text(raw_payload.get("name")).upper()
     if "DTSV_CHINA-RSU" in name or "RSU" in name:
         return "RSU"
+    if "RSE" in name:
+        return "RSE"
     if "ENTRYEVO" in name or "NBTEVO" in name:
         return "IDCEVO"
 
@@ -332,9 +557,11 @@ def run_processor_pipeline(
     conn.row_factory = sqlite3.Row
     try:
         defect_columns = _table_columns(conn, "octane_defects")
+        _ensure_tproject_column(conn, defect_columns, apply=not dry_run)
         defect_select_parts = [
             "defect_id",
             "project",
+            "tproject" if "tproject" in defect_columns else "'' AS tproject",
             "market" if "market" in defect_columns else "'' AS market",
             "top_aida" if "top_aida" in defect_columns else "'' AS top_aida",
             "pu" if "pu" in defect_columns else "'' AS pu",
@@ -355,6 +582,7 @@ def run_processor_pipeline(
         ).fetchall()
 
         defect_updates: list[tuple[str, str, str, str]] = []
+        tproject_updates: list[tuple[str, str]] = []
         fillable_rows: list[dict[str, object]] = []
         conflict_rows: list[dict[str, object]] = []
         resolved_defect_dimensions: dict[str, dict[str, str]] = {}
@@ -362,6 +590,7 @@ def run_processor_pipeline(
             top_aida = str(row["top_aida"] or "").strip()
             mapped = aida_map.get(top_aida, {})
             derived_project = str(mapped.get("project") or infer_defect_project(dict(row))).strip()
+            tproject = infer_final_defect_project(dict(row), mapped_project=mapped.get("project"))
             derived_fv = str(mapped.get("fv") or "").strip()
             derived_fvp = str(mapped.get("fvp") or "").strip() or _fvp_from_fv(derived_fv)
             derived_pu = str(row["first_use_sop_of_function"] or "").strip()
@@ -400,6 +629,9 @@ def run_processor_pipeline(
             if row_conflicts:
                 conflict_rows.append({"entity": "defect", "defect_id": str(row["defect_id"]), "fields": row_conflicts})
 
+            if "tproject" in defect_columns and tproject != str(row["tproject"] or "").strip():
+                tproject_updates.append((tproject, str(row["defect_id"])))
+
             resolved_defect_dimensions[str(row["defect_id"])] = {
                 "project": project,
                 "fv": fv,
@@ -415,6 +647,11 @@ def run_processor_pipeline(
             conn.executemany(
                 "UPDATE octane_defects SET project=?, market=?, fv=?, fvp=?, pu=? WHERE defect_id=?",
                 defect_updates,
+            )
+        if tproject_updates and not dry_run:
+            conn.executemany(
+                "UPDATE octane_defects SET tproject=? WHERE defect_id=?",
+                tproject_updates,
             )
 
         manual_run_columns = _table_columns(conn, "octane_manual_runs")
@@ -562,12 +799,17 @@ def run_processor_pipeline(
             return {
                 "defect_updates": 0,
                 "run_updates": 0,
+                "tproject_updates": 0,
                 "fillable_rows": len(fillable_rows),
                 "conflict_rows": len(conflict_rows),
             }
 
         conn.commit()
-        return {"defect_updates": len(defect_updates), "run_updates": len(run_updates)}
+        return {
+            "defect_updates": len(defect_updates),
+            "run_updates": len(run_updates),
+            "tproject_updates": len(tproject_updates),
+        }
     finally:
         conn.close()
 
@@ -579,15 +821,188 @@ def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
     }
 
 
-def backfill_defect_projects(
+def _ensure_tproject_column(
+    conn: sqlite3.Connection,
+    columns: set[str],
+    *,
+    apply: bool,
+) -> bool:
+    if "tproject" in columns or not apply:
+        return False
+    conn.execute("ALTER TABLE octane_defects ADD COLUMN tproject TEXT")
+    columns.add("tproject")
+    return True
+
+
+def _extract_raw_json_text(value: object) -> str:
+    if isinstance(value, (dict, list)):
+        return _first_named_value(value)
+    return _normalize_text(value)
+
+
+def _first_raw_json_text(raw_payload: dict[str, object], *field_names: str) -> str:
+    for field_name in field_names:
+        text = _extract_raw_json_text(raw_payload.get(field_name))
+        if text:
+            return text
+    return ""
+
+
+def _canonical_solution_cluster(value: object) -> tuple[str, bool]:
+    text = _normalize_text(value)
+    if text.casefold() == "solution cluster:china product":
+        return "China Product", True
+    return text, False
+
+
+def _parse_backfill_raw_json(value: object) -> tuple[dict[str, object], bool]:
+    text = _normalize_text(value)
+    if not text:
+        return {}, False
+    try:
+        parsed = json.loads(text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}, True
+    if not isinstance(parsed, dict):
+        return {}, True
+    return parsed, False
+
+
+def backfill_china_scope_fields(
     db_path: Path | str,
     *,
     apply: bool = False,
+) -> dict[str, int]:
+    ensure_schema(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        columns = _table_columns(conn, "octane_defects")
+        required_columns = {
+            "defect_id",
+            "raw_json",
+            "solution_cluster",
+            "defect_category",
+        }
+        missing_columns = sorted(required_columns - columns)
+        if missing_columns:
+            raise ValueError(
+                "octane_defects missing required columns: " + ", ".join(missing_columns)
+            )
+
+        rows = conn.execute(
+            """
+            SELECT
+                defect_id,
+                solution_cluster,
+                defect_category,
+                raw_json
+            FROM octane_defects
+            ORDER BY defect_id
+            """
+        ).fetchall()
+
+        updates: list[tuple[str, str, str]] = []
+        filled_solution_cluster_rows = 0
+        filled_defect_category_rows = 0
+        normalized_solution_cluster_rows = 0
+        invalid_json_rows = 0
+        conflict_ids: set[str] = set()
+
+        for row in rows:
+            defect_id = str(row["defect_id"] or "").strip()
+            raw_payload, is_invalid_json = _parse_backfill_raw_json(row["raw_json"])
+            if is_invalid_json:
+                invalid_json_rows += 1
+
+            current_solution_cluster, current_solution_cluster_normalized = (
+                _canonical_solution_cluster(row["solution_cluster"])
+            )
+            raw_solution_cluster, raw_solution_cluster_normalized = _canonical_solution_cluster(
+                _first_raw_json_text(
+                    raw_payload,
+                    "solution_cluster",
+                    "solutionCluster",
+                    "solution_cluster_udf",
+                )
+            )
+            current_defect_category = _normalize_text(row["defect_category"])
+            raw_defect_category = _first_raw_json_text(
+                raw_payload,
+                "defect_category",
+                "defectCategory",
+                "problem_category_udf",
+            )
+
+            next_solution_cluster = current_solution_cluster
+            next_defect_category = current_defect_category
+            if current_solution_cluster:
+                if current_solution_cluster_normalized:
+                    normalized_solution_cluster_rows += 1
+                if (
+                    raw_solution_cluster
+                    and current_solution_cluster.casefold() != raw_solution_cluster.casefold()
+                ):
+                    conflict_ids.add(defect_id)
+            elif raw_solution_cluster:
+                next_solution_cluster = raw_solution_cluster
+                filled_solution_cluster_rows += 1
+                if raw_solution_cluster_normalized:
+                    normalized_solution_cluster_rows += 1
+
+            if current_defect_category:
+                if (
+                    raw_defect_category
+                    and current_defect_category.casefold() != raw_defect_category.casefold()
+                ):
+                    conflict_ids.add(defect_id)
+            elif raw_defect_category:
+                next_defect_category = raw_defect_category
+                filled_defect_category_rows += 1
+
+            if (
+                next_solution_cluster != _normalize_text(row["solution_cluster"])
+                or next_defect_category != _normalize_text(row["defect_category"])
+            ):
+                updates.append((next_solution_cluster, next_defect_category, defect_id))
+
+        if apply and updates:
+            conn.executemany(
+                """
+                UPDATE octane_defects
+                SET solution_cluster = ?, defect_category = ?
+                WHERE defect_id = ?
+                """,
+                updates,
+            )
+            conn.commit()
+
+        return {
+            "candidate_rows": len(rows),
+            "updated_rows": len(updates) if apply else 0,
+            "filled_solution_cluster_rows": filled_solution_cluster_rows,
+            "filled_defect_category_rows": filled_defect_category_rows,
+            "normalized_solution_cluster_rows": normalized_solution_cluster_rows,
+            "conflict_rows": len(conflict_ids),
+            "invalid_json_rows": invalid_json_rows,
+        }
+    finally:
+        conn.close()
+
+
+def backfill_defect_projects(
+    db_path: Path | str,
+    *,
+    asset_root: Path | str | None = None,
+    apply: bool = False,
     only_unknown: bool = True,
 ) -> dict[str, object]:
+    assets = load_mapping_assets(asset_root)
+    aida_map = _aida_dimension_map(assets.aida_rows)
     conn = sqlite3.connect(db_path)
     try:
         columns = _table_columns(conn, "octane_defects")
+        schema_updated = _ensure_tproject_column(conn, columns, apply=apply)
         required_columns = {"defect_id", "project", "top_aida", "assigned_ecu", "software_version", "lead_model"}
         missing_columns = sorted(required_columns - columns)
         if missing_columns:
@@ -607,12 +1022,14 @@ def backfill_defect_projects(
             if "function_responsible" in columns
             else "'' AS function_responsible"
         )
+        tproject_select = "tproject" if "tproject" in columns else "'' AS tproject"
 
         rows = conn.execute(
             f"""
             SELECT
                 defect_id,
                 project,
+                {tproject_select},
                 top_aida,
                 assigned_ecu,
                 software_version,
@@ -628,10 +1045,13 @@ def backfill_defect_projects(
         ).fetchall()
 
         predicted_counts: dict[str, int] = {}
-        updates: list[tuple[str, str]] = []
+        project_updates: list[tuple[str, str]] = []
+        tproject_updates: list[tuple[str, str]] = []
+        updated_defect_ids: set[str] = set()
         for (
             defect_id,
             project,
+            tproject,
             top_aida,
             assigned_ecu,
             software_version,
@@ -641,7 +1061,8 @@ def backfill_defect_projects(
             ecu_to_modul,
             function_responsible,
         ) in rows:
-            predicted = infer_defect_project(
+            mapped = aida_map.get(str(top_aida or "").strip(), {})
+            predicted = infer_final_defect_project(
                 {
                     "project": project,
                     "top_aida": top_aida,
@@ -652,36 +1073,43 @@ def backfill_defect_projects(
                     "solution_cluster": solution_cluster,
                     "ecu_to_modul": ecu_to_modul,
                     "function_responsible": function_responsible,
-                }
+                },
+                mapped_project=mapped.get("project"),
             )
             predicted_counts[predicted] = predicted_counts.get(predicted, 0) + 1
-            if predicted != "Unknown":
-                updates.append((predicted, str(defect_id)))
+            normalized_defect_id = str(defect_id)
+            if predicted != "Unknown" and _is_missing_dimension(project):
+                project_updates.append((predicted, normalized_defect_id))
+                updated_defect_ids.add(normalized_defect_id)
+            if "tproject" in columns and predicted != _normalize_project_name(tproject):
+                tproject_updates.append((predicted, normalized_defect_id))
+                updated_defect_ids.add(normalized_defect_id)
 
-        if apply and updates:
-            if "tproject" in columns:
-                conn.executemany(
-                    """
-                    UPDATE octane_defects
-                    SET project=?, tproject=?
-                    WHERE defect_id=?
-                    """,
-                    [(project_name, project_name, defect_id) for project_name, defect_id in updates],
-                )
-            else:
-                conn.executemany(
-                    """
-                    UPDATE octane_defects
-                    SET project=?
-                    WHERE defect_id=?
-                    """,
-                    updates,
-                )
+        if apply and project_updates:
+            conn.executemany(
+                """
+                UPDATE octane_defects
+                SET project=?
+                WHERE defect_id=?
+                """,
+                project_updates,
+            )
+        if apply and tproject_updates:
+            conn.executemany(
+                """
+                UPDATE octane_defects
+                SET tproject=?
+                WHERE defect_id=?
+                """,
+                tproject_updates,
+            )
+        if apply and (updated_defect_ids or schema_updated):
             conn.commit()
 
         return {
             "candidate_rows": len(rows),
-            "updated_rows": len(updates) if apply else 0,
+            "updated_rows": len(updated_defect_ids) if apply else 0,
+            "tproject_updates": len(tproject_updates) if apply else 0,
             "predicted_counts": dict(sorted(predicted_counts.items())),
         }
     finally:

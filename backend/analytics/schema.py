@@ -22,6 +22,9 @@ MANUAL_RUN_ADDITIONAL_COLUMNS: tuple[str, ...] = (
 DEFECT_ADDITIONAL_COLUMNS: tuple[str, ...] = (
     "requirement",
     "requirements_json",
+    "solution_cluster",
+    "defect_category",
+    "tproject",
 )
 
 

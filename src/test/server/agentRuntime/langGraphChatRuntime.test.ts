@@ -133,7 +133,7 @@ describe("LangGraph chat runtime", () => {
     });
     expect(result.metrics.toolRouting).toEqual(expect.objectContaining({
       shouldUseTools: true,
-      intent: "general",
+      intent: "metric_query",
       toolNames: expect.arrayContaining(["query_analytics", "diagnose_analytics_empty"]),
     }));
     expect(events.map((event) => (event as { type?: string }).type)).toEqual([
@@ -222,9 +222,7 @@ describe("LangGraph chat runtime", () => {
       "search_analytics_filter_values",
       "query_analytics",
     ]);
-    // Model-driven planning runs first at each step; when it returns no tool calls,
-    // the deterministic defect-reporter fallback chain kicks in.
-    expect(requestToolCompletion).toHaveBeenCalledTimes(2);
+    expect(requestToolCompletion).not.toHaveBeenCalled();
   });
 
   it("asks for clarification instead of model-planned fallback when a named reporter has no candidate", async () => {
@@ -284,8 +282,7 @@ describe("LangGraph chat runtime", () => {
       "ask_clarification",
     ]);
     expect(result.mainAgentToolContext.stoppedReason).toBe("clarification_requested");
-    // Model-driven planning runs first at each step; deterministic fallback runs when model returns no tool calls.
-    expect(requestToolCompletion).toHaveBeenCalledTimes(2);
+    expect(requestToolCompletion).not.toHaveBeenCalled();
   });
 
   it("resolves a name-only clarification reply and continuation command through a reversed defect reporter alias", async () => {
@@ -348,8 +345,7 @@ describe("LangGraph chat runtime", () => {
     expect(JSON.parse(executeToolCall.mock.calls[2][0].function.arguments)).toMatchObject({
       filters: { detected_by: ["Miao Xu"] },
     });
-    // Model-driven planning runs first at each step; deterministic fallback runs when model returns no tool calls.
-    expect(requestToolCompletion).toHaveBeenCalled();
+    expect(requestToolCompletion).not.toHaveBeenCalled();
     expect(result.mainAgentToolContext.stoppedReason).toBe("deterministic_plan_complete");
   });
 
@@ -569,7 +565,7 @@ describe("LangGraph chat runtime", () => {
       },
     };
     const semanticPlan = deterministicMetricPlan(actor.scopeHash);
-    const requestToolCompletion = vi.fn().mockResolvedValue({ content: "", toolCalls: [] });
+    const requestToolCompletion = vi.fn();
     const executeToolCall = vi.fn().mockResolvedValue({
       contextText: "# Canonical metric result",
       toolMessage: {
@@ -600,9 +596,7 @@ describe("LangGraph chat runtime", () => {
       },
     });
 
-    // Model-driven planning runs first; when it returns no tool calls,
-    // the canonical QueryPlan deterministic fallback executes.
-    expect(requestToolCompletion).toHaveBeenCalledTimes(1);
+    expect(requestToolCompletion).not.toHaveBeenCalled();
     expect(executeToolCall).toHaveBeenCalledWith({
       id: "plan-direct-1:s1",
       type: "function",
@@ -765,9 +759,7 @@ describe("LangGraph chat runtime", () => {
       },
     });
 
-    // Model-driven planning runs first; when it returns no tool calls,
-    // the governed semantic plan deterministic fallback executes.
-    expect(requestToolCompletion).toHaveBeenCalledTimes(1);
+    expect(requestToolCompletion).not.toHaveBeenCalled();
     expect(executeToolCall).toHaveBeenCalledTimes(1);
     expect(executeToolCall).toHaveBeenCalledWith(expect.objectContaining({
       id: "plan-dddddddddddddddd-s1",
@@ -815,7 +807,7 @@ describe("LangGraph chat runtime", () => {
       guardrails: ["READ_ONLY_SOURCE_PLAN", "NO_ARBITRARY_CODE", "NO_ARBITRARY_SQL", "NO_CAUSAL_CLAIMS"],
       ruleEffects: [],
     };
-    const requestToolCompletion = vi.fn().mockResolvedValue({ content: "", toolCalls: [] });
+    const requestToolCompletion = vi.fn();
     const executeToolCall = vi.fn().mockResolvedValue({
       contextText: "# Main agent semantic tool result\nTool: query_semantic_records\nRows: 1",
       toolMessage: {
@@ -853,9 +845,7 @@ describe("LangGraph chat runtime", () => {
       },
     });
 
-    // Model-driven planning runs first; when it returns no tool calls,
-    // the governed semantic record plan deterministic fallback executes.
-    expect(requestToolCompletion).toHaveBeenCalledTimes(1);
+    expect(requestToolCompletion).not.toHaveBeenCalled();
     expect(executeToolCall).toHaveBeenCalledWith(expect.objectContaining({
       function: { name: "query_semantic_records", arguments: JSON.stringify(canonicalArgs) },
     }), expect.objectContaining({ actor: expect.objectContaining({ actorId: "alice", scopeHash: "scope-a" }) }));
@@ -995,7 +985,7 @@ describe("LangGraph chat runtime", () => {
       runId: "run-123",
       threadId: "thread-123",
       actorScopeHash: "scope-1",
-      intent: "general",
+      intent: "metric_query",
       outcome: "completed",
       toolNames: ["query_semantic_metrics"],
     }));
