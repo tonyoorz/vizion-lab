@@ -20,6 +20,7 @@ const RETRYABLE_READ_TOOLS = new Set([
   "query_defect_high_frequency_analysis",
   "query_defect_aggregate",
   "query_defect_records",
+  "export_defect_records",
   "query_full_picture_module",
   "search_duplicates",
 ]);

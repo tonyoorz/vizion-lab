@@ -4,13 +4,6 @@ import {
   ACTOR_CAPABILITY_HEADER,
   createActorCapability,
 } from "./agentActorCapability.mjs";
-import {
-  callJiraMcp,
-  extractMcpContentText,
-  isJiraMcpConfigured,
-  listJiraMcpTools,
-  resolveJiraMcpTool,
-} from "./mcpClient/index.mjs";
 
 const DEFAULT_ANALYTICS_API_BASE = process.env.VIZION_ANALYTICS_API_BASE || "http://127.0.0.1:3003";
 
@@ -98,7 +91,7 @@ const ANALYTICS_QUERY_PROPERTIES = {
   dataset: { type: "string", enum: ["defects"], description: "Analytics dataset. Phase 1 supports defects." },
   intent: { type: "string", enum: ["aggregate", "trend", "rank"], description: "Question shape. Phase 1 executes these through defect aggregate semantics." },
   metrics: { type: "array", items: { type: "string", enum: DEFECT_METRIC_VALUES } },
-  dimensions: { type: "array", items: { type: "string", enum: DEFECT_DIMENSION_VALUES }, maxItems: 3 },
+  dimensions: { type: "array", items: { type: "string", enum: DEFECT_DIMENSION_VALUES }, maxItems: 1 },
   derived_metrics: { type: "array", items: { type: "string", enum: ["delta", "growth_pct"] } },
   filters: { type: "object", properties: DEFECT_FILTER_PROPERTIES, additionalProperties: false },
   time: {
@@ -693,12 +686,29 @@ export const MAIN_AGENT_TOOLS = [
     type: "function",
     function: {
       name: "query_defect_records",
-      description: "Fetch example defect records for a query_defect_aggregate row using its drilldown_ref. Records illustrate cases; they do not prove causality.",
+      description: "Fetch a page of example defect records for a query_defect_aggregate row using its drilldown_ref. Reuse the same drilldown_ref with next_cursor to continue through the authorized result set. Records illustrate cases; they do not prove causality.",
       parameters: {
         type: "object",
         properties: {
           drilldown_ref: { type: "string", description: "Opaque drilldown_ref returned by query_defect_aggregate." },
-          limit: { type: "number", description: "Maximum records to return, capped by the server." },
+          cursor: { type: "string", description: "Opaque next_cursor from the prior page. Reuse it only with the same drilldown_ref." },
+          page_size: { type: "number", description: "Records per page for the initial request, capped by the server." },
+          limit: { type: "number", description: "Legacy alias for page_size, capped by the server." },
+        },
+        required: ["drilldown_ref"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "export_defect_records",
+      description: "Create a short-lived CSV download for the complete authorized result set behind a query_defect_aggregate drilldown_ref. Use when the user explicitly needs the full record list or a CSV, not to place all rows in chat context.",
+      parameters: {
+        type: "object",
+        properties: {
+          drilldown_ref: { type: "string", description: "Opaque drilldown_ref returned by query_defect_aggregate." },
         },
         required: ["drilldown_ref"],
         additionalProperties: false,
@@ -799,46 +809,6 @@ export const MAIN_AGENT_TOOLS = [
           },
         },
         required: ["question"],
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "jira_search_issues",
-      description: "Search Jira issues on the configured Jira instance (e.g. https://jira.cc.bmwgroup.net) via the Jira MCP server. Use this when the user asks about Jira tickets, issues, epics, or work items by keyword, status, assignee, project, or JQL query. The query MUST be a valid JQL (Jira Query Language) expression. Returns issue summaries with key, summary, status, and other fields.",
-      parameters: {
-        type: "object",
-        properties: {
-          query: {
-            type: "string",
-            description: "A valid JQL (Jira Query Language) expression. Examples: 'project = IDCEVODEV AND status = \"In Progress\"', 'project = ABPIDM AND created >= 2026-08-01 ORDER BY created DESC', 'assignee = currentUser() AND status = Open'. Always use the exact project key (e.g. IDCEVODEV, not 'IDCevo'). If the user gives a project name, ask for clarification or use jira_get_issue to look it up first.",
-          },
-          limit: {
-            type: "number",
-            description: "Maximum number of issues to return. Use 10 unless the user asks for more. Max 50.",
-          },
-        },
-        required: ["query"],
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "jira_get_issue",
-      description: "Fetch full details of a single Jira issue by its key (e.g. PROJ-123) via the Jira MCP server. Use this when the user references a specific Jira ticket by key and wants its status, description, comments, or other fields.",
-      parameters: {
-        type: "object",
-        properties: {
-          issue_key: {
-            type: "string",
-            description: "The Jira issue key, e.g. PROJ-123 or DTSV-456.",
-          },
-        },
-        required: ["issue_key"],
         additionalProperties: false,
       },
     },
@@ -1114,62 +1084,12 @@ function buildActorScope(actor) {
   };
 }
 
-const MAX_TOOL_MESSAGE_CHARS = Number(process.env.VIZION_MAX_TOOL_MESSAGE_CHARS || 30000);
-const TOOL_MESSAGE_TRUNCATION_NOTE = "truncated due to size limit";
-
-function truncateSemanticToolContent(content, limit) {
-  // Semantic tool results are JSON envelopes ({ ok, tool, result: { ...provenance, data: [...] } }).
-  // A naive string slice breaks JSON parsability, which causes buildToolEvidence to lose every
-  // provenance field and trips the claim gate into "blocked" even though the backend returned a
-  // complete evidence package. Instead, truncate the data array (drop rows) while preserving every
-  // provenance field so the gate can still validate the claim.
-  let parsed;
-  try {
-    parsed = JSON.parse(content);
-  } catch {
-    // Not a JSON envelope (or already corrupt) — fall back to a safe string slice.
-    return content.length > limit
-      ? content.slice(0, limit) + `\n{"note":"${TOOL_MESSAGE_TRUNCATION_NOTE}"}`
-      : content;
-  }
-  const envelope = parsed?.result && typeof parsed.result === "object" ? parsed.result : parsed;
-  const data = Array.isArray(envelope?.data) ? envelope.data : null;
-  if (!data) {
-    return content.length > limit
-      ? content.slice(0, limit) + `\n{"note":"${TOOL_MESSAGE_TRUNCATION_NOTE}"}`
-      : content;
-  }
-
-  let serialized = content;
-  let keep = data.length;
-  while (keep > 0 && serialized.length > limit) {
-    keep -= 1;
-    const trial = { ...envelope, data: data.slice(0, keep), _truncated: { kept: keep, total: data.length } };
-    const trialEnvelope = parsed?.result && typeof parsed.result === "object"
-      ? { ...parsed, result: trial }
-      : trial;
-    serialized = JSON.stringify(trialEnvelope);
-  }
-  if (keep === data.length) {
-    return content; // already within budget
-  }
-  return serialized;
-}
-
 function buildToolMessage(toolCall, content) {
-  const toolName = toolCall?.function?.name || "";
-  const overLimit = content.length > MAX_TOOL_MESSAGE_CHARS;
-  let trimmed = content;
-  if (overLimit) {
-    trimmed = SEMANTIC_TOOL_NAMES.has(toolName)
-      ? truncateSemanticToolContent(content, MAX_TOOL_MESSAGE_CHARS)
-      : content.slice(0, MAX_TOOL_MESSAGE_CHARS) + `\n{"note":"${TOOL_MESSAGE_TRUNCATION_NOTE}"}`;
-  }
   return {
     role: "tool",
     tool_call_id: toolCall?.id || "",
-    name: toolName,
-    content: trimmed,
+    name: toolCall?.function?.name || "",
+    content,
   };
 }
 
@@ -1178,7 +1098,7 @@ function formatSemanticContext(name, payload) {
   const metricLines = Object.entries(metrics).map(([metricId, value]) => `${metricId}: ${value}`);
   const data = Array.isArray(payload?.data) ? payload.data : [];
   const rows = data.length;
-  const rowLines = data.slice(0, 50).map((row) => JSON.stringify(row));
+  const rowLines = data.slice(0, 20).map((row) => JSON.stringify(row));
   const lineagePath = Array.isArray(payload?.lineage?.path) ? payload.lineage.path : [];
   const lineageText = lineagePath.map((relationship) => {
     const id = String(relationship?.id || "unknown");
@@ -1329,7 +1249,7 @@ function buildDataCatalogPayload() {
     },
     guardrails: [
       "Use only listed filters, dimensions, and modules.",
-      "Use query_analytics for flexible defect analysis, then query_defect_records only for examples from a returned drilldown_ref.",
+      "Use query_analytics for flexible defect analysis, then query_defect_records for examples from a returned drilldown_ref. Reuse next_cursor with the same drilldown_ref when more authorized pages are needed.",
       "Ask clarification when metric meaning or filter scope is ambiguous.",
       "Regression-commit causality is not available from these dashboard datasets alone.",
     ],
@@ -1679,7 +1599,7 @@ function formatCoverageAidaStatusContext(url, payload) {
 
 function formatTestingTeamFvAnalysisContext(url, payload) {
   const rows = Array.isArray(payload?.rows) ? payload.rows : [];
-  const rowLines = rows.slice(0, 50).map((row) => (
+  const rowLines = rows.slice(0, 20).map((row) => (
     `FV ${row?.fv || "unknown"}: executions=${Number(row?.total_runs || 0)}, passed=${Number(row?.passed_runs || 0)}, linked_defects=${Number(row?.linked_defects || 0)}, pass_rate=${Number(row?.pass_rate || 0)}%, defect_discovery_rate=${Number(row?.defect_discovery_rate || 0)}%`
   ));
   return [
@@ -1829,7 +1749,7 @@ async function executeTestCaseContext(toolCall, { analyticsFetch, analyticsApiBa
 function formatDefectHighFrequencyContext(url, payload) {
   const rows = Array.isArray(payload?.frequency_rows) ? payload.frequency_rows : [];
   const overview = payload?.overview || {};
-  const rowLines = rows.slice(0, 30).map((row, index) => {
+  const rowLines = rows.slice(0, 8).map((row, index) => {
     const moduleName = String(row.module || "未归类 ECU").trim();
     return `${index + 1}. ${moduleName}: ${Number(row.count || 0)} (${row.severity || "severity unknown"})`;
   });
@@ -1873,7 +1793,7 @@ function formatDefectAggregateContext(payload, { toolName = "query_defect_aggreg
   const derivedMetrics = Array.isArray(payload?.applied_query?.derived_metrics) ? payload.applied_query.derived_metrics : [];
   const dimensions = Array.isArray(payload?.applied_query?.dimensions) ? payload.applied_query.dimensions : [];
   const dimension = dimensions[0] || "scope";
-  const rowLines = rows.slice(0, 30).map((row, index) => {
+  const rowLines = rows.slice(0, 8).map((row, index) => {
     const label = String(row[dimension] || row.business_module || row.assigned_ecu || row.project || "all_defects").trim();
     const comparisonText = [];
     if (derivedMetrics.length) {
@@ -2100,7 +2020,7 @@ function formatAnalyticsFallbackContext(url, payload) {
   const columns = Array.isArray(payload?.columns) ? payload.columns.map(String) : [];
   const metricColumns = columns.filter((column) => /count|rate|total|rows/i.test(column));
   const labelColumns = columns.filter((column) => !metricColumns.includes(column));
-  const rowLines = rows.slice(0, 30).map((row, index) => {
+  const rowLines = rows.slice(0, 8).map((row, index) => {
     const label = labelColumns.map((column) => String(row?.[column] ?? "").trim()).filter(Boolean).join(" / ") || "all_rows";
     const metricText = (metricColumns.length ? metricColumns : columns)
       .map((column) => `${column} ${row?.[column] ?? "N/A"}`)
@@ -2168,7 +2088,7 @@ function buildDetectedByAliasFilters(baseFilters) {
 
 function formatDefectRecordsContext(payload) {
   const rows = Array.isArray(payload?.rows) ? payload.rows : [];
-  const rowLines = rows.slice(0, 30).map((row, index) => {
+  const rowLines = rows.slice(0, 8).map((row, index) => {
     const ticketId = String(row.ticket_id || "N/A").trim();
     const ticketName = String(row.ticket_name || "Untitled").replace(/\s+/g, " ").trim();
     return `${index + 1}. ${ticketId}: ${ticketName}`;
@@ -2178,7 +2098,9 @@ function formatDefectRecordsContext(payload) {
     "Tool: query_defect_records",
     `Snapshot: ${payload?.snapshot_version || "unknown"}`,
     `Query fingerprint: ${payload?.query_fingerprint || "unknown"}`,
+    `Page: ${Number(payload?.page || 1)}, page size ${Number(payload?.page_size || payload?.returned_rows || 0)}`,
     `Rows: ${Number(payload?.returned_rows || 0)} returned of ${Number(payload?.total_rows || 0)}${payload?.truncated ? " (truncated)" : ""}`,
+    payload?.next_cursor ? `Next cursor: ${payload.next_cursor}` : "Next cursor: none",
     rowLines.length ? "Example records:" : "Example records: none",
     ...rowLines,
     Array.isArray(payload?.warnings) && payload.warnings.length ? `Warnings: ${payload.warnings.join(" | ")}` : "",
@@ -2200,6 +2122,36 @@ async function executeDefectRecords(toolCall, dependencies) {
   return {
     toolMessage: buildToolMessage(toolCall, JSON.stringify({ ok: true, tool: "query_defect_records", url, result: payload })),
     contextText: formatDefectRecordsContext(payload),
+  };
+}
+
+function formatDefectRecordsExportContext(payload) {
+  return [
+    "# Main agent tool result",
+    "Tool: export_defect_records",
+    `Snapshot: ${payload?.snapshot_version || "unknown"}`,
+    `Query fingerprint: ${payload?.query_fingerprint || "unknown"}`,
+    `Download URL: ${payload?.download_url || "unavailable"}`,
+    `Expires at: ${payload?.expires_at || "unknown"}`,
+    "The CSV is generated server-side from the authorized drilldown; do not place its records in chat context.",
+  ].join("\n");
+}
+
+async function executeDefectRecordsExport(toolCall, dependencies) {
+  const args = parseToolArguments(toolCall?.function?.arguments);
+  const { url, response } = await postAgentAnalyticsJson("/api/agent/analytics/defects/export", args, dependencies);
+  if (!response?.ok) {
+    return failedToolResult(
+      toolCall,
+      "export_defect_records",
+      await sanitizedHttpFailure(response),
+      `# Main agent tool result\nTool: export_defect_records\nSource query: POST ${url}\nResult: unavailable because the analytics export request failed.`,
+    );
+  }
+  const payload = await response.json();
+  return {
+    toolMessage: buildToolMessage(toolCall, JSON.stringify({ ok: true, tool: "export_defect_records", url, result: payload })),
+    contextText: formatDefectRecordsExportContext(payload),
   };
 }
 
@@ -2358,120 +2310,6 @@ function executeAskClarification(toolCall) {
   };
 }
 
-/**
- * Resolve a Jira MCP tool that matches the requested action, then call it.
- *
- * The Jira MCP server may name its tools differently across versions, so we use
- * keyword matching (resolveJiraMcpTool) to find the right tool rather than
- * hard-coding a name. If no matching tool is found, we fall back to listing
- * available tools so the model can self-correct on the next turn.
- *
- * Parameter names are adapted to the matched tool's input schema — we inspect
- * the schema's required/properties and map our generic arg names to whatever
- * the tool expects (e.g. "query" → "jql", "issue_key" → "issue_key" or "key").
- */
-async function executeJiraMcpAction(toolCall, keywords, args) {
-  if (!isJiraMcpConfigured()) {
-    const content = JSON.stringify({
-      error: "Jira MCP is not configured. Set JIRA_MCP_URL, JIRA_PERSONAL_TOKEN, and JIRA_URL in .env.",
-    });
-    return {
-      toolMessage: buildToolMessage(toolCall, content),
-      contextText: "# Main agent tool result\nTool: jira (MCP)\nResult: unavailable — Jira MCP is not configured.",
-    };
-  }
-
-  const tool = await resolveJiraMcpTool(keywords);
-  if (!tool) {
-    const available = await listJiraMcpTools().catch(() => []);
-    const names = Array.isArray(available) ? available.map((t) => t.name).join(", ") : "(failed to list)";
-    const content = JSON.stringify({ error: "No matching Jira MCP tool found", availableTools: names });
-    return {
-      toolMessage: buildToolMessage(toolCall, content),
-      contextText: `# Main agent tool result\nTool: jira (MCP)\nResult: no matching tool found for [${keywords.join(", ")}]. Available: ${names}`,
-    };
-  }
-
-  const adaptedArgs = adaptMcpToolArgs(args, tool);
-  const result = await callJiraMcp(tool.name, adaptedArgs);
-  const text = extractMcpContentText(result);
-  return {
-    toolMessage: buildToolMessage(toolCall, JSON.stringify({ tool: tool.name, args: adaptedArgs, result: text })),
-    contextText: `# Main agent tool result\nTool: jira__${tool.name} (MCP)\nResult:\n${text}`,
-  };
-}
-
-/**
- * Map generic arg names to the actual parameter names expected by the MCP tool.
- *
- * The LLM uses our function-calling schema (query, limit, issue_key), but the
- * MCP server's tool may use different names (e.g. jql, max_results, issue_key).
- * We inspect the tool's inputSchema properties and try to find a match.
- */
-function adaptMcpToolArgs(genericArgs, tool) {
-  const schemaProps = tool?.inputSchema?.properties || {};
-  const schemaKeys = new Set(Object.keys(schemaProps));
-  const adapted = {};
-
-  // Direct match: if the generic arg name exists in the schema, use it as-is.
-  for (const [key, value] of Object.entries(genericArgs)) {
-    if (schemaKeys.has(key)) {
-      adapted[key] = value;
-      continue;
-    }
-    // Try common aliases.
-    const aliasMap = {
-      query: ["jql", "q", "search", "search_query"],
-      limit: ["max_results", "maxResults", "count", "limit", "top", "num"],
-      issue_key: ["issue_key", "issueKey", "key", "issue_id", "issueId", "id"],
-    };
-    const aliases = aliasMap[key] || [];
-    const match = aliases.find((alias) => schemaKeys.has(alias));
-    if (match) {
-      adapted[match] = value;
-    } else if (schemaKeys.size === 0) {
-      // If the schema has no defined properties (or no schema), pass through.
-      adapted[key] = value;
-    }
-    // If no match found, skip the arg rather than sending an unknown parameter.
-  }
-
-  return adapted;
-}
-
-async function executeJiraSearchIssues(toolCall) {
-  const args = parseToolArguments(toolCall?.function?.arguments);
-  const query = String(args.query || "").trim();
-  const limit = Math.max(1, Math.min(50, Number(args.limit || 10)));
-  if (!query) {
-    const content = JSON.stringify({ error: "jira_search_issues requires query" });
-    return {
-      toolMessage: buildToolMessage(toolCall, content),
-      contextText: "# Main agent tool result\nTool: jira_search_issues\nResult: unavailable because query is empty.",
-    };
-  }
-  // Pass query as both "query" (generic) and "jql" (MCP param name).
-  // adaptMcpToolArgs will pick whichever the tool's schema accepts.
-  return executeJiraMcpAction(
-    toolCall,
-    ["search", "jql", "find", "list"],
-    { query, limit },
-  );
-}
-
-async function executeJiraGetIssue(toolCall) {
-  const args = parseToolArguments(toolCall?.function?.arguments);
-  const issueKey = String(args.issue_key || "").trim();
-  if (!issueKey) {
-    const content = JSON.stringify({ error: "jira_get_issue requires issue_key" });
-    return {
-      toolMessage: buildToolMessage(toolCall, content),
-      contextText: "# Main agent tool result\nTool: jira_get_issue\nResult: unavailable because issue_key is empty.",
-    };
-  }
-  return executeJiraMcpAction(toolCall, ["get", "issue", "detail", "fetch"], { issue_key: issueKey, issueKey });
-}
-
 export async function executeMainAgentToolCall(toolCall, {
   analyticsFetch = globalThis.fetch,
   analyticsApiBase = DEFAULT_ANALYTICS_API_BASE,
@@ -2549,17 +2387,14 @@ export async function executeMainAgentToolCall(toolCall, {
     if (name === "query_defect_records") {
       return await executeDefectRecords(toolCall, agentAnalyticsDependencies);
     }
+    if (name === "export_defect_records") {
+      return await executeDefectRecordsExport(toolCall, agentAnalyticsDependencies);
+    }
     if (name === "query_full_picture_module") {
       return await executeFullPictureModule(toolCall, { analyticsFetch, analyticsApiBase, now });
     }
     if (name === "search_duplicates") {
       return await executeDuplicateSearch(toolCall, { runDuplicateBridge, ensureDuplicateWarmup, actor });
-    }
-    if (name === "jira_search_issues") {
-      return await executeJiraSearchIssues(toolCall);
-    }
-    if (name === "jira_get_issue") {
-      return await executeJiraGetIssue(toolCall);
     }
     if (name === "ask_clarification") {
       return executeAskClarification(toolCall);

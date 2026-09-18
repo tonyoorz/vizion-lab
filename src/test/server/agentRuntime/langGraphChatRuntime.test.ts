@@ -225,6 +225,83 @@ describe("LangGraph chat runtime", () => {
     expect(requestToolCompletion).not.toHaveBeenCalled();
   });
 
+  it("exports the complete authorized record set for an explicit named-reporter CSV request", async () => {
+    const requestToolCompletion = vi.fn().mockResolvedValue({ content: "", toolCalls: [] });
+    const executeToolCall = vi.fn(async (toolCall) => {
+      if (toolCall.function.name === "search_analytics_filter_values") {
+        return {
+          contextText: "# Main agent tool result\nTool: search_analytics_filter_values\nCandidate values: Xumiao: 3",
+          toolMessage: {
+            role: "tool",
+            tool_call_id: toolCall.id,
+            name: "search_analytics_filter_values",
+            content: JSON.stringify({
+              ok: true,
+              tool: "search_analytics_filter_values",
+              result: { values: [{ value: "Xumiao", count: 3 }] },
+            }),
+          },
+        };
+      }
+      if (toolCall.function.name === "query_analytics") {
+        return {
+          contextText: "# Main agent tool result\nTool: query_analytics\nAggregate rows: 1",
+          toolMessage: {
+            role: "tool",
+            tool_call_id: toolCall.id,
+            name: "query_analytics",
+            content: JSON.stringify({
+              ok: true,
+              tool: "query_analytics",
+              result: { rows: [{ defect_count: 3, drilldown_ref: "reporter-drilldown-ref" }], returned_groups: 1 },
+            }),
+          },
+        };
+      }
+      return {
+        contextText: "# Main agent tool result\nTool: export_defect_records\nDownload URL: /api/agent/analytics/defects/export/download?token=download-token",
+        toolMessage: {
+          role: "tool",
+          tool_call_id: toolCall.id,
+          name: "export_defect_records",
+          content: JSON.stringify({ ok: true, tool: "export_defect_records" }),
+        },
+      };
+    });
+    const runtime = createLangGraphChatRuntime({
+      resolveAnalyticsContext: vi.fn().mockResolvedValue({ contextText: "# Analytics", skipDefectContext: false }),
+      resolveDefectContext: vi.fn(),
+      shouldPlanTools: vi.fn().mockReturnValue(true),
+      requestToolCompletion,
+      executeToolCall,
+      now: () => new Date("2026-08-11T08:00:00.000Z"),
+    });
+
+    const result = await runtime.invoke({
+      body: {
+        threadId: "thread-defect-reporter-export",
+        useAnalyticsContext: true,
+        actor: analyticsActor("scope-reporter-export"),
+        messages: [{ role: "user", content: "xumiao 提票明细导出 CSV" }],
+      },
+    });
+
+    expect(executeToolCall.mock.calls.map(([toolCall]) => toolCall.function.name)).toEqual([
+      "search_analytics_filter_values",
+      "query_analytics",
+      "export_defect_records",
+    ]);
+    expect(JSON.parse(executeToolCall.mock.calls[2][0].function.arguments)).toEqual({
+      drilldown_ref: "reporter-drilldown-ref",
+    });
+    expect(result.mainAgentToolContext.toolCalls.map((toolCall) => toolCall.function.name)).toEqual([
+      "search_analytics_filter_values",
+      "query_analytics",
+      "export_defect_records",
+    ]);
+    expect(requestToolCompletion).not.toHaveBeenCalled();
+  });
+
   it("asks for clarification instead of model-planned fallback when a named reporter has no candidate", async () => {
     const requestToolCompletion = vi.fn().mockResolvedValue({ content: "", toolCalls: [] });
     const executeToolCall = vi.fn(async (toolCall) => {
@@ -873,6 +950,32 @@ describe("LangGraph chat runtime", () => {
           scopes: { allowedObjectTypes: ["quality.defect"], teamIds: ["DTSV_China"] },
         },
         messages: [{ role: "user", content: "camera black screen" }],
+      },
+    });
+
+    expect(resolveDefectContext).not.toHaveBeenCalled();
+  });
+
+  it("skips duplicate context when a ready governed analytics plan already answers the query", async () => {
+    const resolveDefectContext = vi.fn();
+    const runtime = createLangGraphChatRuntime({
+      resolveAnalyticsContext: vi.fn().mockResolvedValue({
+        contextText: "# Analytics",
+        skipDefectContext: false,
+        analysisPlan: { status: "ready", operation: "kpi_summary" },
+      }),
+      resolveDefectContext,
+      shouldPlanTools: vi.fn().mockReturnValue(false),
+      now: () => new Date("2026-09-11T08:00:00.000Z"),
+    });
+
+    await runtime.invoke({
+      body: {
+        threadId: "thread-ready-plan-skips-duplicate-context",
+        useAnalyticsContext: true,
+        useDefectContext: true,
+        actor: analyticsActor("scope-ready-plan"),
+        messages: [{ role: "user", content: "最近一个月 DTSV 测出的问题" }],
       },
     });
 

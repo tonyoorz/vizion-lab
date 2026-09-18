@@ -435,7 +435,11 @@ def _append_history_evidence(
     history_rows: list[sqlite3.Row],
     *,
     capture_audit_history: bool = False,
+    target_phase: str = "09",
 ) -> None:
+    target_phase_key = f"seen_phase{target_phase}"
+    latest_phase_key = f"latest_phase{target_phase}_at"
+    reopened_key = f"reopened_after_phase{target_phase}"
     for row in history_rows:
         defect_id = _text(row["defect_id"])
         record = records.get(defect_id)
@@ -460,14 +464,14 @@ def _append_history_evidence(
             old_phase = _extract_preferred_phase_code(row["old_value_text"], row["old_value"])
             new_phase = _extract_preferred_phase_code(row["new_value_text"], row["new_value"])
             record["phase_history_count"] += 1
-            if old_phase == "01" and new_phase == "09":
+            if old_phase == "01" and new_phase == target_phase:
                 record["direct_close"] = True
-            if new_phase == "09":
-                record["seen_phase09"] = True
-                record["latest_phase09_at"] = timestamp or record["latest_phase09_at"]
-            elif record["seen_phase09"] and old_phase == "09" and new_phase and new_phase != "09":
-                record["reopened_after_phase09"] = True
-            if record["seen_phase09"] and new_phase == "06":
+            if new_phase == target_phase:
+                record[target_phase_key] = True
+                record[latest_phase_key] = timestamp or record[latest_phase_key]
+            elif record.get(target_phase_key) and old_phase == target_phase and new_phase and new_phase != target_phase:
+                record[reopened_key] = True
+            if target_phase == "09" and record.get("seen_phase09") and new_phase == "06":
                 record["entered_phase06_after_phase09"] = True
             continue
         value = new_value
@@ -1121,6 +1125,11 @@ def _public_record(
         "function_responsible": _display(record["function_responsible"], "(blank)"),
         "assigned_ecu": _display(record["assigned_ecu"], "(blank)"),
         "ecu_to_modul": _display(record["ecu_to_modul"], "(blank)"),
+        "legacy_project": _display(record["legacy_project"], "(blank)"),
+        "final_project": _display(record["final_project"], "(blank)"),
+        "software_version": _display(record["software_version"], "(blank)"),
+        "parent_child_type": _display(record["parent_child_type"], "(blank)"),
+        "relation_to": _display(record["relation_to"], "(blank)"),
         "severity": _display(record["severity"], "(blank)"),
         "problem_severity": _display(record["problem_severity"], "(blank)"),
         "reporting_class": _display(record["reporting_class"], "(blank)"),
@@ -1220,9 +1229,10 @@ def build_phase09_idcevo_report_payload(
         defect_columns = _table_columns(connection, "octane_defects")
         history_columns = _table_columns(connection, "octane_defect_history_events")
         required_phase = "phase" in defect_columns
-        required_project = "project" in defect_columns
+        project_scope_field = "tproject" if "tproject" in defect_columns else "project"
+        required_project = project_scope_field in defect_columns
         if not required_phase or not required_project:
-            raise ValueError("octane_defects must contain project and phase columns")
+            raise ValueError("octane_defects must contain phase and tproject or project columns")
 
         optional_columns = {
             name: _optional_column(defect_columns, name)
@@ -1233,6 +1243,8 @@ def build_phase09_idcevo_report_payload(
                 "creation_time",
                 "last_modified",
                 "year",
+                "project",
+                "tproject",
                 "team",
                 "problem_finder_team",
                 "solution_cluster",
@@ -1242,6 +1254,7 @@ def build_phase09_idcevo_report_payload(
                 "function_responsible",
                 "assigned_ecu",
                 "ecu_to_modul",
+                "software_version",
                 "blocking_reason",
                 "reprel_changes",
                 "severity",
@@ -1262,6 +1275,8 @@ def build_phase09_idcevo_report_payload(
                    {creation_time} AS creation_time,
                    {last_modified} AS last_modified,
                    {year} AS year,
+                   {project} AS legacy_project,
+                   {tproject} AS final_project,
                    {team} AS team,
                    {problem_finder_team} AS problem_finder_team,
                    {solution_cluster} AS solution_cluster,
@@ -1271,6 +1286,7 @@ def build_phase09_idcevo_report_payload(
                    {function_responsible} AS function_responsible,
                    {assigned_ecu} AS assigned_ecu,
                    {ecu_to_modul} AS ecu_to_modul,
+                   {software_version} AS software_version,
                    {blocking_reason} AS blocking_reason,
                    {reprel_changes} AS reprel_changes,
                    {severity} AS severity,
@@ -1280,11 +1296,16 @@ def build_phase09_idcevo_report_payload(
                    {relation_to} AS relation_to,
                    {fetched_at} AS fetched_at
             FROM octane_defects
-            WHERE upper(trim(coalesce(project, ''))) = 'IDCEVO'
+            WHERE upper(trim(coalesce({project_scope}, ''))) = 'IDCEVO'
                             AND creation_time >= ?
                             AND creation_time < ?
             ORDER BY defect_id
-                        """.format(**optional_columns),
+                        """.format(
+                            **optional_columns,
+                            project_scope=_optional_column(
+                                defect_columns, project_scope_field
+                            ),
+                        ),
                         (population_start, population_end_exclusive),
         ).fetchall()
 
@@ -1335,6 +1356,8 @@ def build_phase09_idcevo_report_payload(
                 "creation_time": _text(row["creation_time"]),
                 "last_modified": last_modified,
                 "year": _year_from_record(row["year"], row["creation_time"]),
+                "legacy_project": _text(row["legacy_project"]),
+                "final_project": _text(row["final_project"]),
                 "team": report_team,
                 "solution_cluster": solution_cluster,
                 "defect_category": defect_category,
@@ -1343,6 +1366,7 @@ def build_phase09_idcevo_report_payload(
                 "function_responsible": _text(row["function_responsible"]),
                 "assigned_ecu": _text(row["assigned_ecu"]),
                 "ecu_to_modul": _text(row["ecu_to_modul"]),
+                "software_version": _text(row["software_version"]),
                 "blocking_reason": _text(row["blocking_reason"]),
                 "reprel_changes": _text(row["reprel_changes"]),
                 "severity": _text(row["severity"]),
@@ -1519,6 +1543,12 @@ def build_phase09_idcevo_report_payload(
             "latest_last_modified": latest_modified_at,
             "population_start": population_start,
             "population_end_exclusive": population_end_exclusive,
+            "project_scope_field": project_scope_field,
+            "project_scope_note": (
+                "Final business project (tproject) is used for scope; legacy project is retained for audit."
+                if project_scope_field == "tproject"
+                else "Legacy project is used because this source database has no tproject column."
+            ),
             "report_title": (
                 "IDCEVO Phase 09 Closure Risk Review"
                 if include_china_specific
@@ -1542,15 +1572,18 @@ def build_phase09_idcevo_report_payload(
             ),
             "scope_description": (
                 "All IDCEVO tickets created from 2025-01-01 through the source snapshot are counted first. "
+                "IDCEVO scope uses the final business project tproject. "
                 "This analysis then selects their current Phase 09 tickets, includes China-specific functions and "
                 "excludes tickets whose Problem Finder Team contains CoC."
                 if include_china_specific
                 else "All IDCEVO tickets created from 2025-01-01 through the source snapshot are counted first. "
+                "IDCEVO scope uses the final business project tproject. "
                 "This analysis then selects their current Phase 09 tickets, excludes China-specific functions and "
                 "tickets raised by CoC development teams."
             ),
             "scope_rule": (
-                "Count all IDCEVO tickets in the creation-time window first, then select tickets whose current phase is 09. "
+                "Use final business project tproject for IDCEVO scope when available; use legacy project only when tproject is unavailable. "
+                "Count all scoped IDCEVO tickets in the creation-time window first, then select tickets whose current phase is 09. "
                 + (
                     "Include China-specific functions. "
                     if include_china_specific
@@ -1766,3 +1799,1000 @@ def generate_phase09_idcevo_report(
     resolved_output_path.parent.mkdir(parents=True, exist_ok=True)
     resolved_output_path.write_text(_build_html(payload), encoding="utf-8")
     return resolved_output_path
+
+
+# ---------------------------------------------------------------------------
+# Phase 06 (resolved / concluded tickets) resolution-quality review
+# ---------------------------------------------------------------------------
+
+
+def _assess_release_evidence_phase06(record: dict[str, Any]) -> None:
+    """Phase 06 version of release-evidence assessment.
+
+    Uses ``latest_phase06_at`` instead of ``latest_phase09_at`` for temporal
+    comparisons.  Status labels reflect "current Phase 06" rather than 09.
+    """
+    phase06_at = _text(record["latest_phase06_at"])
+    target_version_events = list(record["target_version_events"])
+    post_phase06_target_events = [
+        event
+        for event in target_version_events
+        if _is_after_or_at(event[0], phase06_at)
+    ]
+    target_timestamp, target_field, target_value = _latest_event(
+        post_phase06_target_events or target_version_events
+    )
+    record["target_version_value"] = target_value
+    record["target_version_field"] = target_field
+    record["target_version_at"] = target_timestamp
+    if post_phase06_target_events:
+        record["target_version_status"] = "Target version recorded after current Phase 06"
+    elif target_version_events:
+        record["target_version_status"] = "Target version recorded before current Phase 06"
+    else:
+        record["target_version_status"] = "No target version recorded"
+
+    planning_window_events = list(record["planning_window_events"])
+    post_phase06_window_events = [
+        event
+        for event in planning_window_events
+        if _is_after_or_at(event[0], phase06_at)
+    ]
+    window_timestamp, window_field, window_value = _latest_event(
+        post_phase06_window_events or planning_window_events
+    )
+    record["planning_window_value"] = window_value
+    record["planning_window_field"] = window_field
+    record["planning_window_at"] = window_timestamp
+    if post_phase06_window_events:
+        record["planning_window_status"] = "Planning window recorded after current Phase 06"
+    elif planning_window_events:
+        record["planning_window_status"] = "Planning window recorded before current Phase 06"
+    else:
+        record["planning_window_status"] = "No planning window recorded"
+
+    reprel_count = _parse_reprel_change_count(record["reprel_changes"])
+    reprel_source = "Current Reprel Changes"
+    if reprel_count is None:
+        for _timestamp, raw_value in reversed(record["reprel_history_values"]):
+            reprel_count = _parse_reprel_change_count(raw_value)
+            if reprel_count is not None:
+                reprel_source = "Reprel Changes history"
+                break
+    record["reprel_change_count"] = reprel_count
+    record["reprel_change_source"] = reprel_source if reprel_count is not None else ""
+    if reprel_count is None:
+        record["reprel_change_status"] = "Reprel change count not recorded"
+    elif reprel_count == 0:
+        record["reprel_change_status"] = "No recorded Reprel changes: 0"
+    else:
+        record["reprel_change_status"] = f"Recorded Reprel changes: {reprel_count}"
+
+    commercial_solution_date_events = list(record["commercial_solution_date_events"])
+    post_phase06_commercial_solution_date_events = [
+        event
+        for event in commercial_solution_date_events
+        if _is_after_or_at(event[0], phase06_at)
+    ]
+    commercial_timestamp, commercial_field, commercial_value = _latest_event(
+        post_phase06_commercial_solution_date_events or commercial_solution_date_events
+    )
+    record["commercial_solution_date_value"] = commercial_value
+    record["commercial_solution_date_field"] = commercial_field
+    record["commercial_solution_date_at"] = commercial_timestamp
+    if post_phase06_commercial_solution_date_events:
+        record["commercial_solution_date_status"] = (
+            "Commercial solution date recorded after current Phase 06"
+        )
+    elif commercial_solution_date_events:
+        record["commercial_solution_date_status"] = (
+            "Commercial solution date recorded before current Phase 06"
+        )
+    else:
+        record["commercial_solution_date_status"] = "No commercial solution date recorded"
+
+    postponement_decision_date_events = list(record["postponement_decision_date_events"])
+    postponement_timestamp, postponement_field, postponement_value = _latest_event(
+        postponement_decision_date_events
+    )
+    record["postponement_decision_date_value"] = postponement_value
+    record["postponement_decision_date_field"] = postponement_field
+    record["postponement_decision_date_at"] = postponement_timestamp
+    record["postponement_decision_date_status"] = (
+        "Postponement/tolerance decision date recorded"
+        if postponement_decision_date_events
+        else "No postponement/tolerance decision date recorded"
+    )
+
+
+def _assess_related_resolution_phase06(
+    record: dict[str, Any],
+    parents: dict[str, dict[str, str]],
+) -> None:
+    """Phase 06 version of related-resolution assessment.
+
+    Compares parent Phase 06 timestamps against the ticket's own
+    ``latest_phase06_at`` instead of 09.
+    """
+    relation_target = _extract_relation_target(record["relation_to"])
+    parent = parents.get(relation_target, {})
+    parent_phase = _text(parent.get("phase"))
+    parent_phase06_at = _text(parent.get("phase06_at"))
+    phase06_at = _text(record["latest_phase06_at"])
+    record["duplicate_parent_id"] = relation_target
+    record["duplicate_parent_phase"] = parent_phase
+    record["duplicate_parent_name"] = _text(parent.get("name"))
+    record["related_resolution_ticket_id"] = relation_target
+    record["related_resolution_phase06_at"] = parent_phase06_at
+
+    if not relation_target:
+        related_resolution_status = "No explicit linked ticket"
+    elif not parent:
+        related_resolution_status = "Explicit linked ticket unavailable in source"
+    elif not _phase_is_resolved(parent_phase):
+        related_resolution_status = "Explicit linked ticket is not currently Phase 06"
+    elif phase06_at and parent_phase06_at and parent_phase06_at >= phase06_at:
+        related_resolution_status = "Explicit linked ticket reached Phase 06 after current Phase 06"
+    elif parent_phase06_at:
+        related_resolution_status = "Explicit linked ticket reached Phase 06 before current Phase 06"
+    else:
+        related_resolution_status = "Explicit linked ticket is Phase 06; timestamp unavailable"
+    record["related_resolution_status"] = related_resolution_status
+    record["explicit_linked_resolution_after_phase06"] = (
+        related_resolution_status == "Explicit linked ticket reached Phase 06 after current Phase 06"
+    )
+
+
+def _assess_record_phase06(
+    record: dict[str, Any],
+    parents: dict[str, dict[str, str]],
+) -> None:
+    effective_reason, reason_source = _reason_details(record)
+    record["effective_reason"] = effective_reason
+    record["reason_source"] = reason_source
+    record["blocking_reason_group"] = _blocking_reason_group(effective_reason)
+    _assess_related_resolution_phase06(record, parents)
+    _assess_postponement_document(record)
+    has_resolved_duplicate_parent = (
+        _normalized(effective_reason) == "child (duplicate)"
+        and _phase_is_resolved(record["duplicate_parent_phase"])
+    )
+    record["has_resolved_duplicate_parent"] = has_resolved_duplicate_parent
+
+    _assess_release_evidence_phase06(record)
+
+    comment_evidence = record["comment_evidence"]
+    latest_phase06_at = _text(record["latest_phase06_at"])
+    record["plan_evidence_excerpt"] = _first_excerpt(comment_evidence["plan_records"])
+    record["decision_evidence_excerpt"] = _first_excerpt(
+        comment_evidence["decision_records"] or comment_evidence["ticket_reduction_records"]
+    )
+    record["no_fix_evidence_excerpt"] = _first_excerpt(comment_evidence["no_fix_records"])
+
+    # Phase 06 tickets ARE resolved — assess repair-plan quality accordingly.
+    if comment_evidence["plan_records"]:
+        repair_plan_status = "Resolution recorded (Phase 06 concluded)"
+    elif has_resolved_duplicate_parent:
+        repair_plan_status = "Linked duplicate parent is Phase 06"
+    elif comment_evidence["decision_records"] or comment_evidence["ticket_reduction_records"]:
+        repair_plan_status = "Resolution via decision/tolerance evidence"
+    else:
+        repair_plan_status = "Resolution evidence incomplete"
+    record["repair_plan_status"] = repair_plan_status
+
+    has_reprel_shift_evidence = (
+        isinstance(record["reprel_change_count"], int)
+        and int(record["reprel_change_count"]) > 0
+    )
+    has_target_or_planning_evidence = (
+        record["target_version_status"] != "No target version recorded"
+        or record["planning_window_status"] != "No planning window recorded"
+    )
+    has_commercial_solution_evidence = (
+        record["commercial_solution_date_status"]
+        != "No commercial solution date recorded"
+    )
+    has_repair_plan_evidence = repair_plan_status not in {
+        "Resolution evidence incomplete",
+    }
+    has_related_resolution_evidence = record["explicit_linked_resolution_after_phase06"]
+    has_follow_up_evidence = (
+        has_target_or_planning_evidence
+        or has_commercial_solution_evidence
+        or has_repair_plan_evidence
+        or has_related_resolution_evidence
+        or has_reprel_shift_evidence
+    )
+    record["has_follow_up_evidence"] = has_follow_up_evidence
+    if has_related_resolution_evidence:
+        record["follow_up_status"] = "Resolution evidence recorded"
+    elif has_target_or_planning_evidence:
+        record["follow_up_status"] = "Target version or planning window recorded"
+    elif has_commercial_solution_evidence:
+        record["follow_up_status"] = "Commercial solution date recorded"
+    elif has_repair_plan_evidence:
+        record["follow_up_status"] = "Repair plan reference recorded"
+    elif has_reprel_shift_evidence:
+        record["follow_up_status"] = "Reprel change / shift recorded"
+    else:
+        record["follow_up_status"] = "No remediation or follow-up evidence"
+
+    flags: list[str] = []
+    record["is_governed_severe"] = _is_governed_severe(record)
+    score = _severity_points(record, flags)
+    serious_impact = score >= 3
+    reason_normalized = _normalized(effective_reason)
+    decision_closure = (
+        reason_normalized in DECISION_CLOSURE_REASONS
+        or "management decision" in reason_normalized
+    )
+    record["decision_closure"] = decision_closure
+
+    if record["reopened_after_phase06"]:
+        score += 3
+        flags.append("Reopened after an earlier Phase 06 resolution")
+    if comment_evidence["no_fix_records"]:
+        score += 3
+        flags.append("Comment states no fix or no repair")
+    if decision_closure and repair_plan_status == "Resolution evidence incomplete":
+        score += 2
+        flags.append("Decision/tolerance closure without repair evidence")
+    if effective_reason == "Not recorded":
+        score += 1
+        flags.append("No structured closure reason")
+    if comment_evidence["ticket_reduction_records"] and repair_plan_status == "Resolution evidence incomplete":
+        score += 1
+        flags.append("Generic ticket-reduction decision wording")
+    if reason_normalized == "child (duplicate)" and not has_resolved_duplicate_parent:
+        score += 1
+        flags.append("Linked duplicate parent is unavailable or not resolved")
+
+    normal_reason = reason_normalized in NORMAL_CLOSURE_REASONS
+    normal_resolution = (
+        (normal_reason or has_resolved_duplicate_parent)
+        and not serious_impact
+        and not record["reopened_after_phase06"]
+        and not comment_evidence["no_fix_records"]
+    )
+    record["decision_closure_without_follow_up"] = (
+        decision_closure and not record["has_follow_up_evidence"]
+    )
+    # Phase 06 does not use needs_closure_evidence_review — always False.
+    record["needs_closure_evidence_review"] = False
+
+    decision_evidence_conflict = (
+        normal_reason
+        and serious_impact
+        and repair_plan_status == "Resolution evidence incomplete"
+    )
+    record["decision_evidence_conflict"] = decision_evidence_conflict
+
+    # Phase 06 risk tiers reflect RESOLUTION QUALITY, not closure-evidence gaps.
+    if decision_evidence_conflict:
+        risk_tier = "Root-cause quality concern"
+    elif record["reopened_after_phase06"] or comment_evidence["no_fix_records"]:
+        risk_tier = "Field-escape risk flagged"
+    elif score >= 7 and repair_plan_status == "Resolution evidence incomplete":
+        risk_tier = "Resolution evidence incomplete"
+    elif not has_follow_up_evidence and serious_impact:
+        risk_tier = "Resolution with residual risk"
+    elif normal_resolution:
+        risk_tier = "Effective resolution (verified)"
+    elif repair_plan_status != "Resolution evidence incomplete":
+        risk_tier = "Effective resolution (verified)"
+    else:
+        risk_tier = "Resolution evidence incomplete"
+
+    if record["direct_close"]:
+        flags.append("Direct lifecycle path: 01 -> 06")
+    has_remediation_or_resolution_evidence = has_follow_up_evidence
+    record["has_remediation_or_resolution_evidence"] = has_remediation_or_resolution_evidence
+
+    # Phase 06 production exposure reflects resolution / fix verification quality.
+    if not has_remediation_or_resolution_evidence and (
+        record["reopened_after_phase06"] or comment_evidence["no_fix_records"]
+    ):
+        production_exposure_status = "Resolved but field-escape risk remains"
+    elif not has_remediation_or_resolution_evidence and serious_impact:
+        production_exposure_status = "Resolved without root-cause verification"
+    elif has_remediation_or_resolution_evidence and not record["reopened_after_phase06"]:
+        production_exposure_status = "Resolved with verified fix"
+    else:
+        production_exposure_status = "Resolved without root-cause verification"
+    record["risk_score"] = score
+    record["risk_tier"] = risk_tier
+    record["risk_flags"] = flags
+    record["production_exposure_status"] = production_exposure_status
+
+    if normal_resolution:
+        closure_disposition = "Resolution evidence complete"
+    elif record["has_follow_up_evidence"]:
+        closure_disposition = "Resolution with follow-up needed"
+    elif decision_closure and record["has_substantive_assessment_document"]:
+        closure_disposition = "Documented risk acceptance without delivery evidence"
+    elif decision_closure:
+        closure_disposition = "Decision / tolerance without delivery evidence"
+    else:
+        closure_disposition = "Resolution evidence incomplete"
+    record["closure_disposition"] = closure_disposition
+    record["description_excerpt"] = _description_excerpt(record["description"])
+    record["risk_basis"] = _risk_basis_phase06(record)
+    record["automated_analysis"] = _automated_evidence_analysis_phase06(record)
+    record["evidence_index"] = _evidence_index(record)
+
+
+def _risk_basis_phase06(record: dict[str, Any]) -> str:
+    qgate_summary = "{} / {}".format(
+        _display(record["reporting_class"]),
+        _display(record["problem_severity"]),
+    )
+    target_detail = _text(record["target_version_value"]) or "Not recorded"
+    planning_detail = _text(record["planning_window_value"]) or "Not recorded"
+    commercial_detail = _text(record["commercial_solution_date_value"]) or "Not recorded"
+    risk_flags = record["risk_flags"]
+    flag_text = "; ".join(str(flag) for flag in risk_flags) if risk_flags else "None"
+    return "\n".join(
+        (
+            "风险层级：{}；风险分：{}。".format(
+                _display(record["risk_tier"]), record["risk_score"]
+            ),
+            "QGate 分类 / BI：{}；QGate 严重：{}。".format(
+                qgate_summary,
+                "是" if record["is_governed_severe"] else "否",
+            ),
+            "解决处置：{}。".format(_display(record["closure_disposition"])),
+            "关闭理由：{}（{}）。".format(
+                _display(record["effective_reason"]), _display(record["reason_source"])
+            ),
+            "后续跟进：{}；Target：{}；计划窗口：{}；商业解决日期：{}；{}。".format(
+                _display(record["follow_up_status"]),
+                target_detail,
+                planning_detail,
+                commercial_detail,
+                _display(record["reprel_change_status"]),
+            ),
+            "延期/容忍文档：{}；关联解决：{}。".format(
+                _display(record["postponement_document_status"]),
+                _display(record["related_resolution_status"]),
+            ),
+            "风险标记：{}。".format(flag_text),
+            "解决/现场判断：{}。".format(
+                _display(record["production_exposure_status"])
+            ),
+        )
+    )
+
+
+def _automated_evidence_analysis_phase06(record: dict[str, Any]) -> str:
+    description = _readable_excerpt(record["description"])
+    issue_summary = description or "源 ticket 未记录问题描述。"
+    lifecycle = (
+        "历史存在直接生命周期 01 -> 06。"
+        if record["direct_close"]
+        else "历史未发现直接生命周期 01 -> 06。"
+    )
+    if record["reopened_after_phase06"]:
+        lifecycle += " 此前 Phase 06 后曾重开。"
+    rejection_route = _text(record["rejection_route"]) or "Not recorded"
+    comment_evidence = record["comment_evidence"]
+    comment_summary = "评论 {} 条".format(comment_evidence["comment_count"])
+    if record["plan_evidence_excerpt"]:
+        comment_summary += "；发现修复计划评论摘录：{}".format(
+            record["plan_evidence_excerpt"]
+        )
+    if record["decision_evidence_excerpt"]:
+        comment_summary += "；发现决策评论摘录：{}".format(
+            record["decision_evidence_excerpt"]
+        )
+    if record["no_fix_evidence_excerpt"]:
+        comment_summary += "；发现无修复评论摘录：{}".format(
+            record["no_fix_evidence_excerpt"]
+        )
+    return "\n".join(
+        (
+            "问题概述：{}。{}".format(_display(record["name"]), issue_summary),
+            "解决事实：当前为 Phase 06；{} 有效关闭理由为 {}（{}）；拒绝路径为 {}。".format(
+                lifecycle,
+                _display(record["effective_reason"]),
+                _display(record["reason_source"]),
+                rejection_route,
+            ),
+            "处置与关联：{} Target 版本：{}；计划窗口：{}；商业解决日期：{}；Reprel/Shift：{}；延期文档：{}；关联票：{}。".format(
+                _display(record["follow_up_status"]),
+                _text(record["target_version_value"]) or "Not recorded",
+                _text(record["planning_window_value"]) or "Not recorded",
+                _text(record["commercial_solution_date_value"]) or "Not recorded",
+                _display(record["reprel_change_status"]),
+                _display(record["postponement_document_status"]),
+                _display(record["related_resolution_status"]),
+            ),
+            "评论与分析证据：{}。".format(comment_summary),
+            "自动结论：{} {}".format(
+                _display(record["closure_disposition"]),
+                _display(record["production_exposure_status"]),
+            ),
+        )
+    )
+
+
+def _public_record_phase06(
+    record: dict[str, Any],
+    *,
+    include_full_evidence: bool = False,
+) -> dict[str, object]:
+    public_record: dict[str, object] = {
+        "ticket_id": record["ticket_id"],
+        "name": record["name"],
+        "year": record["year"],
+        "creation_time": record["creation_time"],
+        "last_modified": record["last_modified"],
+        "team": record["team"],
+        "solution_cluster": _display(record["solution_cluster"], "(blank)"),
+        "defect_category": _display(record["defect_category"], "(blank)"),
+        "product_areas": _display(record["product_areas"], "(blank)"),
+        "function2modul": _display(record["function2modul"], "(blank)"),
+        "function_responsible": _display(record["function_responsible"], "(blank)"),
+        "assigned_ecu": _display(record["assigned_ecu"], "(blank)"),
+        "ecu_to_modul": _display(record["ecu_to_modul"], "(blank)"),
+        "legacy_project": _display(record["legacy_project"], "(blank)"),
+        "final_project": _display(record["final_project"], "(blank)"),
+        "software_version": _display(record["software_version"], "(blank)"),
+        "parent_child_type": _display(record["parent_child_type"], "(blank)"),
+        "relation_to": _display(record["relation_to"], "(blank)"),
+        "severity": _display(record["severity"], "(blank)"),
+        "problem_severity": _display(record["problem_severity"], "(blank)"),
+        "reporting_class": _display(record["reporting_class"], "(blank)"),
+        "is_governed_severe": bool(record["is_governed_severe"]),
+        "effective_reason": record["effective_reason"],
+        "reason_source": record["reason_source"],
+        "blocking_reason_group": record["blocking_reason_group"],
+        "rejection_route": _display(record["rejection_route"], "(blank)"),
+        "direct_close": bool(record["direct_close"]),
+        "latest_phase06_at": record["latest_phase06_at"],
+        "reopened_after_phase06": bool(record["reopened_after_phase06"]),
+        "repair_plan_status": record["repair_plan_status"],
+        "reprel_changes": _display(record["reprel_changes"], "(blank)"),
+        "target_version_status": record["target_version_status"],
+        "target_version_value": record["target_version_value"],
+        "target_version_field": record["target_version_field"],
+        "target_version_at": record["target_version_at"],
+        "planning_window_status": record["planning_window_status"],
+        "planning_window_value": record["planning_window_value"],
+        "planning_window_field": record["planning_window_field"],
+        "planning_window_at": record["planning_window_at"],
+        "reprel_change_count": record["reprel_change_count"],
+        "reprel_change_source": record["reprel_change_source"],
+        "reprel_change_status": record["reprel_change_status"],
+        "commercial_solution_date_status": record["commercial_solution_date_status"],
+        "commercial_solution_date_value": record["commercial_solution_date_value"],
+        "commercial_solution_date_field": record["commercial_solution_date_field"],
+        "commercial_solution_date_at": record["commercial_solution_date_at"],
+        "postponement_decision_date_status": record["postponement_decision_date_status"],
+        "postponement_decision_date_value": record["postponement_decision_date_value"],
+        "postponement_decision_date_field": record["postponement_decision_date_field"],
+        "postponement_decision_date_at": record["postponement_decision_date_at"],
+        "follow_up_status": record["follow_up_status"],
+        "has_follow_up_evidence": bool(record["has_follow_up_evidence"]),
+        "decision_closure_without_follow_up": bool(
+            record["decision_closure_without_follow_up"]
+        ),
+        "needs_closure_evidence_review": False,
+        "closure_disposition": record["closure_disposition"],
+        "postponement_document_status": record["postponement_document_status"],
+        "postponement_document_at": record["postponement_document_at"],
+        "postponement_document_excerpt": record["postponement_document_excerpt"],
+        "has_substantive_assessment_document": bool(
+            record["has_substantive_assessment_document"]
+        ),
+        "duplicate_parent_id": record["duplicate_parent_id"],
+        "duplicate_parent_phase": record["duplicate_parent_phase"],
+        "duplicate_parent_name": record["duplicate_parent_name"],
+        "related_resolution_status": record["related_resolution_status"],
+        "related_resolution_ticket_id": record["related_resolution_ticket_id"],
+        "related_resolution_phase06_at": record["related_resolution_phase06_at"],
+        "explicit_linked_resolution_after_phase06": bool(record["explicit_linked_resolution_after_phase06"]),
+        "production_exposure_status": record["production_exposure_status"],
+        "risk_score": record["risk_score"],
+        "risk_tier": record["risk_tier"],
+        "risk_flags": record["risk_flags"],
+        "risk_basis": record["risk_basis"],
+        "automated_analysis": record["automated_analysis"],
+        "evidence_index": record["evidence_index"],
+        "comment_count": record["comment_evidence"]["comment_count"],
+        "audit_history_event_count": record["audit_history_event_count"],
+        "description_excerpt": record["description_excerpt"],
+        "plan_evidence_excerpt": record["plan_evidence_excerpt"],
+        "decision_evidence_excerpt": record["decision_evidence_excerpt"],
+        "no_fix_evidence_excerpt": record["no_fix_evidence_excerpt"],
+    }
+    if include_full_evidence:
+        public_record["description_full"] = record["description"]
+        public_record["comment_records"] = [
+            dict(item) for item in record["comment_evidence"]["comment_records"]
+        ]
+        public_record["audit_history_events"] = [
+            dict(item) for item in record["audit_history_events"]
+        ]
+    return public_record
+
+
+def _risk_tier_rows_phase06(records: list[dict[str, Any]]) -> list[dict[str, object]]:
+    order = (
+        "Field-escape risk flagged",
+        "Root-cause quality concern",
+        "Resolution evidence incomplete",
+        "Resolution with residual risk",
+        "Effective resolution (verified)",
+    )
+    counts = Counter(record["risk_tier"] for record in records)
+    return [{"label": label, "count": counts.get(label, 0)} for label in order]
+
+
+def build_phase06_idcevo_report_payload(
+    *,
+    db_path: str | Path | None = None,
+    include_china_specific: bool = False,
+    include_full_evidence: bool = False,
+) -> dict[str, object]:
+    resolved_db_path = resolve_report_db_path(db_path)
+    require_tables(resolved_db_path, ("octane_defects", "octane_defect_history_events"))
+    population_start = "2025-01-01"
+    population_end_exclusive = (
+        datetime.now(timezone.utc).date() + timedelta(days=1)
+    ).isoformat()
+
+    connection = sqlite3.connect(str(resolved_db_path))
+    connection.row_factory = sqlite3.Row
+    try:
+        defect_columns = _table_columns(connection, "octane_defects")
+        history_columns = _table_columns(connection, "octane_defect_history_events")
+        required_phase = "phase" in defect_columns
+        project_scope_field = "tproject" if "tproject" in defect_columns else "project"
+        required_project = project_scope_field in defect_columns
+        if not required_phase or not required_project:
+            raise ValueError("octane_defects must contain phase and tproject or project columns")
+
+        optional_columns = {
+            name: _optional_column(defect_columns, name)
+            for name in (
+                "name",
+                "description",
+                "comments",
+                "creation_time",
+                "last_modified",
+                "year",
+                "project",
+                "tproject",
+                "team",
+                "problem_finder_team",
+                "solution_cluster",
+                "defect_category",
+                "product_areas",
+                "function2modul",
+                "function_responsible",
+                "assigned_ecu",
+                "ecu_to_modul",
+                "software_version",
+                "blocking_reason",
+                "reprel_changes",
+                "severity",
+                "problem_severity",
+                "reporting_class",
+                "parent_child_type",
+                "relation_to",
+                "fetched_at",
+            )
+        }
+        defect_rows = connection.execute(
+            """
+            SELECT defect_id,
+                     phase AS phase,
+                   {name} AS name,
+                   {description} AS description,
+                   {comments} AS comments,
+                   {creation_time} AS creation_time,
+                   {last_modified} AS last_modified,
+                   {year} AS year,
+                   {project} AS legacy_project,
+                   {tproject} AS final_project,
+                   {team} AS team,
+                   {problem_finder_team} AS problem_finder_team,
+                   {solution_cluster} AS solution_cluster,
+                   {defect_category} AS defect_category,
+                   {product_areas} AS product_areas,
+                   {function2modul} AS function2modul,
+                   {function_responsible} AS function_responsible,
+                   {assigned_ecu} AS assigned_ecu,
+                   {ecu_to_modul} AS ecu_to_modul,
+                   {software_version} AS software_version,
+                   {blocking_reason} AS blocking_reason,
+                   {reprel_changes} AS reprel_changes,
+                   {severity} AS severity,
+                   {problem_severity} AS problem_severity,
+                   {reporting_class} AS reporting_class,
+                   {parent_child_type} AS parent_child_type,
+                   {relation_to} AS relation_to,
+                   {fetched_at} AS fetched_at
+            FROM octane_defects
+            WHERE upper(trim(coalesce({project_scope}, ''))) = 'IDCEVO'
+                            AND creation_time >= ?
+                            AND creation_time < ?
+            ORDER BY defect_id
+                        """.format(
+                            **optional_columns,
+                            project_scope=_optional_column(
+                                defect_columns, project_scope_field
+                            ),
+                        ),
+                        (population_start, population_end_exclusive),
+        ).fetchall()
+
+        scoped_records: dict[str, dict[str, Any]] = {}
+        idcevo_all_ticket_total = 0
+        idcevo_phase06_total = 0
+        china_excluded_total = 0
+        china_specific_in_scope_total = 0
+        coc_development_team_excluded_total = 0
+        latest_fetched_at = ""
+        latest_modified_at = ""
+        for row in defect_rows:
+            ticket_id = _text(row["defect_id"])
+            if not ticket_id:
+                continue
+            idcevo_all_ticket_total += 1
+            if _phase_code(row["phase"]) != "06":
+                continue
+            idcevo_phase06_total += 1
+            solution_cluster = _text(row["solution_cluster"])
+            defect_category = _text(row["defect_category"])
+            china_specific_ticket = is_china_specific(
+                solution_cluster=solution_cluster,
+                defect_category=defect_category,
+            )
+            if china_specific_ticket:
+                if not include_china_specific:
+                    china_excluded_total += 1
+                    continue
+            problem_finder_team = _text(row["problem_finder_team"])
+            source_team = _text(row["team"])
+            report_team = problem_finder_team or source_team
+            if _is_coc_development_ticket(
+                problem_finder_team=problem_finder_team,
+            ):
+                coc_development_team_excluded_total += 1
+                continue
+            if china_specific_ticket:
+                china_specific_in_scope_total += 1
+            fetched_at = _text(row["fetched_at"])
+            last_modified = _text(row["last_modified"])
+            latest_fetched_at = max(latest_fetched_at, fetched_at)
+            latest_modified_at = max(latest_modified_at, last_modified)
+            scoped_records[ticket_id] = {
+                "ticket_id": ticket_id,
+                "name": _text(row["name"]),
+                "description": _text(row["description"]),
+                "creation_time": _text(row["creation_time"]),
+                "last_modified": last_modified,
+                "year": _year_from_record(row["year"], row["creation_time"]),
+                "legacy_project": _text(row["legacy_project"]),
+                "final_project": _text(row["final_project"]),
+                "team": report_team,
+                "solution_cluster": solution_cluster,
+                "defect_category": defect_category,
+                "product_areas": _text(row["product_areas"]),
+                "function2modul": _text(row["function2modul"]),
+                "function_responsible": _text(row["function_responsible"]),
+                "assigned_ecu": _text(row["assigned_ecu"]),
+                "ecu_to_modul": _text(row["ecu_to_modul"]),
+                "software_version": _text(row["software_version"]),
+                "blocking_reason": _text(row["blocking_reason"]),
+                "reprel_changes": _text(row["reprel_changes"]),
+                "severity": _text(row["severity"]),
+                "problem_severity": _text(row["problem_severity"]),
+                "reporting_class": _text(row["reporting_class"]),
+                "parent_child_type": _text(row["parent_child_type"]),
+                "relation_to": _text(row["relation_to"]),
+                "comment_evidence": _comment_evidence(
+                    row["comments"],
+                    capture_comment_records=include_full_evidence,
+                ),
+                "direct_close": False,
+                "seen_phase06": True,
+                "latest_phase06_at": "",
+                "reopened_after_phase06": False,
+                "phase_history_count": 0,
+                "audit_history_event_count": 0,
+                "audit_history_events": [],
+                "history_blocking_reason": "",
+                "history_blocked_reason": "",
+                "rejection_route": "",
+                "target_version_events": [],
+                "planning_window_events": [],
+                "reprel_history_values": [],
+                "postponement_document_events": [],
+                "postponement_decision_date_events": [],
+                "commercial_solution_date_events": [],
+            }
+
+        history_rows = _history_rows(
+            connection,
+            list(scoped_records),
+            history_columns,
+        )
+        _append_history_evidence(
+            scoped_records,
+            history_rows,
+            capture_audit_history=include_full_evidence,
+            target_phase="06",
+        )
+        relation_targets = {
+            target
+            for record in scoped_records.values()
+            if (target := _extract_relation_target(record["relation_to"]))
+        }
+        parents = _parent_rows(connection, relation_targets, defect_columns)
+        parent_history_rows = _history_rows(connection, list(parents), history_columns)
+        parent_phase06_at = _latest_phase_entry_timestamps(
+            parent_history_rows,
+            phase_code="06",
+        )
+        for parent_id, parent in parents.items():
+            parent["phase06_at"] = parent_phase06_at.get(parent_id, "")
+    finally:
+        connection.close()
+
+    for record in scoped_records.values():
+        _assess_record_phase06(record, parents)
+
+    records = sorted(
+        scoped_records.values(),
+        key=lambda record: (
+            -int(record["risk_score"]),
+            str(record["risk_tier"]),
+            str(record["ticket_id"]),
+        ),
+    )
+    public_records = [
+        _public_record_phase06(record, include_full_evidence=include_full_evidence)
+        for record in records
+    ]
+    risk_tier_rows = _risk_tier_rows_phase06(records)
+    risk_counts = {str(row["label"]): int(row["count"]) for row in risk_tier_rows}
+    management_decision_total = sum(
+        1
+        for record in records
+        if "management decision" in _normalized(record["effective_reason"])
+    )
+    management_decision_records = [
+        record
+        for record in records
+        if "management decision" in _normalized(record["effective_reason"])
+    ]
+    history_reason_total = sum(
+        1
+        for record in records
+        if record["reason_source"] in {"Phase-history blocking reason", "Phase-history blocked reason"}
+    )
+    closure_evidence = {
+        "direct_close_total": sum(
+            1
+            for record in records
+            if record["direct_close"]
+        ),
+        "reopened_after_phase06_total": sum(
+            1
+            for record in records
+            if record["reopened_after_phase06"]
+        ),
+        "resolution_evidence_total": sum(
+            1
+            for record in records
+            if record["repair_plan_status"] != "Resolution evidence incomplete"
+        ),
+        "target_version_after_phase06_total": sum(
+            1
+            for record in records
+            if record["target_version_status"] == "Target version recorded after current Phase 06"
+        ),
+        "target_version_before_phase06_total": sum(
+            1
+            for record in records
+            if record["target_version_status"] == "Target version recorded before current Phase 06"
+        ),
+        "planning_window_after_phase06_total": sum(
+            1
+            for record in records
+            if record["planning_window_status"] == "Planning window recorded after current Phase 06"
+        ),
+        "planning_window_before_phase06_total": sum(
+            1
+            for record in records
+            if record["planning_window_status"] == "Planning window recorded before current Phase 06"
+        ),
+        "reprel_changes_positive_total": sum(
+            1
+            for record in records
+            if isinstance(record["reprel_change_count"], int)
+            and int(record["reprel_change_count"]) > 0
+        ),
+        "reprel_changes_zero_total": sum(
+            1
+            for record in records
+            if record["reprel_change_count"] == 0
+        ),
+        "reprel_change_count_missing_total": sum(
+            1
+            for record in records
+            if record["reprel_change_count"] is None
+        ),
+        "explicit_linked_resolution_after_phase06_total": sum(
+            1
+            for record in records
+            if record["explicit_linked_resolution_after_phase06"]
+        ),
+        "no_target_shift_or_explicit_resolution_total": sum(
+            1
+            for record in records
+            if record["target_version_status"] == "No target version recorded"
+            and record["planning_window_status"] == "No planning window recorded"
+            and record["reprel_change_count"] in {None, 0}
+            and record["repair_plan_status"] == "Resolution evidence incomplete"
+            and not record["explicit_linked_resolution_after_phase06"]
+        ),
+        "no_remediation_or_linked_resolution_evidence_total": sum(
+            1
+            for record in records
+            if not record["has_remediation_or_resolution_evidence"]
+        ),
+        "resolved_with_verified_fix_total": sum(
+            1
+            for record in records
+            if record["production_exposure_status"] == "Resolved with verified fix"
+        ),
+        "resolved_but_field_escape_risk_remains_total": sum(
+            1
+            for record in records
+            if record["production_exposure_status"] == "Resolved but field-escape risk remains"
+        ),
+        "resolved_without_root_cause_verification_total": sum(
+            1
+            for record in records
+            if record["production_exposure_status"] == "Resolved without root-cause verification"
+        ),
+    }
+
+    return {
+        "generated_at": datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z"),
+        "source": {
+            "db_path": str(resolved_db_path),
+            "latest_fetched_at": latest_fetched_at,
+            "latest_last_modified": latest_modified_at,
+            "population_start": population_start,
+            "population_end_exclusive": population_end_exclusive,
+            "project_scope_field": project_scope_field,
+            "project_scope_note": (
+                "Final business project (tproject) is used for scope; legacy project is retained for audit."
+                if project_scope_field == "tproject"
+                else "Legacy project is used because this source database has no tproject column."
+            ),
+            "report_title": (
+                "IDCEVO Phase 06 Resolution Quality Review"
+                if include_china_specific
+                else "IDCEVO Phase 06 Global Resolution Quality Review"
+            ),
+            "scope_label": (
+                "Analyzed IDCEVO Phase 06"
+                if include_china_specific
+                else "Analyzed Global Phase 06"
+            ),
+            "scope_note": (
+                "China-specific included: {} | CoC finder teams: {} excluded".format(
+                    china_specific_in_scope_total,
+                    coc_development_team_excluded_total,
+                )
+                if include_china_specific
+                else "China-specific: {} | CoC finder teams: {} excluded".format(
+                    china_excluded_total,
+                    coc_development_team_excluded_total,
+                )
+            ),
+            "scope_description": (
+                "All IDCEVO tickets created from 2025-01-01 through the source snapshot are counted first. "
+                "IDCEVO scope uses the final business project tproject. "
+                "This analysis then selects their current Phase 06 (concluded) tickets, includes China-specific functions and "
+                "excludes tickets whose Problem Finder Team contains CoC."
+                if include_china_specific
+                else "All IDCEVO tickets created from 2025-01-01 through the source snapshot are counted first. "
+                "IDCEVO scope uses the final business project tproject. "
+                "This analysis then selects their current Phase 06 (concluded) tickets, excludes China-specific functions and "
+                "tickets raised by CoC development teams."
+            ),
+            "scope_rule": (
+                "Use final business project tproject for IDCEVO scope when available; use legacy project only when tproject is unavailable. "
+                "Count all scoped IDCEVO tickets in the creation-time window first, then select tickets whose current phase is 06. "
+                + (
+                    "Include China-specific functions. "
+                    if include_china_specific
+                    else "Exclude China-specific functions when Solution Cluster is China-specific; use Defect Category only when Solution Cluster is blank. "
+                )
+                + "Exclude tickets when Problem Finder Team contains CoC."
+            ),
+        },
+        "summary": {
+            "idcevo_all_ticket_total": idcevo_all_ticket_total,
+            "idcevo_current_phase06_total": idcevo_phase06_total,
+            "idcevo_phase06_total": idcevo_phase06_total,
+            "china_excluded_total": china_excluded_total,
+            "china_specific_in_scope_total": china_specific_in_scope_total,
+            "coc_development_team_excluded_total": coc_development_team_excluded_total,
+            "analyzed_phase06_total": len(records),
+            "global_phase06_total": len(records),
+            "history_coverage_total": sum(1 for record in records if record["phase_history_count"] > 0),
+            "direct_close_total": sum(1 for record in records if record["direct_close"]),
+            "governed_severe_total": sum(
+                1 for record in records if record["is_governed_severe"]
+            ),
+            "reopened_after_phase06_total": sum(1 for record in records if record["reopened_after_phase06"]),
+            "history_reason_total": history_reason_total,
+            "management_decision_total": management_decision_total,
+            "effective_resolution_total": risk_counts.get("Effective resolution (verified)", 0),
+            "resolution_with_residual_risk_total": risk_counts.get("Resolution with residual risk", 0),
+            "resolution_evidence_incomplete_total": risk_counts.get("Resolution evidence incomplete", 0),
+            "root_cause_quality_concern_total": risk_counts.get("Root-cause quality concern", 0),
+            "field_escape_risk_flagged_total": risk_counts.get("Field-escape risk flagged", 0),
+        },
+        "risk_tiers": risk_tier_rows,
+        "distributions": {
+            "years": _counter_rows(records, "year", limit=10),
+            "solution_clusters": _counter_rows(records, "solution_cluster", limit=40),
+            "defect_categories": _counter_rows(records, "defect_category", limit=40),
+            "teams": _counter_rows(records, "team", limit=40),
+            "effective_reasons": _counter_rows(records, "effective_reason", limit=40),
+            "repair_plan_statuses": _counter_rows(records, "repair_plan_status", limit=20),
+            "severity": _counter_rows(records, "severity", limit=20),
+            "problem_severity": _counter_rows(records, "problem_severity", limit=20),
+            "reporting_classes": _counter_rows(records, "reporting_class", limit=30),
+            "blocking_reason_groups": _counter_rows(records, "blocking_reason_group", limit=20),
+            "closure_dispositions": _counter_rows(records, "closure_disposition", limit=20),
+            "target_version_statuses": _counter_rows(records, "target_version_status", limit=10),
+            "commercial_solution_date_statuses": _counter_rows(
+                records, "commercial_solution_date_status", limit=10
+            ),
+            "postponement_document_statuses": _counter_rows(
+                records, "postponement_document_status", limit=10
+            ),
+            "follow_up_statuses": _counter_rows(records, "follow_up_status", limit=10),
+            "reprel_change_statuses": _counter_rows(records, "reprel_change_status", limit=30),
+            "related_resolution_statuses": _counter_rows(records, "related_resolution_status", limit=20),
+            "production_exposure_statuses": _counter_rows(records, "production_exposure_status", limit=20),
+        },
+        "closure_evidence": closure_evidence,
+        "management_decision": {
+            "total": management_decision_total,
+            "field_escape_risk_flagged_total": sum(
+                1
+                for record in management_decision_records
+                if record["risk_tier"] == "Field-escape risk flagged"
+            ),
+            "root_cause_quality_concern_total": sum(
+                1
+                for record in management_decision_records
+                if record["risk_tier"] == "Root-cause quality concern"
+            ),
+            "no_repair_evidence_total": sum(
+                1
+                for record in management_decision_records
+                if record["repair_plan_status"] == "Resolution evidence incomplete"
+            ),
+            "reopened_after_phase06_total": sum(
+                1
+                for record in management_decision_records
+                if record["reopened_after_phase06"]
+            ),
+            "risk_tiers": _risk_tier_rows_phase06(management_decision_records),
+        },
+        "tickets": public_records,
+    }

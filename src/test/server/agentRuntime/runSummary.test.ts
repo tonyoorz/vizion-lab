@@ -173,4 +173,23 @@ describe("agent run summary", () => {
     expect(summary.runs[0]).not.toHaveProperty("runId");
     expect(summary.runs[0]).not.toHaveProperty("threadId");
   });
+
+  it("keeps the approved defect export tool name in sanitized run summaries", () => {
+    const summary = summarizeRuns({
+      summaries: [{
+        runId: "run-export-1",
+        threadId: "thread-export-1",
+        actorScopeHash: "scope-export",
+        intent: "record_export",
+        outcome: "completed",
+        evidenceStatus: "pass",
+        toolNames: ["export_defect_records"],
+        recoveryOutcomes: [],
+        citationValidation: "pass",
+      }],
+      events: [],
+    });
+
+    expect(summary.runs[0]).toMatchObject({ toolNames: ["export_defect_records"] });
+  });
 });

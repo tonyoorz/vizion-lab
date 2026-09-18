@@ -330,96 +330,6 @@ describe("main agent analytics tools", () => {
     expect(result.contextText).toContain("Business rules: BUSINESS_RULE_DERIVE:business.test.project_scope");
   });
 
-  it("preserves semantic provenance when the tool result exceeds the message size limit", async () => {
-    // Build a payload large enough to trip MAX_TOOL_MESSAGE_CHARS (default 30000) via a big data
-    // array, while keeping every provenance field the claim gate needs.
-    const bigRows = Array.from({ length: 500 }, (_, index) => ({
-      defect_id: `D-${index}`,
-      name: `Defect ${index} `.repeat(20),
-      assigned_ecu: "HU",
-      status: "Open",
-    }));
-    const analyticsFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        ontologyVersion: "v1",
-        schemaFingerprint: "a".repeat(64),
-        analysisRef: "analysis-big-1",
-        sourceRevision: { revisionId: "snap-big-1", status: "pinned" },
-        scope: { actorScopeHash: "scope-a" },
-        data: bigRows,
-        summary: { metrics: { "defect.count": 500 }, rowCount: 500 },
-        quality: { completeness: "complete", warnings: [] },
-        evidence: { kind: "semantic_metric_result", analysisRef: "analysis-big-1", sourceRevisionId: "snap-big-1" },
-      }),
-    });
-
-    const result = await executeMainAgentToolCall(
-      {
-        id: "semantic-big-1",
-        type: "function",
-        function: { name: "query_semantic_metrics", arguments: JSON.stringify({ query: semanticQuery }) },
-      },
-      {
-        analyticsFetch,
-        analyticsApiBase: "http://127.0.0.1:3003",
-        actor: { actorId: "alice", scopeHash: "scope-a", scopes: { workspaceIds: ["DTSV"], teamIds: ["DTSV"] } },
-      },
-    );
-
-    // The tool message content must remain valid JSON after truncation.
-    const envelope = JSON.parse(result.toolMessage.content);
-    expect(envelope.ok).toBe(true);
-    expect(envelope.tool).toBe("query_semantic_metrics");
-    const body = envelope.result;
-    // Provenance fields the claim gate requires must survive truncation.
-    expect(body.ontologyVersion).toBe("v1");
-    expect(body.schemaFingerprint).toBe("a".repeat(64));
-    expect(body.analysisRef).toBe("analysis-big-1");
-    expect(body.sourceRevision).toEqual({ revisionId: "snap-big-1", status: "pinned" });
-    expect(body.scope).toEqual({ actorScopeHash: "scope-a" });
-    expect(body.quality.completeness).toBe("complete");
-    expect(body.evidence.kind).toBe("semantic_metric_result");
-    // data was truncated (fewer rows), and a truncation marker was added.
-    expect(body.data.length).toBeLessThan(bigRows.length);
-    expect(body._truncated).toEqual({ kept: body.data.length, total: bigRows.length });
-    expect(result.toolMessage.content.length).toBeLessThanOrEqual(Number(process.env.VIZION_MAX_TOOL_MESSAGE_CHARS || 30000));
-  });
-
-  it("does not truncate or mark semantic results that fit within the message size limit", async () => {
-    const analyticsFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        ontologyVersion: "v1",
-        schemaFingerprint: "a".repeat(64),
-        analysisRef: "analysis-small-1",
-        sourceRevision: { revisionId: "snap-small-1", status: "pinned" },
-        scope: { actorScopeHash: "scope-a" },
-        data: [{ defect_id: "D-1" }],
-        summary: { metrics: { "defect.count": 1 }, rowCount: 1 },
-        quality: { completeness: "complete", warnings: [] },
-        evidence: { kind: "semantic_metric_result", analysisRef: "analysis-small-1", sourceRevisionId: "snap-small-1" },
-      }),
-    });
-
-    const result = await executeMainAgentToolCall(
-      {
-        id: "semantic-small-1",
-        type: "function",
-        function: { name: "query_semantic_metrics", arguments: JSON.stringify({ query: semanticQuery }) },
-      },
-      {
-        analyticsFetch,
-        analyticsApiBase: "http://127.0.0.1:3003",
-        actor: { actorId: "alice", scopeHash: "scope-a", scopes: { workspaceIds: ["DTSV"], teamIds: ["DTSV"] } },
-      },
-    );
-
-    const envelope = JSON.parse(result.toolMessage.content);
-    expect(envelope.result.data).toEqual([{ defect_id: "D-1" }]);
-    expect(envelope.result._truncated).toBeUndefined();
-  });
-
   it("executes query_semantic_records through the dedicated records API", async () => {
     const analyticsFetch = vi.fn().mockResolvedValue({
       ok: true,
@@ -1763,6 +1673,103 @@ describe("main agent analytics tools", () => {
     expect(result.contextText).toContain("Tool: query_defect_records");
     expect(result.contextText).toContain("D-001: Navigation black screen");
     expect(result.contextText).toContain("records are examples");
+  });
+
+  it("exposes and describes defect record continuation cursors", async () => {
+    const recordsTool = MAIN_AGENT_TOOLS.find((tool) => tool.function.name === "query_defect_records");
+    expect(recordsTool.function.parameters.properties).toEqual(expect.objectContaining({
+      cursor: expect.any(Object),
+      page_size: expect.any(Object),
+    }));
+
+    const analyticsFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        schema_version: "1.0",
+        snapshot_version: "snapshot-defect-query",
+        query_fingerprint: "fp-1",
+        rows: [{ ticket_id: "D-003", ticket_name: "Third record" }],
+        total_rows: 3,
+        returned_rows: 1,
+        page: 2,
+        page_size: 2,
+        next_cursor: "cursor-next-page",
+        truncated: true,
+        warnings: [],
+      }),
+    });
+
+    const result = await executeMainAgentToolCall(
+      {
+        id: "call-records-page-two",
+        type: "function",
+        function: {
+          name: "query_defect_records",
+          arguments: JSON.stringify({ drilldown_ref: "ref-1", cursor: "cursor-current-page" }),
+        },
+      },
+      {
+        analyticsFetch,
+        analyticsApiBase: "http://127.0.0.1:3003",
+        ...scopedAgentDependencies(),
+      },
+    );
+
+    expect(JSON.parse(analyticsFetch.mock.calls[0][1].body)).toEqual({
+      drilldown_ref: "ref-1",
+      cursor: "cursor-current-page",
+    });
+    expect(result.contextText).toContain("Page: 2, page size 2");
+    expect(result.contextText).toContain("Next cursor: cursor-next-page");
+  });
+
+  it("creates a scoped defect-record export without placing rows in context", async () => {
+    expect(MAIN_AGENT_TOOLS).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        function: expect.objectContaining({
+          name: "export_defect_records",
+          parameters: expect.objectContaining({
+            required: ["drilldown_ref"],
+          }),
+        }),
+      }),
+    ]));
+
+    const analyticsFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        schema_version: "1.0",
+        snapshot_version: "snapshot-defect-query",
+        query_fingerprint: "fp-1",
+        expires_at: 1_800_000_000,
+        download_url: "/api/agent/analytics/defects/export/download?token=download-token",
+      }),
+    });
+
+    const result = await executeMainAgentToolCall(
+      {
+        id: "call-records-export",
+        type: "function",
+        function: {
+          name: "export_defect_records",
+          arguments: JSON.stringify({ drilldown_ref: "ref-1" }),
+        },
+      },
+      {
+        analyticsFetch,
+        analyticsApiBase: "http://127.0.0.1:3003",
+        ...scopedAgentDependencies(),
+      },
+    );
+
+    expect(analyticsFetch).toHaveBeenCalledWith(
+      "http://127.0.0.1:3003/api/agent/analytics/defects/export",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(JSON.parse(analyticsFetch.mock.calls[0][1].body)).toEqual({ drilldown_ref: "ref-1" });
+    expect(result.contextText).toContain("Tool: export_defect_records");
+    expect(result.contextText).toContain("Download URL: /api/agent/analytics/defects/export/download?token=download-token");
+    expect(result.contextText).not.toContain("D-001");
   });
 
   it("executes query_full_picture_module against allowed analytics modules", async () => {

@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import csv
 import base64
 import hashlib
 import hmac
+import io
 import json
+import secrets
+import time
 from datetime import date
 from typing import Any, Iterable
 
@@ -15,6 +19,25 @@ DEFAULT_TIMEZONE = "Asia/Shanghai"
 MAX_AGGREGATE_LIMIT = 100
 MAX_RECORD_LIMIT = 100
 AGENT_DRILLDOWN_REF_VERSION = "agent-v1"
+AGENT_RECORDS_CURSOR_VERSION = "agent-records-v1"
+AGENT_DEFECT_EXPORT_TOKEN_VERSION = "agent-defect-export-v1"
+AGENT_DEFECT_EXPORT_TOKEN_TTL_SECONDS = 10 * 60
+DEFECT_RECORD_EXPORT_FIELDS = (
+    "ticket_id",
+    "ticket_name",
+    "status",
+    "creation_time",
+    "problem_finder_team",
+    "detected_by",
+    "project",
+    "assigned_ecu",
+    "aida",
+    "phase",
+    "solution_cluster",
+    "defect_category",
+    "is_resolved_forward",
+    "is_rejected_directly",
+)
 
 SUPPORTED_METRICS = frozenset(
     {
@@ -317,6 +340,107 @@ def _decode_agent_drilldown_ref(drilldown_ref: str, *, actor_scope_hash: str, se
     return payload
 
 
+def _invalid_agent_records_cursor() -> read_models.FullPictureDashboardRequestError:
+    return read_models.FullPictureDashboardRequestError("Invalid agent records cursor")
+
+
+def _encode_agent_records_cursor(payload: dict[str, Any], *, actor_scope_hash: str, secret: str) -> str:
+    payload_part = _encode_ref({**payload, "actor_scope_hash": actor_scope_hash})
+    signing_input = f"{AGENT_RECORDS_CURSOR_VERSION}.{payload_part}"
+    signature = hmac.new(secret.encode("utf-8"), signing_input.encode("ascii"), hashlib.sha256).digest()
+    signature_part = base64.urlsafe_b64encode(signature).decode("ascii").rstrip("=")
+    return f"{signing_input}.{signature_part}"
+
+
+def _decode_agent_records_cursor(cursor: str, *, actor_scope_hash: str, secret: str) -> dict[str, Any]:
+    parts = cursor.split(".")
+    if len(parts) != 3 or parts[0] != AGENT_RECORDS_CURSOR_VERSION:
+        raise _invalid_agent_records_cursor()
+    _, payload_part, signature_part = parts
+    if not signature_part or any(character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_" for character in signature_part):
+        raise _invalid_agent_records_cursor()
+    try:
+        padded_signature = signature_part + "=" * (-len(signature_part) % 4)
+        received_signature = base64.urlsafe_b64decode(padded_signature.encode("ascii"))
+    except (ValueError, UnicodeEncodeError):
+        raise _invalid_agent_records_cursor() from None
+    expected_signature = hmac.new(
+        secret.encode("utf-8"),
+        f"{AGENT_RECORDS_CURSOR_VERSION}.{payload_part}".encode("ascii"),
+        hashlib.sha256,
+    ).digest()
+    if len(received_signature) != len(expected_signature) or not hmac.compare_digest(received_signature, expected_signature):
+        raise _invalid_agent_records_cursor()
+    try:
+        payload = _decode_ref(payload_part)
+    except read_models.FullPictureDashboardRequestError:
+        raise _invalid_agent_records_cursor() from None
+    if payload.get("actor_scope_hash") != actor_scope_hash:
+        raise AgentDrilldownScopeError("Agent records cursor scope denied")
+    return payload
+
+
+def _drilldown_fingerprint(drilldown: dict[str, Any]) -> str:
+    return _fingerprint(
+        {
+            "snapshot_version": _normalize_string(drilldown.get("snapshot_version")),
+            "query_fingerprint": _normalize_string(drilldown.get("query_fingerprint")),
+            "applied_query": drilldown.get("applied_query") if isinstance(drilldown.get("applied_query"), dict) else {},
+            "dimension": _normalize_string(drilldown.get("dimension")),
+            "dimension_value": _normalize_string(drilldown.get("dimension_value")),
+        }
+    )
+
+
+def _records_page_from_cursor(
+    kwargs: dict[str, Any],
+    *,
+    drilldown: dict[str, Any],
+    agent_drilldown_context: tuple[str, str] | None,
+) -> tuple[int, int]:
+    raw_page_size = kwargs.get("page_size")
+    raw_limit = kwargs.get("limit")
+    cursor = _normalize_string(kwargs.get("cursor"))
+    if not cursor:
+        page_size = _normalize_limit(
+            raw_page_size if raw_page_size not in {None, ""} else raw_limit,
+            default=20,
+            maximum=MAX_RECORD_LIMIT,
+        )
+        return 0, page_size
+    if agent_drilldown_context is None:
+        raise _invalid_agent_records_cursor()
+
+    cursor_payload = _decode_agent_records_cursor(
+        cursor,
+        actor_scope_hash=agent_drilldown_context[0],
+        secret=agent_drilldown_context[1],
+    )
+    if cursor_payload.get("drilldown_fingerprint") != _drilldown_fingerprint(drilldown):
+        raise _invalid_agent_records_cursor()
+    offset = cursor_payload.get("offset")
+    page_size = cursor_payload.get("page_size")
+    if (
+        isinstance(offset, bool)
+        or not isinstance(offset, int)
+        or offset < 0
+        or isinstance(page_size, bool)
+        or not isinstance(page_size, int)
+        or page_size < 1
+        or page_size > MAX_RECORD_LIMIT
+        or offset % page_size != 0
+    ):
+        raise _invalid_agent_records_cursor()
+    for requested_size in (raw_page_size, raw_limit):
+        if requested_size not in {None, ""} and _normalize_limit(
+            requested_size,
+            default=page_size,
+            maximum=MAX_RECORD_LIMIT,
+        ) != page_size:
+            raise _invalid_agent_records_cursor()
+    return offset, page_size
+
+
 def _applied_query(
     *,
     metrics: list[str],
@@ -537,8 +661,28 @@ def build_defect_records_payload(**kwargs: Any) -> dict[str, Any]:
     if dimension and dimension != "scope":
         rows = [row for row in rows if _dimension_value(row, dimension) == dimension_value]
     rows.sort(key=lambda row: read_models._sortable_value(row.get("ticket_id")))
-    limit = _normalize_limit(kwargs.get("limit"), default=20, maximum=MAX_RECORD_LIMIT)
-    returned_rows = rows[:limit]
+    offset, page_size = _records_page_from_cursor(
+        kwargs,
+        drilldown=drilldown,
+        agent_drilldown_context=agent_drilldown_context,
+    )
+    if offset >= len(rows) and rows:
+        raise _invalid_agent_records_cursor()
+    returned_rows = rows[offset:offset + page_size]
+    next_offset = offset + len(returned_rows)
+    next_cursor = (
+        _encode_agent_records_cursor(
+            {
+                "drilldown_fingerprint": _drilldown_fingerprint(drilldown),
+                "offset": next_offset,
+                "page_size": page_size,
+            },
+            actor_scope_hash=agent_drilldown_context[0],
+            secret=agent_drilldown_context[1],
+        )
+        if agent_drilldown_context is not None and next_offset < len(rows)
+        else None
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "snapshot_version": snapshot_version,
@@ -547,6 +691,134 @@ def build_defect_records_payload(**kwargs: Any) -> dict[str, Any]:
         "rows": [_row_preview(row) for row in returned_rows],
         "total_rows": len(rows),
         "returned_rows": len(returned_rows),
-        "truncated": len(rows) > len(returned_rows),
+        "page": (offset // page_size) + 1,
+        "page_size": page_size,
+        "next_cursor": next_cursor,
+        "truncated": next_offset < len(rows),
         "warnings": ["records are examples for the selected aggregate scope; they do not prove causality"],
     }
+
+
+def _invalid_agent_defect_export_token() -> read_models.FullPictureDashboardRequestError:
+    return read_models.FullPictureDashboardRequestError("Invalid agent defect export token")
+
+
+def _encode_agent_defect_export_token(payload: dict[str, Any], *, secret: str) -> str:
+    payload_part = _encode_ref(payload)
+    signing_input = f"{AGENT_DEFECT_EXPORT_TOKEN_VERSION}.{payload_part}"
+    signature = hmac.new(secret.encode("utf-8"), signing_input.encode("ascii"), hashlib.sha256).digest()
+    signature_part = base64.urlsafe_b64encode(signature).decode("ascii").rstrip("=")
+    return f"{signing_input}.{signature_part}"
+
+
+def _decode_agent_defect_export_token(token: str, *, secret: str) -> dict[str, Any]:
+    parts = token.split(".")
+    if len(parts) != 3 or parts[0] != AGENT_DEFECT_EXPORT_TOKEN_VERSION:
+        raise _invalid_agent_defect_export_token()
+    _, payload_part, signature_part = parts
+    if not signature_part or any(character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_" for character in signature_part):
+        raise _invalid_agent_defect_export_token()
+    try:
+        padded_signature = signature_part + "=" * (-len(signature_part) % 4)
+        received_signature = base64.urlsafe_b64decode(padded_signature.encode("ascii"))
+    except (ValueError, UnicodeEncodeError):
+        raise _invalid_agent_defect_export_token() from None
+    expected_signature = hmac.new(
+        secret.encode("utf-8"),
+        f"{AGENT_DEFECT_EXPORT_TOKEN_VERSION}.{payload_part}".encode("ascii"),
+        hashlib.sha256,
+    ).digest()
+    if len(received_signature) != len(expected_signature) or not hmac.compare_digest(received_signature, expected_signature):
+        raise _invalid_agent_defect_export_token()
+    try:
+        payload = _decode_ref(payload_part)
+    except read_models.FullPictureDashboardRequestError:
+        raise _invalid_agent_defect_export_token() from None
+
+    issued_at = payload.get("issued_at")
+    expires_at = payload.get("expires_at")
+    actor_scope_hash = payload.get("actor_scope_hash")
+    drilldown_ref = payload.get("drilldown_ref")
+    now = int(time.time())
+    if (
+        isinstance(issued_at, bool)
+        or not isinstance(issued_at, int)
+        or isinstance(expires_at, bool)
+        or not isinstance(expires_at, int)
+        or expires_at <= issued_at
+        or expires_at - issued_at > AGENT_DEFECT_EXPORT_TOKEN_TTL_SECONDS
+        or issued_at > now + 5
+        or expires_at <= now
+        or not isinstance(actor_scope_hash, str)
+        or not actor_scope_hash
+        or not isinstance(drilldown_ref, str)
+        or not drilldown_ref
+    ):
+        raise _invalid_agent_defect_export_token()
+    return payload
+
+
+def create_defect_records_export_payload(**kwargs: Any) -> dict[str, Any]:
+    agent_drilldown_context = _agent_drilldown_context(kwargs)
+    if agent_drilldown_context is None:
+        raise read_models.FullPictureDashboardRequestError("Invalid agent defect export context")
+    drilldown_ref = _normalize_string(kwargs.get("drilldown_ref"))
+    drilldown = _decode_agent_drilldown_ref(
+        drilldown_ref,
+        actor_scope_hash=agent_drilldown_context[0],
+        secret=agent_drilldown_context[1],
+    )
+    issued_at = int(time.time())
+    expires_at = issued_at + AGENT_DEFECT_EXPORT_TOKEN_TTL_SECONDS
+    download_token = _encode_agent_defect_export_token(
+        {
+            "drilldown_ref": drilldown_ref,
+            "actor_scope_hash": agent_drilldown_context[0],
+            "issued_at": issued_at,
+            "expires_at": expires_at,
+            "nonce": secrets.token_urlsafe(18),
+        },
+        secret=agent_drilldown_context[1],
+    )
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "snapshot_version": _normalize_string(drilldown.get("snapshot_version")),
+        "query_fingerprint": _normalize_string(drilldown.get("query_fingerprint")),
+        "download_token": download_token,
+        "expires_at": expires_at,
+    }
+
+
+def _iter_defect_records_csv(rows: Iterable[dict[str, Any]]) -> Iterable[str]:
+    stream = io.StringIO(newline="")
+    writer = csv.DictWriter(stream, fieldnames=DEFECT_RECORD_EXPORT_FIELDS, extrasaction="ignore", lineterminator="\r\n")
+    writer.writeheader()
+    yield stream.getvalue()
+    for row in rows:
+        stream.seek(0)
+        stream.truncate(0)
+        writer.writerow(_row_preview(row))
+        yield stream.getvalue()
+
+
+def stream_defect_records_export_csv(download_token: str, *, secret: str) -> tuple[str, Iterable[str]]:
+    token = _decode_agent_defect_export_token(download_token, secret=secret)
+    drilldown = _decode_agent_drilldown_ref(
+        str(token["drilldown_ref"]),
+        actor_scope_hash=str(token["actor_scope_hash"]),
+        secret=secret,
+    )
+    applied_query = drilldown.get("applied_query") if isinstance(drilldown.get("applied_query"), dict) else {}
+    snapshot_version = _normalize_string(drilldown.get("snapshot_version"))
+    if not snapshot_version:
+        raise read_models.FullPictureDashboardRequestError("Invalid drilldown_ref")
+    filters = _normalize_filters(applied_query.get("filters"))
+    time_scope = _normalize_time(applied_query.get("time"))
+    rows = _load_rows(snapshot_version, filters, time_scope)
+    dimension = _normalize_string(drilldown.get("dimension"))
+    dimension_value = _normalize_string(drilldown.get("dimension_value"))
+    if dimension and dimension != "scope":
+        rows = [row for row in rows if _dimension_value(row, dimension) == dimension_value]
+    rows.sort(key=lambda row: read_models._sortable_value(row.get("ticket_id")))
+    filename = f"defect-records-{_drilldown_fingerprint(drilldown)}.csv"
+    return filename, _iter_defect_records_csv(rows)

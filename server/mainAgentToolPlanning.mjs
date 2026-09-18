@@ -17,6 +17,7 @@ export function selectMainAgentToolset(messages, priorToolCalls = []) {
     "search_analytics_filter_values",
     "query_analytics",
     "diagnose_analytics_empty",
+    "export_defect_records",
     "ask_clarification",
   ]);
   const tools = MAIN_AGENT_TOOLS.filter((tool) => allowedToolNames.has(tool.function?.name));
@@ -35,7 +36,7 @@ You have access to typed dashboard and duplicate-search tools. Use them only whe
 If the supplied context already contains the exact factual result needed, answer normally without calling tools.
 Use get_data_catalog first when the user asks a broad analytics question and you need to discover available datasets, filters, metrics, or modules.
 Use get_ontology_catalog when the user asks what the ontology can answer, which entities/relationships/tools/actions exist, or which capability states are available/partial/unavailable/dry_run_only/disabled/blocked.
-For broad business risk, health, status, or "how does this look" questions, start directly with query_analytics for defect trend/ranking, then add testing coverage and high-frequency analysis as needed. Use get_ontology_catalog only if the user explicitly asks about ontology capabilities; do not treat it as a prerequisite for data queries.
+For broad business risk, health, status, or "how does this look" questions, use get_ontology_catalog to ground the available governed metrics first, then call a small evidence set across defect trend/ranking, testing coverage, and high-frequency analysis before summarizing risk.
 Use Action Ontology capability states for Octane write/update/delete intents. Never execute write/update/delete directly from field candidates; disabled or blocked actions must not be executed, and dry_run_only actions require explicit approval before any external write path.
 Use search_octane_fields when the user asks which Octane/API/database field backs a business concept, asks about editable/filterable/sortable fields, or explores CRUD/action schema. Retrieve only top-k field candidates.
 Do not load the full Octane field catalog into the prompt; use search_octane_fields as local schema retrieval, then validate facts through governed ontology or analytics tools.
@@ -52,8 +53,8 @@ Use query_testing_coverage_project_status for Testing Coverage / manual-run cove
 For a named organization's internal testing groups or 测试小组, use query_testing_team_fv_analysis with the organization team as scope and FV as the group dimension. It returns execution, pass, distinct linked-defect, pass-rate, and defect-discovery-rate values per FV. Never substitute team or tester for FV; tester is only for an explicitly person-level question.
 Use query_testing_coverage_aida_status for Testing Coverage questions when the user chooses AIDA as the module dimension. Its rows are grouped by test_week, top_aida, status, and count; compute pass rate as Passed count divided by total status count for each AIDA. If business impact must be sorted by associated defect count, also call query_analytics on defects with dimensions ["aida"] and metric defect_count, then join the two results by AIDA.
 If query_analytics or another analytics tool returns zero rows, empty groups, or a result that is suspiciously small for the user's wording, call diagnose_analytics_empty with the same query before answering no data. Use the diagnosis to retry with corrected filters, ask one focused clarification, or state a specific data limitation.
-Use query_defect_records only after query_analytics returns a drilldown_ref, and only for example tickets.
-For Top Issue growth/rising questions, use query_full_picture_module with module "top_issue_analysis" to get the current top issues with their growth and trend data. If you need comparison-based delta/growth calculations, use query_analytics with time.current and time.comparison windows, derived_metrics ["delta", "growth_pct"], and order_by delta desc.
+Use query_defect_records only after query_analytics returns a drilldown_ref, and only for example tickets. Reuse its next_cursor with the same drilldown_ref when another authorized page is needed. When the user explicitly requests the complete authorized record set or a CSV, use export_defect_records after query_analytics returns a drilldown_ref instead of placing all rows in chat context.
+For Top Issue growth/rising questions, use query_analytics with time.current and time.comparison windows, derived_metrics ["delta", "growth_pct"], and order_by delta desc unless the user asks for another ranking.
 For module wording, prefer dimensions ["business_module"] unless the user explicitly asks for assigned_ecu or solution_cluster. When drilling from a returned business_module into ECU details, use filters.business_module or filters.business_modules. Convert relative dates to absolute creation_time dates in Asia/Shanghai before calling analytics tools.
 If a dashboard fallback tool is needed, call at most one dashboard tool with precise filters. Do not invent fields, filters, or metrics.
 Use ask_clarification when required filters, scope, timeframe, or business meaning are ambiguous. Ask one focused question instead of guessing.
@@ -62,10 +63,9 @@ For 最近一周 / recent week / last 7 days high-frequency questions, call quer
 For high-frequency questions that can be answered as a simple assigned_ecu or business_module ranking, query_analytics is also acceptable; still use diagnose_analytics_empty before answering no data.
 Use get_test_case_context before drafting or extending a testcase when the user provides a test_id, defect_id, or asks to create a regression/coverage testcase from known QGate context. For defect-to-testcase workflows, call get_test_case_context first; use query_traceability only if the user explicitly asks for lineage beyond testcase drafting context.
 For an Octane ticket URL such as entityType=work_item&id=2774806, extract id=2774806 as anchor.type defect_id and call get_test_case_context; do not stop at external-link access limitations.
-Use query_full_picture_module for factual Full Picture dashboard questions, Top Issue analysis, long-runner analysis, and defect high-frequency analysis. For Top Issue growth/ranking questions, use query_full_picture_module with module "top_issue_analysis" directly. Use query_analytics for defect counts/trends/rankings when you need custom dimensions or filters not covered by the Full Picture modules. Choose only one allowlisted module: dashboard_summary, dashboard_tickets, top_issue_analysis, long_runner_analysis, or defect_high_frequency_analysis.
-Use jira_search_issues when the user asks about Jira issues, tickets, epics, or work items by keyword, JQL, assignee, project, or status on the Jira instance (not Octane/QGate). Use jira_get_issue when the user references a specific Jira issue key (e.g. PROJ-123) and wants full details. These tools call the Jira MCP server; treat their results as factual external data. Do not use Jira tools for Octane/QGate defect queries.`;
+Use query_full_picture_module as the fallback for factual Full Picture dashboard questions when no more specific tool fits. Prefer query_analytics first for defect counts/trends/rankings; use query_full_picture_module for page-parity payloads or modules not covered by query_analytics. Choose only one allowlisted module: dashboard_summary, dashboard_tickets, top_issue_analysis, long_runner_analysis, or defect_high_frequency_analysis.`;
 
-const TOOL_PLANNING_QUERY_RE = /\b(DTSV|QGate|Octane|ticket|work_item|dashboard|ontology|capability|available|partial|unavailable|bug|defect|issue|top\s*issue|octane_defects|solution_cluster|assigned_ecu|business_module|opened|created|raised|submitted|resolved|coverage|test|summary|count|metric|trend|growth|rising|increase|delta|duplicate|similar|write|update|delete|edit|empty\s*result|no\s*data|zero\s*rows|jira|atlassian)\b|[A-Z][A-Z0-9]+-\d+|entityType=work_item|id=\d+|本体|能力|缺陷|测试|覆盖率|多少|几个|统计|趋势|创建|提交|新建|解决|关闭|更新|修改|删除|写入|重复|查重|相似|模块|问题模块|上升|增长|环比|同比|根因|提票|报票|提了|数据.*(?:为空|没数据|没有数据|查不到)|为什么.*(?:为空|没数据|没有数据|查不到)|空结果/i;
+const TOOL_PLANNING_QUERY_RE = /\b(DTSV|QGate|Octane|ticket|work_item|dashboard|ontology|capability|available|partial|unavailable|bug|defect|issue|top\s*issue|octane_defects|solution_cluster|assigned_ecu|business_module|opened|created|raised|submitted|resolved|coverage|test|summary|count|metric|trend|growth|rising|increase|delta|duplicate|similar|write|update|delete|edit|empty\s*result|no\s*data|zero\s*rows)\b|entityType=work_item|id=\d+|本体|能力|缺陷|测试|覆盖率|多少|几个|统计|趋势|创建|提交|新建|解决|关闭|更新|修改|删除|写入|重复|查重|相似|模块|问题模块|上升|增长|环比|同比|根因|提票|报票|提了|数据.*(?:为空|没数据|没有数据|查不到)|为什么.*(?:为空|没数据|没有数据|查不到)|空结果/i;
 
 function formatPlanningDate(now = new Date()) {
   try {
@@ -237,6 +237,60 @@ function lookupValuesForDefectReporter(toolMessages, lookupToolCall) {
   } catch {
     return [];
   }
+}
+
+const DEFECT_RECORD_EXPORT_REQUEST = /(?:\bcsv\b|\bexport\b|\bdownload\b|导出|下载)|(?:(?:完整|全量|所有|全部|full|complete|all).{0,8}(?:ticket|defect|record|明细|列表|清单|缺陷))/iu;
+
+export function isDefectReporterRecordExportRequest(messages) {
+  const queryText = extractLatestUserQuery(messages);
+  return isDefectReporterTicketQuery(queryText) && DEFECT_RECORD_EXPORT_REQUEST.test(queryText);
+}
+
+function reporterAggregateDrilldownRef(toolMessages, priorToolCalls) {
+  const aggregateToolCall = [...priorToolCalls].reverse().find((toolCall) => (
+    toolCall?.function?.name === "query_analytics"
+    && String(toolCall?.id || "").startsWith("defect-reporter-")
+    && String(toolCall?.id || "").endsWith("-aggregate")
+  ));
+  if (!aggregateToolCall) {
+    return "";
+  }
+  const toolMessage = [...toolMessages].reverse().find((message) => (
+    message?.name === "query_analytics"
+    && String(message?.tool_call_id || "") === String(aggregateToolCall.id || "")
+  ));
+  if (!toolMessage) {
+    return "";
+  }
+  try {
+    const payload = JSON.parse(String(toolMessage.content || "{}"));
+    const rows = Array.isArray(payload?.result?.rows) ? payload.result.rows : [];
+    return String(rows.find((row) => typeof row?.drilldown_ref === "string")?.drilldown_ref || "").trim();
+  } catch {
+    return "";
+  }
+}
+
+export function buildDefectReporterExportToolCall({ messages, toolMessages = [], priorToolCalls = [] } = {}) {
+  if (!isDefectReporterRecordExportRequest(messages)) {
+    return null;
+  }
+  const reporterRequest = resolveDefectReporterRequest(messages, priorToolCalls);
+  if (!reporterRequest || priorToolCalls.some((toolCall) => toolCall?.function?.name === "export_defect_records")) {
+    return null;
+  }
+  const drilldownRef = reporterAggregateDrilldownRef(toolMessages, priorToolCalls);
+  if (!drilldownRef) {
+    return null;
+  }
+  return {
+    id: reporterToolId(reporterRequest.reporter, "export"),
+    type: "function",
+    function: {
+      name: "export_defect_records",
+      arguments: JSON.stringify({ drilldown_ref: drilldownRef }),
+    },
+  };
 }
 
 export function buildDefectReporterAliasLookupToolCall({ messages, toolMessages = [], priorToolCalls = [] } = {}) {

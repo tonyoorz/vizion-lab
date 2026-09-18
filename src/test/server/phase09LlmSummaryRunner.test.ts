@@ -93,6 +93,27 @@ describe("Phase 09 LLM summary runner", () => {
     ).toThrow("must contain exactly one ticket");
   });
 
+  it("redacts raw diagnostic codes from the title before sending ticket evidence to the model", () => {
+    const messages = buildPhase09SummaryMessages([
+      {
+        ticket_id: "D-DIAGNOSTIC",
+        ticket: {
+          title: "IPB DTC: 0x035C86 - Communication over Ethernet faulty",
+          function: "Vehicle Communication",
+          problem_evidence: "A diagnostic code was reported while driving.",
+          closure_evidence: "Reject reason: Child (Duplicate).",
+          risk_evidence: "Risk tier: Evidence incomplete / monitor.",
+          comments_evidence: "No comment text retained.",
+          history_evidence: "No closure history retained.",
+          audit_facts: {},
+        },
+      },
+    ]);
+
+    expect(messages[1].content).toContain("[diagnostic code]");
+    expect(messages[1].content).not.toContain("0x035C86");
+  });
+
   it("uses structured audit facts for reject, follow-up, and risk lines instead of model-generated claims", async () => {
     const ticketInput = {
       ticket_id: "D-RISK",

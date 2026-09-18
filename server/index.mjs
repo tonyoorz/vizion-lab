@@ -16,6 +16,7 @@ import { extractLatestUserQuery, resolveAiDefectContext } from "./aiContext.mjs"
 import { streamCompanyChatCompletion, writeSseEvent } from "./companyChat.mjs";
 import { createLocalHttpBoundary } from "./localHttpBoundary.mjs";
 import { resolveRequestUrl } from "./httpRequestUrl.mjs";
+import { proxyAnalyticsDownload } from "./analyticsDownloadProxy.mjs";
 import { resolveInternalAuxiliaryActor, runAuthenticatedChatRequest, toSafeAgentAuthResponse } from "./agentAuth.mjs";
 import { attachDuplicateSummary } from "./duplicateResultEnrichment.mjs";
 import { loadLocalEnv } from "./loadLocalEnv.mjs";
@@ -641,6 +642,15 @@ const server = http.createServer(async (request, response) => {
 
     if (request.method === "GET" && url.pathname === "/api/qgate-reports/latest-dashboard") {
       sendJson(response, 200, findLatestQGateDashboardReport(defaultQGateReportsRoot));
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/agent/analytics/defects/export/download") {
+      await proxyAnalyticsDownload({
+        pathname: url.pathname,
+        searchParams: url.searchParams,
+        response,
+      });
       return;
     }
 

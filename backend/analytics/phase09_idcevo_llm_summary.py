@@ -8,7 +8,10 @@ from pathlib import Path
 import re
 from typing import Any, Mapping, Sequence
 
-from backend.analytics.phase09_idcevo_report import build_phase09_idcevo_report_payload
+from backend.analytics.phase09_idcevo_report import (
+    build_phase09_idcevo_report_payload,
+    build_phase06_idcevo_report_payload,
+)
 
 
 INPUT_VERSION = "phase09-llm-summary-v7"
@@ -19,7 +22,7 @@ COMMENT_ITEM_MAX_CHARS = 1_000
 HISTORY_EVENT_VALUE_MAX_CHARS = 800
 HTML_TAG_PATTERN = re.compile(r"<[^>]+>")
 WHITESPACE_PATTERN = re.compile(r"\s+")
-HEX_DIAGNOSTIC_PATTERN = re.compile(r"\b0x[0-9a-fA-F]{3,}\b")
+HEX_DIAGNOSTIC_PATTERN = re.compile(r"\b0x[0-9a-f]{3,}\b", re.IGNORECASE)
 DTC_CODE_PATTERN = re.compile(r"\bDTC\s+\[diagnostic code\]", re.IGNORECASE)
 LONG_TECHNICAL_IDENTIFIER_PATTERN = re.compile(r"\b[A-Za-z][A-Za-z0-9_]{20,}\b")
 ERROR_DESCRIPTION_END_PATTERN = re.compile(r"\bend\s+of\s+error\s+description\b", re.IGNORECASE)
@@ -254,6 +257,7 @@ def build_phase09_llm_summary_input_records(
         return []
 
     records: list[dict[str, object]] = []
+    seen_ticket_ids: set[str] = set()
     for raw_ticket in raw_tickets:
         if not isinstance(raw_ticket, Mapping):
             continue
@@ -262,6 +266,9 @@ def build_phase09_llm_summary_input_records(
         ticket_id = _text(raw_ticket.get("ticket_id"))
         if not ticket_id:
             continue
+        if ticket_id in seen_ticket_ids:
+            raise ValueError(f"Duplicate Phase 09 LLM summary ticket id: {ticket_id}")
+        seen_ticket_ids.add(ticket_id)
         ticket = _summary_input_ticket(raw_ticket)
         fingerprint_payload = {
             "input_version": INPUT_VERSION,
@@ -361,3 +368,95 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+# ---------------------------------------------------------------------------
+# Phase 06 (resolved / concluded tickets) LLM summary input builder
+# ---------------------------------------------------------------------------
+
+PHASE06_INPUT_VERSION = "phase06-llm-summary-v1"
+
+
+def build_phase06_llm_summary_input_records(
+    payload: Mapping[str, object],
+    *,
+    limit: int | None = None,
+) -> list[dict[str, object]]:
+    """Build bounded LLM input records for ALL Phase 06 tickets in the payload.
+
+    Phase 06 has no ``needs_closure_evidence_review`` filter — every ticket in
+    the payload is exported.
+    """
+    raw_tickets = payload.get("tickets")
+    if not isinstance(raw_tickets, list):
+        return []
+
+    records: list[dict[str, object]] = []
+    seen_ticket_ids: set[str] = set()
+    for raw_ticket in raw_tickets:
+        if not isinstance(raw_ticket, Mapping):
+            continue
+        ticket_id = _text(raw_ticket.get("ticket_id"))
+        if not ticket_id:
+            continue
+        if ticket_id in seen_ticket_ids:
+            raise ValueError(f"Duplicate Phase 06 LLM summary ticket id: {ticket_id}")
+        seen_ticket_ids.add(ticket_id)
+        ticket = _summary_input_ticket(raw_ticket)
+        fingerprint_payload = {
+            "input_version": PHASE06_INPUT_VERSION,
+            "ticket_id": ticket_id,
+            "ticket": ticket,
+        }
+        fingerprint = sha256(
+            json.dumps(
+                fingerprint_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        records.append(
+            {
+                "ticket_id": ticket_id,
+                "input_fingerprint": fingerprint,
+                "input_version": PHASE06_INPUT_VERSION,
+                "ticket": ticket,
+            }
+        )
+        if limit is not None and len(records) >= limit:
+            break
+    return records
+
+
+def write_phase06_llm_summary_input_jsonl(
+    records: Sequence[Mapping[str, object]],
+    output_path: str | Path,
+) -> int:
+    resolved_output_path = Path(output_path)
+    resolved_output_path.parent.mkdir(parents=True, exist_ok=True)
+    content = "".join(
+        json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
+        for record in records
+    )
+    resolved_output_path.write_text(content, encoding="utf-8")
+    return len(records)
+
+
+def export_phase06_llm_summary_inputs(
+    *,
+    db_path: str | Path | None = None,
+    output_path: str | Path,
+    include_china_specific: bool = True,
+    limit: int | None = None,
+) -> int:
+    payload = build_phase06_idcevo_report_payload(
+        db_path=db_path,
+        include_china_specific=include_china_specific,
+        include_full_evidence=True,
+    )
+    records = build_phase06_llm_summary_input_records(
+        payload,
+        limit=limit,
+    )
+    return write_phase06_llm_summary_input_jsonl(records, output_path)

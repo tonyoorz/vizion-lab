@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from backend.analytics.phase09_idcevo_llm_summary import (
     build_phase09_llm_summary_input_records,
     write_phase09_llm_summary_input_jsonl,
@@ -12,7 +14,7 @@ def test_build_phase09_llm_summary_input_records_preserves_closure_context_with_
     tmp_path,
 ) -> None:
     full_description = (
-        "Observed navigation failure with DTC 0x3B01DA and "
+        "Observed navigation failure with DTC 0x3B01DA, 0XBB364B and "
         "ActualValueOperatingModeDcDcConverter. === end of error description === "
         "Unrelated noisy platform inventory and another ticket symptom. "
         + "x" * 8_000
@@ -86,6 +88,7 @@ def test_build_phase09_llm_summary_input_records_preserves_closure_context_with_
     assert "Observed navigation failure with" in record["ticket"]["problem_evidence"]
     assert len(record["ticket"]["problem_evidence"]) < len(full_description)
     assert "0x3B01DA" not in record["ticket"]["problem_evidence"]
+    assert "0XBB364B" not in record["ticket"]["problem_evidence"]
     assert "ActualValueOperatingModeDcDcConverter" not in record["ticket"]["problem_evidence"]
     assert "diagnostic code" in record["ticket"]["problem_evidence"]
     assert "Unrelated noisy platform inventory" not in record["ticket"]["problem_evidence"]
@@ -100,3 +103,15 @@ def test_build_phase09_llm_summary_input_records_preserves_closure_context_with_
     assert count == 1
     written_record = json.loads(output_path.read_text(encoding="utf-8").strip())
     assert written_record == record
+
+
+def test_build_phase09_llm_summary_input_records_rejects_duplicate_ticket_ids() -> None:
+    payload = {
+        "tickets": [
+            {"ticket_id": "D-DUP", "name": "First", "needs_closure_evidence_review": True},
+            {"ticket_id": "D-DUP", "name": "Second", "needs_closure_evidence_review": True},
+        ]
+    }
+
+    with pytest.raises(ValueError, match="Duplicate Phase 09 LLM summary ticket id: D-DUP"):
+        build_phase09_llm_summary_input_records(payload)

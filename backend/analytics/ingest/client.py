@@ -41,6 +41,7 @@ DEFECT_FIELDS: tuple[str, ...] = (
     "severity{name,id}",
     "owner{full_name,name}",
     "author{full_name,name}",
+    "user_tags{id,name}",
 )
 
 MANUAL_RUN_FIELDS: tuple[str, ...] = (

@@ -26,14 +26,6 @@ import SlashMenu, { SLASH_COMMANDS, SlashCommand } from "../chat/SlashMenu";
 import { segmentsToPlainText, parseAgentStream } from "../chat/agentParser";
 import DuplicateSearchResults from "../chat/DuplicateSearchResults";
 import TestCasePreviewCard from "../chat/TestCasePreviewCard";
-import TestCaseBatchPreview from "../chat/TestCaseBatchPreview";
-import DefectCandidateList from "../chat/DefectCandidateList";
-import TestCasePatternDiscovery from "../chat/TestCasePatternDiscovery";
-import TestCasePatternDraftPreview from "../chat/TestCasePatternDraftPreview";
-import {
-  mergePatternCoverageAuditResults,
-  splitPatternIdsForCoverageAudit,
-} from "../chat/patternCoverageAudit";
 import { createStreamTextAnimator, type StreamTextAnimator } from "../chat/streamTextAnimator";
 import {
   COMPANY_CHAT_MODELS,
@@ -41,65 +33,18 @@ import {
   normalizeCompanyChatModel,
 } from "../chat/companyModels";
 import type { DuplicateSearchResult } from "../chat/duplicateSearchTypes";
-import type {
-  TestCaseResult,
-  TestCaseBatchPrepareResponse,
-  TestCaseBatchItem,
-  TestCaseDefectCandidate,
-  TestCaseFilteredDefect,
-  TestCasePatternCoverageAuditResult,
-  TestCasePatternDraft,
-  TestCasePatternDraftResponse,
-  TestCasePatternDiscoveryResult,
-  BatchProgress,
-} from "../chat/testCaseTypes";
+import type { TestCaseResult } from "../chat/testCaseTypes";
 import { Switch } from "@/components/ui/switch";
 import { supabase } from "@/integrations/supabase/client";
 
 type Role = "user" | "assistant";
 type ChatMode = "chat" | "duplicate-search";
-const TESTCASE_BATCH_SIZE = 60;
-const TESTCASE_BATCH_CONCURRENCY = 12;
-const PATTERN_DRAFT_BATCH_SIZE = 60;
-
-/**
- * Pipelined batch concurrency: how many batches run simultaneously.
- * With 2, batch N+1 starts its prepare/LLM phase while batch N is still
- * finishing — eliminating the dead time between serial batches. Kept low
- * to avoid LLM rate-limit pressure and keep progress-bar updates legible.
- */
-const BATCH_PIPELINE_CONCURRENCY = 2;
-
-/**
- * Run an async mapper over items with a bounded concurrency limit.
- * Preserves input order in the output array. Mirrors the server-side
- * mapWithConcurrency in index.mjs.
- */
-async function mapWithConcurrency<T, R>(
-  items: readonly T[],
-  concurrency: number,
-  mapper: (item: T, index: number) => Promise<R>,
-): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let nextIndex = 0;
-  const effectiveConcurrency = Math.max(1, Math.min(concurrency, items.length));
-  async function worker() {
-    while (true) {
-      const i = nextIndex++;
-      if (i >= items.length) return;
-      results[i] = await mapper(items[i], i);
-    }
-  }
-  await Promise.all(Array.from({ length: effectiveConcurrency }, worker));
-  return results;
-}
 interface Attachment {
   id: string;
   name: string;
   kind: "image" | "file";
   mimeType?: string;
   dataUrl?: string;
-  textContent?: string;
   size: number;
 }
 interface TokenUsage {
@@ -118,19 +63,6 @@ interface Msg {
   mode?: ChatMode;
   duplicateResult?: DuplicateSearchResult;
   testcaseResult?: TestCaseResult;
-  testcaseBatchResult?: TestCaseBatchPrepareResponse;
-  testcaseDefectCandidates?: TestCaseDefectCandidate[];
-  /** Topic-filter result (all matching defects without linked test case, paginated). */
-  testcaseFilterResult?: {
-    candidates: TestCaseFilteredDefect[];
-    total: number;
-    keyword: string;
-  };
-  testcasePatternDiscoveryResult?: TestCasePatternDiscoveryResult;
-  testcasePatternCoverageAuditResult?: TestCasePatternCoverageAuditResult;
-  testcasePatternDraftResponse?: TestCasePatternDraftResponse;
-  /** Real-time progress for long-running batch export (shown in DefectCandidateList). */
-  batchProgress?: BatchProgress;
   attachments?: Attachment[];
   meta?: MessageMeta;
 }
@@ -145,7 +77,7 @@ interface Conversation {
 type GatewayContentPart =
   | { type: "text"; text: string }
   | { type: "image_url"; image_url: { url: string } }
-  | { type: "file"; file: { file_data: string; filename: string; mime_type?: string } };
+  | { type: "file_data"; file_data: { name: string; mime_type?: string; url: string } };
 
 type ToolStreamEvent = {
   type?: unknown;
@@ -170,7 +102,6 @@ const CHAT_MODEL_PRICING: Record<string, ChatModelPricing> = {
   "glm-5": { currency: "CNY", inputPerMillion: 6, outputPerMillion: 22 },
   "qwen3.5-397b-a17b": { currency: "CNY", inputPerMillion: 0.72, outputPerMillion: 1.2 },
   "doubao-seed-2.1-pro": { currency: "CNY", inputPerMillion: 0, outputPerMillion: 0 },
-  "doubao-seed-2.1-turbo": { currency: "CNY", inputPerMillion: 0, outputPerMillion: 0 },
 };
 
 const VERSIONED_MODEL_PRICING_ALIASES = [
@@ -417,34 +348,20 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
       if (f.size > 8 * 1024 * 1024) continue;
       const isImg = f.type.startsWith("image/");
       const isPdf = f.type === "application/pdf" || f.name.toLowerCase().endsWith(".pdf");
-      const isText = [
-        "text/plain", "text/csv", "text/markdown",
-        "application/json", "application/x-json", "text/json",
-      ].includes(f.type) || /\.(txt|csv|md|markdown|json)$/i.test(f.name);
-      const resolvedMime = f.type || (isPdf ? "application/pdf" : isText ? "text/plain" : "application/octet-stream");
-      // Text files are read as UTF-8 content (sent as text parts); binary
-      // attachments (images, PDF) are read as data URLs.
-      const textContent = isText
-        ? await new Promise<string>((resolve) => {
-            const r = new FileReader();
-            r.onload = () => resolve(String(r.result || ""));
-            r.readAsText(f);
-          })
-        : undefined;
-      const dataUrl = !isText
-        ? await new Promise<string>((resolve) => {
-            const r = new FileReader();
-            r.onload = () => resolve(r.result as string);
-            r.readAsDataURL(f);
-          })
-        : undefined;
+      let dataUrl: string | undefined;
+      if (isImg || isPdf) {
+        dataUrl = await new Promise<string>((resolve) => {
+          const r = new FileReader();
+          r.onload = () => resolve(r.result as string);
+          r.readAsDataURL(f);
+        });
+      }
       adds.push({
         id: newId(),
         name: f.name,
         kind: isImg ? "image" : "file",
-        mimeType: resolvedMime,
+        mimeType: f.type || (isPdf ? "application/pdf" : "application/octet-stream"),
         dataUrl,
-        textContent,
         size: f.size,
       });
     }
@@ -590,34 +507,20 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
   // ----- core send -----
   const buildGatewayMessages = (history: Msg[]) =>
     history.map((m) => {
-      const hasAttachment = m.attachments?.some((a) =>
-        (a.kind === "image" && a.dataUrl) ||
-        (a.kind === "file" && a.dataUrl) ||
-        (a.kind === "file" && a.textContent),
-      );
-      if (m.role === "user" && hasAttachment) {
+      if (m.role === "user" && m.attachments?.some((a) => a.dataUrl && (a.kind === "image" || a.mimeType === "application/pdf"))) {
         const parts: GatewayContentPart[] = [{ type: "text", text: m.content || "(附件)" }];
-        for (const a of m.attachments ?? []) {
+        for (const a of m.attachments) {
           if (a.kind === "image" && a.dataUrl) {
             parts.push({ type: "image_url", image_url: { url: a.dataUrl } });
           }
-          if (a.kind === "file" && a.dataUrl) {
-            // Binary files (PDF, etc.) are sent as native file parts.
+          if (a.kind === "file" && a.mimeType === "application/pdf" && a.dataUrl) {
             parts.push({
-              type: "file",
-              file: {
-                file_data: a.dataUrl,
-                filename: a.name,
+              type: "file_data",
+              file_data: {
+                name: a.name,
                 mime_type: a.mimeType,
+                url: a.dataUrl,
               },
-            });
-          }
-          if (a.kind === "file" && a.textContent) {
-            // Text files (txt/csv/json/md) are inlined as text parts — the
-            // model reads them directly without a binary wrapper.
-            parts.push({
-              type: "text",
-              text: `Attachment ${a.name}:\n${a.textContent}`,
             });
           }
         }
@@ -963,701 +866,6 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
     }
   };
 
-  const runCreateTestcaseBatch = async (defectIds: string[], assistantMsgId: string, intentText = "") => {
-    setStreaming(true);
-    const controller = new AbortController();
-    activeRequestRef.current = newId();
-    abortRef.current = controller;
-    streamAnimatorRef.current?.stop();
-    updateActive((c) => ({
-      ...c,
-      messages: c.messages.map((message) =>
-        message.id === assistantMsgId
-          ? { ...message, content: `正在批量生成 ${defectIds.length} 个测试用例（并发 ${TESTCASE_BATCH_CONCURRENCY}）…`, mode: "chat" as ChatMode }
-          : message,
-      ),
-      updatedAt: Date.now(),
-    }));
-
-    // The server caps each prepare-batch call at 20 defects. Slice the
-    // selection into chunks and accumulate results across calls so large
-    // selections (e.g. 100+ from topic filter) work without hitting the cap.
-    const batches: string[][] = [];
-    for (let i = 0; i < defectIds.length; i += TESTCASE_BATCH_SIZE) {
-      batches.push(defectIds.slice(i, i + TESTCASE_BATCH_SIZE));
-    }
-
-    const allResults: TestCaseBatchItem[] = [];
-    try {
-      await mapWithConcurrency(batches, BATCH_PIPELINE_CONCURRENCY, async (batch, bi) => {
-        if (batches.length > 1) {
-          updateActive((c) => ({
-            ...c,
-            messages: c.messages.map((message) =>
-              message.id === assistantMsgId
-                ? { ...message, content: `正在生成第 ${bi + 1}/${batches.length} 批（${batch.length} 个）… 已完成 ${allResults.length}/${defectIds.length}` }
-                : message,
-            ),
-            updatedAt: Date.now(),
-          }));
-        }
-
-        const response = await fetch("/api/create-testcase/prepare-batch", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ defect_ids: batch, intent: intentText }),
-          signal: controller.signal,
-        });
-
-        const payload = (await response.json().catch(() => ({}))) as TestCaseBatchPrepareResponse;
-
-        if (!response.ok || !payload.success || !payload.results) {
-          throw new Error(payload.error || "批量生成测试用例失败");
-        }
-        const drafts = payload.results as TestCaseBatchItem[];
-        allResults.push(...drafts);
-        if (batches.length > 1) {
-          updateActive((c) => ({
-            ...c,
-            messages: c.messages.map((message) =>
-              message.id === assistantMsgId
-                ? { ...message, content: `第 ${bi + 1}/${batches.length} 批完成（${drafts.length} 个），累计 ${allResults.length}/${defectIds.length}` }
-                : message,
-            ),
-            updatedAt: Date.now(),
-          }));
-        }
-      });
-
-      const succeeded = allResults.filter((r) => !r.error).length;
-      const failed = allResults.length - succeeded;
-      const summary = { total: allResults.length, succeeded, failed };
-      updateActive((c) => ({
-        ...c,
-        messages: c.messages.map((message) =>
-          message.id === assistantMsgId
-            ? {
-                ...message,
-                content: `已生成 ${summary.total} 个测试用例草稿（成功 ${summary.succeeded}，失败 ${summary.failed}），请逐条审核后批量创建。`,
-                testcaseBatchResult: { success: true, results: allResults, summary },
-              }
-            : message,
-        ),
-        updatedAt: Date.now(),
-      }));
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      updateActive((c) => ({
-        ...c,
-        messages: c.messages.map((message) =>
-          message.id === assistantMsgId
-            ? { ...message, content: `批量生成失败（已完成 ${allResults.length}/${defectIds.length}）：${msg}` }
-            : message,
-        ),
-        updatedAt: Date.now(),
-      }));
-    } finally {
-      setStreaming(false);
-      abortRef.current = null;
-    }
-  };
-
-  const runTestcaseSearch = async (query: string, assistantMsgId: string) => {
-    setStreaming(true);
-    const controller = new AbortController();
-    activeRequestRef.current = newId();
-    abortRef.current = controller;
-    streamAnimatorRef.current?.stop();
-    updateActive((c) => ({
-      ...c,
-      messages: c.messages.map((message) =>
-        message.id === assistantMsgId
-          ? { ...message, content: "正在检索匹配的缺陷…", mode: "chat" as ChatMode }
-          : message,
-      ),
-      updatedAt: Date.now(),
-    }));
-
-    try {
-      const response = await fetch("/api/create-testcase/search", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query, top_k: 10 }),
-        signal: controller.signal,
-      });
-
-      const payload = await response.json().catch(() => ({}));
-      const candidates: TestCaseDefectCandidate[] = payload.candidates || [];
-
-      if (!response.ok || !payload.success) {
-        throw new Error(payload.error || "缺陷检索失败");
-      }
-
-      if (candidates.length === 0) {
-        updateActive((c) => ({
-          ...c,
-          messages: c.messages.map((message) =>
-            message.id === assistantMsgId
-              ? { ...message, content: `未找到与「${query}」匹配的缺陷，请尝试换关键词。` }
-              : message,
-          ),
-          updatedAt: Date.now(),
-        }));
-        return;
-      }
-
-      updateActive((c) => ({
-        ...c,
-        messages: c.messages.map((message) =>
-          message.id === assistantMsgId
-            ? {
-                ...message,
-                content: `找到 ${candidates.length} 个匹配缺陷，请勾选需要生成测试用例的缺陷。`,
-                testcaseDefectCandidates: candidates,
-              }
-            : message,
-        ),
-        updatedAt: Date.now(),
-      }));
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      updateActive((c) => ({
-        ...c,
-        messages: c.messages.map((message) =>
-          message.id === assistantMsgId
-            ? { ...message, content: `检索失败：${msg}` }
-            : message,
-        ),
-        updatedAt: Date.now(),
-      }));
-    } finally {
-      setStreaming(false);
-      abortRef.current = null;
-    }
-  };
-
-  const runTestcaseFilter = async (keyword: string, assistantMsgId: string) => {
-    setStreaming(true);
-    const controller = new AbortController();
-    activeRequestRef.current = newId();
-    abortRef.current = controller;
-    streamAnimatorRef.current?.stop();
-    updateActive((c) => ({
-      ...c,
-      messages: c.messages.map((message) =>
-        message.id === assistantMsgId
-          ? { ...message, content: `正在过滤「${keyword}」相关缺陷（排除已关联 testcase）…`, mode: "chat" as ChatMode }
-          : message,
-      ),
-      updatedAt: Date.now(),
-    }));
-
-    try {
-      const response = await fetch("/api/create-testcase/filter-defects", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ keyword, limit: 50, offset: 0 }),
-        signal: controller.signal,
-      });
-
-      const payload = await response.json().catch(() => ({}));
-      const candidates: TestCaseFilteredDefect[] = payload.candidates || [];
-
-      if (!response.ok || !payload.success) {
-        throw new Error(payload.error || "缺陷过滤失败");
-      }
-
-      if (candidates.length === 0) {
-        updateActive((c) => ({
-          ...c,
-          messages: c.messages.map((message) =>
-            message.id === assistantMsgId
-              ? { ...message, content: `未找到与「${keyword}」相关且未关联 testcase 的缺陷，请尝试换关键词。` }
-              : message,
-          ),
-          updatedAt: Date.now(),
-        }));
-        return;
-      }
-
-      const summary = payload.summary || {};
-      const total = payload.total || candidates.length;
-      updateActive((c) => ({
-        ...c,
-        messages: c.messages.map((message) =>
-          message.id === assistantMsgId
-            ? {
-                ...message,
-                content:
-                  `找到 ${total} 个「${keyword}」相关缺陷（未关联 testcase），` +
-                  `已加载 ${candidates.length} 个。可勾选后生成测试用例或导出 CSV。` +
-                  (summary.linked_excluded ? `（已排除 ${summary.linked_excluded} 个已关联 testcase 的 defect）` : ""),
-                testcaseFilterResult: {
-                  candidates,
-                  total,
-                  keyword,
-                },
-              }
-            : message,
-        ),
-        updatedAt: Date.now(),
-      }));
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      updateActive((c) => ({
-        ...c,
-        messages: c.messages.map((message) =>
-          message.id === assistantMsgId
-            ? { ...message, content: `过滤失败：${msg}` }
-            : message,
-        ),
-        updatedAt: Date.now(),
-      }));
-    } finally {
-      setStreaming(false);
-      abortRef.current = null;
-    }
-  };
-
-  const runPatternDiscovery = async (defectIds: string[], keyword: string, assistantMsgId: string) => {
-    if (defectIds.length === 0) return;
-    setStreaming(true);
-    const controller = new AbortController();
-    activeRequestRef.current = newId();
-    abortRef.current = controller;
-    streamAnimatorRef.current?.stop();
-    updateActive((c) => ({
-      ...c,
-      messages: c.messages.map((message) =>
-        message.id === assistantMsgId
-          ? { ...message, content: `正在发现 ${defectIds.length} 个「${keyword}」缺陷的可复用模式…`, mode: "chat" as ChatMode }
-          : message,
-      ),
-      updatedAt: Date.now(),
-    }));
-
-    try {
-      const response = await fetch("/api/create-testcase/discover-patterns", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ keyword, defect_ids: defectIds }),
-        signal: controller.signal,
-      });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok || !payload.success || !payload.sourceSnapshot || !payload.summary) {
-        throw new Error(payload.error || "缺陷模式发现失败");
-      }
-
-      const result = payload as TestCasePatternDiscoveryResult;
-      updateActive((c) => ({
-        ...c,
-        messages: c.messages.map((message) =>
-          message.id === assistantMsgId
-            ? {
-                ...message,
-                content: `已发现 ${result.summary.pattern_count} 个可复用 testcase 候选模式，预计减少 ${result.summary.estimated_llm_generations_avoided} 次 LLM 生成。`,
-                testcasePatternDiscoveryResult: result,
-              }
-            : message,
-        ),
-        updatedAt: Date.now(),
-      }));
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      updateActive((c) => ({
-        ...c,
-        messages: c.messages.map((message) =>
-          message.id === assistantMsgId
-            ? { ...message, content: `模式发现失败：${msg}` }
-            : message,
-        ),
-        updatedAt: Date.now(),
-      }));
-    } finally {
-      setStreaming(false);
-      abortRef.current = null;
-    }
-  };
-
-  const runPatternCoverageAudit = async (
-    patternIds: string[],
-    discoveryResult: TestCasePatternDiscoveryResult,
-    assistantMsgId: string,
-    previousAuditResult?: TestCasePatternCoverageAuditResult,
-  ) => {
-    if (patternIds.length === 0) return;
-    const requestedPatternIds = [...new Set(patternIds)];
-    const previousAudits = previousAuditResult?.sourceSnapshot.runId === discoveryResult.sourceSnapshot.runId
-      ? previousAuditResult.audits
-      : [];
-    const previouslyAuditedPatternIds = new Set(previousAudits.map((audit) => audit.patternId));
-    const pendingPatternIds = requestedPatternIds.filter((patternId) => !previouslyAuditedPatternIds.has(patternId));
-    const auditBatches = splitPatternIdsForCoverageAudit(pendingPatternIds);
-    setStreaming(true);
-    const controller = new AbortController();
-    activeRequestRef.current = newId();
-    abortRef.current = controller;
-    streamAnimatorRef.current?.stop();
-    updateActive((c) => ({
-      ...c,
-      messages: c.messages.map((message) =>
-        message.id === assistantMsgId
-          ? {
-              ...message,
-              content: pendingPatternIds.length
-                ? `正在检查 ${requestedPatternIds.length} 个模式的已有 testcase 候选（${auditBatches.length} 批）…`
-                : `所选 ${requestedPatternIds.length} 个模式均已检查过已有 testcase 候选。`,
-              mode: "chat" as ChatMode,
-            }
-          : message,
-      ),
-      updatedAt: Date.now(),
-    }));
-
-    try {
-      const batchResults: TestCasePatternCoverageAuditResult[] = previousAuditResult?.sourceSnapshot.runId === discoveryResult.sourceSnapshot.runId
-        ? [previousAuditResult]
-        : [];
-      let completedPatternCount = previousAudits.length;
-      for (let batchIndex = 0; batchIndex < auditBatches.length; batchIndex += 1) {
-        if (controller.signal.aborted) {
-          throw new DOMException("Aborted", "AbortError");
-        }
-        const batch = auditBatches[batchIndex];
-        updateActive((c) => ({
-          ...c,
-          messages: c.messages.map((message) =>
-            message.id === assistantMsgId
-              ? {
-                  ...message,
-                  content: `正在检查已有 testcase 候选：第 ${batchIndex + 1}/${auditBatches.length} 批（${batch.length} 个模式，已完成 ${completedPatternCount}/${requestedPatternIds.length}）…`,
-                }
-              : message,
-          ),
-          updatedAt: Date.now(),
-        }));
-
-        const response = await fetch("/api/create-testcase/audit-pattern-coverage", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            run_id: discoveryResult.sourceSnapshot.runId,
-            pattern_ids: batch,
-          }),
-          signal: controller.signal,
-        });
-        const payload = await response.json().catch(() => ({}));
-        if (!response.ok || !payload.success || !Array.isArray(payload.audits) || !payload.summary) {
-          throw new Error(payload.error || "已有 testcase 候选检查失败");
-        }
-        batchResults.push(payload as TestCasePatternCoverageAuditResult);
-        completedPatternCount += batch.length;
-      }
-
-      const auditResult = mergePatternCoverageAuditResults(batchResults);
-      updateActive((c) => ({
-        ...c,
-        messages: c.messages.map((message) =>
-          message.id === assistantMsgId
-            ? {
-                ...message,
-                content: `已检查 ${auditResult.summary.audited_pattern_count} 个模式：${auditResult.summary.review_existing_testcase_count} 个有已有 testcase 候选，${auditResult.summary.review_generate_reusable_testcase_count} 个可进入复用用例审核。`,
-                testcasePatternCoverageAuditResult: auditResult,
-              }
-            : message,
-        ),
-        updatedAt: Date.now(),
-      }));
-    } catch (err) {
-      const isAbort = controller.signal.aborted || (err instanceof Error && err.name === "AbortError");
-      const msg = isAbort ? "已取消" : (err instanceof Error ? err.message : String(err));
-      updateActive((c) => ({
-        ...c,
-        messages: c.messages.map((message) =>
-          message.id === assistantMsgId
-            ? { ...message, content: `已有 testcase 候选检查${isAbort ? "已取消" : "失败"}：${msg}` }
-            : message,
-        ),
-        updatedAt: Date.now(),
-      }));
-    } finally {
-      setStreaming(false);
-      abortRef.current = null;
-    }
-  };
-
-  const runPatternDraftGeneration = async (
-    patternIds: string[],
-    discoveryResult: TestCasePatternDiscoveryResult,
-    assistantMsgId: string,
-  ) => {
-    if (patternIds.length === 0) return;
-    setStreaming(true);
-    const controller = new AbortController();
-    activeRequestRef.current = newId();
-    abortRef.current = controller;
-    streamAnimatorRef.current?.stop();
-
-    const runId = discoveryResult.sourceSnapshot.runId;
-    const batches: string[][] = [];
-    for (let i = 0; i < patternIds.length; i += PATTERN_DRAFT_BATCH_SIZE) {
-      batches.push(patternIds.slice(i, i + PATTERN_DRAFT_BATCH_SIZE));
-    }
-
-    const setProgress = (progress: Partial<BatchProgress>, contentText?: string) => {
-      updateActive((c) => ({
-        ...c,
-        messages: c.messages.map((message) =>
-          message.id === assistantMsgId
-            ? {
-                ...message,
-                content: contentText ?? message.content,
-                batchProgress: {
-                  phase: "generating",
-                  current: 0,
-                  total: patternIds.length,
-                  batchIndex: 0,
-                  totalBatches: batches.length,
-                  ...progress,
-                } as BatchProgress,
-              }
-            : message,
-        ),
-        updatedAt: Date.now(),
-      }));
-    };
-
-    setProgress(
-      { phase: "generating", current: 0, batchIndex: 0 },
-      `正在生成 ${patternIds.length} 个参数化 testcase 草稿（分 ${batches.length} 批，每批 ${PATTERN_DRAFT_BATCH_SIZE}）…`,
-    );
-
-    const allDrafts: TestCasePatternDraft[] = [];
-    try {
-      await mapWithConcurrency(batches, BATCH_PIPELINE_CONCURRENCY, async (batch, batchIdx) => {
-        setProgress(
-          { phase: "generating", current: allDrafts.length, batchIndex: batchIdx + 1 },
-          `正在生成第 ${batchIdx + 1}/${batches.length} 批… 已完成 ${allDrafts.length}/${patternIds.length}`,
-        );
-
-        const response = await fetch("/api/create-testcase/generate-pattern-drafts", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            run_id: runId,
-            pattern_ids: batch,
-            skip_export: true,
-          }),
-          signal: controller.signal,
-        });
-        const payload = await response.json().catch(() => ({}));
-        if (!response.ok || !payload.success || !Array.isArray(payload.results)) {
-          throw new Error(payload.error || `第 ${batchIdx + 1} 批草稿生成失败`);
-        }
-        const drafts = payload.results as TestCasePatternDraft[];
-        allDrafts.push(...drafts);
-        setProgress(
-          { phase: "generating", current: allDrafts.length, batchIndex: batchIdx + 1 },
-          `第 ${batchIdx + 1}/${batches.length} 批完成（${drafts.length} 份），累计 ${allDrafts.length}/${patternIds.length}`,
-        );
-      });
-      const batchIndex = batches.length;
-
-      // All batches done — export full results to CSV.
-      setProgress(
-        { phase: "clustering", current: allDrafts.length, batchIndex },
-        `已生成 ${allDrafts.length} 份草稿，正在导出 CSV…`,
-      );
-
-      let artifacts: TestCasePatternDraftResponse["artifacts"];
-      let artifactError = "";
-      try {
-        const exportResponse = await fetch("/api/create-testcase/export-pattern-drafts", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ run_id: runId, drafts: allDrafts }),
-          signal: controller.signal,
-        });
-        const exportPayload = await exportResponse.json().catch(() => ({}));
-        if (!exportResponse.ok || !exportPayload.success || !exportPayload.artifacts) {
-          artifactError = exportPayload.error || "CSV 导出失败";
-        } else {
-          artifacts = exportPayload.artifacts;
-        }
-      } catch (err) {
-        artifactError = err instanceof Error ? err.message : String(err);
-      }
-
-      const succeeded = allDrafts.filter((r) => !r.error).length;
-      const failed = allDrafts.length - succeeded;
-      const draftResponse: TestCasePatternDraftResponse = {
-        sourceSnapshot: discoveryResult.sourceSnapshot,
-        results: allDrafts,
-        summary: { total: allDrafts.length, succeeded, failed },
-        artifacts,
-        artifactError: artifactError || undefined,
-      };
-
-      const csvInfo = artifacts
-        ? `\n草稿 CSV: ${artifacts.patternDraftsCsvPath}\n缺陷映射 CSV: ${artifacts.defectMappingCsvPath}\n资产库 XLSX: ${artifacts.testcaseLibraryXlsxPath}`
-        : artifactError
-          ? `\nCSV 导出失败：${artifactError}`
-          : "";
-      const doneText = `已生成 ${allDrafts.length} 个参数化 testcase 草稿（通过 ${succeeded}，失败 ${failed}），请审核内容与成员映射。${csvInfo}`;
-
-      updateActive((c) => ({
-        ...c,
-        messages: c.messages.map((message) =>
-          message.id === assistantMsgId
-            ? {
-                ...message,
-                content: doneText,
-                testcasePatternDraftResponse: draftResponse,
-                batchProgress: {
-                  phase: "done" as const,
-                  current: allDrafts.length,
-                  total: patternIds.length,
-                  batchIndex: batches.length,
-                  totalBatches: batches.length,
-                },
-              }
-            : message,
-        ),
-        updatedAt: Date.now(),
-      }));
-    } catch (err) {
-      const isAbort = err instanceof Error && err.name === "AbortError";
-      const msg = isAbort ? "用户取消" : (err instanceof Error ? err.message : String(err));
-      setProgress(
-        { phase: isAbort ? "cancelled" : "error", current: allDrafts.length, error: msg },
-        isAbort
-          ? `已取消生成（已完成 ${allDrafts.length}/${patternIds.length} 份草稿）。`
-          : `草稿生成失败（已完成 ${allDrafts.length}/${patternIds.length}）：${msg}`,
-      );
-    } finally {
-      setStreaming(false);
-      abortRef.current = null;
-    }
-  };
-
-  /**
-   * Export generated test-case drafts to CSV. Generates drafts for the selected
-   * defect ids in batches of 20 (LLM generation is concurrent-3 inside the
-   * server), accumulates all results, then writes them to a CSV file — no
-   * Octane write. Reports progress as each batch completes.
-   */
-  const runExportCsv = async (defectIds: string[], keyword: string, assistantMsgId: string) => {
-    setStreaming(true);
-    const controller = new AbortController();
-    activeRequestRef.current = newId();
-    abortRef.current = controller;
-    streamAnimatorRef.current?.stop();
-
-    const batches: string[][] = [];
-    for (let i = 0; i < defectIds.length; i += TESTCASE_BATCH_SIZE) {
-      batches.push(defectIds.slice(i, i + TESTCASE_BATCH_SIZE));
-    }
-
-    const startedAt = Date.now();
-
-    const setProgress = (progress: Partial<BatchProgress>, contentText?: string) => {
-      updateActive((c) => ({
-        ...c,
-        messages: c.messages.map((message) =>
-          message.id === assistantMsgId
-            ? {
-                ...message,
-                content: contentText ?? message.content,
-                batchProgress: {
-                  phase: "generating",
-                  current: 0,
-                  total: defectIds.length,
-                  batchIndex: 0,
-                  totalBatches: batches.length,
-                  ...progress,
-                } as BatchProgress,
-              }
-            : message,
-        ),
-        updatedAt: Date.now(),
-      }));
-    };
-
-    setProgress(
-      { phase: "generating", current: 0, total: defectIds.length, batchIndex: 0, totalBatches: batches.length },
-      `正在生成 ${defectIds.length} 个测试用例草稿（分 ${batches.length} 批，每批 ${TESTCASE_BATCH_SIZE}，并发 ${TESTCASE_BATCH_CONCURRENCY}）…`,
-    );
-
-    const allDrafts: TestCaseBatchItem[] = [];
-    try {
-      await mapWithConcurrency(batches, BATCH_PIPELINE_CONCURRENCY, async (batch, batchIdx) => {
-        setProgress(
-          { phase: "generating", current: allDrafts.length, batchIndex: batchIdx + 1 },
-          `正在生成第 ${batchIdx + 1}/${batches.length} 批… 已完成 ${allDrafts.length}/${defectIds.length}`,
-        );
-
-        const response = await fetch("/api/create-testcase/prepare-batch", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ defect_ids: batch, intent: keyword }),
-          signal: controller.signal,
-        });
-        const payload = await response.json().catch(() => ({}));
-        if (!response.ok || !payload.success || !payload.results) {
-          throw new Error(payload.error || `第 ${batchIdx + 1} 批生成失败`);
-        }
-        const drafts = payload.results as TestCaseBatchItem[];
-        allDrafts.push(...drafts);
-        setProgress(
-          { phase: "generating", current: allDrafts.length, batchIndex: batchIdx + 1 },
-          `第 ${batchIdx + 1}/${batches.length} 批完成（${drafts.length} 份），累计 ${allDrafts.length}/${defectIds.length}`,
-        );
-      });
-      const batchIndex = batches.length;
-
-      // All batches done — cluster + write to CSV.
-      setProgress(
-        { phase: "clustering", current: allDrafts.length, batchIndex },
-        `已生成 ${allDrafts.length} 份草稿，正在聚类 + 导出 CSV…`,
-      );
-
-      const exportResponse = await fetch("/api/create-testcase/export-csv", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ keyword, drafts: allDrafts, cluster: true }),
-        signal: controller.signal,
-      });
-      const exportPayload = await exportResponse.json().catch(() => ({}));
-      if (!exportResponse.ok || !exportPayload.success) {
-        throw new Error(exportPayload.error || "CSV 导出失败");
-      }
-
-      const succeeded = allDrafts.filter((r) => !r.error).length;
-      const failed = allDrafts.length - succeeded;
-      const csvPath = exportPayload.csv_path || "";
-      const clusterInfo = exportPayload.cluster_summary
-        ? `\n聚类结果：${exportPayload.cluster_summary.total_groups} 组（去重 ${exportPayload.cluster_summary.reduction} 份相似），${exportPayload.cluster_summary.similar_clusters} 个含相似 testcase 的组。\nCSV 中按组排列，is_primary=true 的是主要 testcase，可优先 review。`
-        : "";
-      const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
-      setProgress(
-        { phase: "done", current: allDrafts.length },
-        `CSV 导出完成！共 ${exportPayload.row_count} 行（成功 ${succeeded}，失败 ${failed}），耗时 ${elapsedSec}s。\n文件路径：${csvPath}${clusterInfo}\n\n可离线审核 CSV 后再决定是否写入 Octane。`,
-      );
-    } catch (err) {
-      const isAbort = err instanceof Error && err.name === "AbortError";
-      const msg = isAbort ? "用户取消" : (err instanceof Error ? err.message : String(err));
-      setProgress(
-        { phase: isAbort ? "cancelled" : "error", current: allDrafts.length, error: msg },
-        isAbort
-          ? `已取消导出（已完成 ${allDrafts.length}/${defectIds.length} 份草稿）。`
-          : `导出失败（已完成 ${allDrafts.length}/${defectIds.length}）：${msg}`,
-      );
-    } finally {
-      setStreaming(false);
-      abortRef.current = null;
-    }
-  };
-
   const runDuplicateSearch = async (queryText: string, assistantMsgId: string) => {
     setStreaming(true);
     const controller = new AbortController();
@@ -1771,72 +979,6 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
     }
   };
 
-  /**
-   * Generate a test case directly from a natural-language description (no
-   * defect lookup). Used when the LLM intent analyzer decides the user is
-   * describing a test scenario, not searching for existing defects.
-   */
-  const runTestcaseFromDescription = async (description: string, assistantMsgId: string) => {
-    setStreaming(true);
-    const controller = new AbortController();
-    activeRequestRef.current = newId();
-    abortRef.current = controller;
-    streamAnimatorRef.current?.stop();
-    updateActive((c) => ({
-      ...c,
-      messages: c.messages.map((message) =>
-        message.id === assistantMsgId
-          ? { ...message, content: `正在根据描述生成测试用例草稿…`, mode: "chat" as ChatMode }
-          : message,
-      ),
-      updatedAt: Date.now(),
-    }));
-
-    try {
-      const response = await fetch("/api/create-testcase/generate-from-description", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ description }),
-        signal: controller.signal,
-      });
-
-      const payload = (await response.json().catch(() => ({}))) as TestCaseBatchPrepareResponse;
-
-      if (!response.ok || !payload.success || !payload.results) {
-        throw new Error(payload.error || "生成测试用例失败");
-      }
-
-      const summary = payload.summary || { total: 0, succeeded: 0, failed: 0 };
-      updateActive((c) => ({
-        ...c,
-        messages: c.messages.map((message) =>
-          message.id === assistantMsgId
-            ? {
-                ...message,
-                content: `已生成测试用例草稿（成功 ${summary.succeeded}，失败 ${summary.failed}），请审核。`,
-                testcaseBatchResult: payload,
-              }
-            : message,
-        ),
-        updatedAt: Date.now(),
-      }));
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      updateActive((c) => ({
-        ...c,
-        messages: c.messages.map((message) =>
-          message.id === assistantMsgId
-            ? { ...message, content: `生成失败：${msg}` }
-            : message,
-        ),
-        updatedAt: Date.now(),
-      }));
-    } finally {
-      setStreaming(false);
-      abortRef.current = null;
-    }
-  };
-
   const send = async (text?: string) => {
     const content = (text ?? input).trim();
     if ((!content && attachments.length === 0) || streaming) return;
@@ -1868,96 +1010,28 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
     setSlashOpen(false);
 
     // detect /创建测试用例 anywhere in the message — the slash command may not be
-    // at the start (e.g. "基于ticket 2796236，创建testcase/创建测试用例"). Octane defect_id
-    // is purely numeric (e.g. "2804379"), so D-prefixed (D2804379) / DEF-prefixed ids are stripped.
-    //
-    // Three branches:
-    //   1. Multiple numeric ids → batch flow (prepare-batch + batch preview)
-    //   2. Single numeric id → single flow (existing /api/create-testcase)
-    //   3. No numeric id → semantic search over the defect index, show candidates
+    // at the start (e.g. "基于ticket 2796236，创建testcase/创建测试用例"). Extract the
+    // first numeric id from the whole message; Octane defect_id is purely numeric
+    // (e.g. "2804379"), so D-prefixed (D2804379) / DEF-prefixed ids are stripped.
     if (/\/创建测试用例/.test(content)) {
-      // Collect ALL numeric ids (strip D/DEF prefix) — preserves order, deduplicates.
-      const idMatches = [...content.matchAll(/\b(?:D|DEF-)?(\d{4,})\b/gi)].map((m) => m[1]);
-      const uniqueIds = [...new Set(idMatches)];
-
-      // Intent text = everything except the slash command and the ids themselves.
-      const intentText = content
-        .replace(/\/创建测试用例/, "")
-        .replace(/\b(?:D|DEF-)?\d{4,}\b/gi, "")
-        .replace(/[,，、\s]+/g, " ")
-        .trim();
-
-      if (uniqueIds.length >= 2) {
-        // Batch: multiple defect ids
-        await runCreateTestcaseBatch(uniqueIds, assistantMsg.id, intentText);
-      } else if (uniqueIds.length === 1) {
-        // Single: existing single-defect flow
-        await runCreateTestcase(uniqueIds[0], assistantMsg.id, intentText);
+      const idMatch = content.match(/\b(?:D|DEF-)?(\d{4,})\b/i);
+      if (idMatch) {
+        // Preserve the user's intent/requirements (the text around the slash command)
+        // so the generation LLM can tailor the test case to what the user asked for.
+        const intentText = content.replace(/\/创建测试用例/, "").replace(/\b(?:D|DEF-)?\d{4,}\b/i, "").trim();
+        await runCreateTestcase(idMatch[1], assistantMsg.id, intentText);
       } else {
-        // No numeric id — use LLM to understand the user's natural-language intent.
-        // The LLM decides: filter existing defects by topic keyword (e.g. "RSU"),
-        // or directly generate a test case from a scenario description.
         updateActive((c) => ({
           ...c,
           messages: c.messages.map((message) =>
             message.id === assistantMsg.id
-              ? { ...message, content: "正在理解你的意图…" }
+              ? { ...message, content: "请在「/创建测试用例」后附带缺陷 ID（数字），例如：/创建测试用例 2804379" }
               : message,
           ),
           updatedAt: Date.now(),
         }));
-
-        try {
-          const intentResponse = await fetch("/api/create-testcase/analyze-intent", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ input: content }),
-          });
-          const intentPayload = await intentResponse.json().catch(() => ({}));
-
-          if (!intentResponse.ok || !intentPayload.success) {
-            throw new Error(intentPayload.error || "意图分析失败");
-          }
-
-          const mode = intentPayload.mode;
-          const keyword = intentPayload.keyword || "";
-
-          if (mode === "filter_defects" && keyword) {
-            await runTestcaseFilter(keyword, assistantMsg.id);
-          } else if (mode === "direct_generate" && intentPayload.description) {
-            await runTestcaseFromDescription(intentPayload.description, assistantMsg.id);
-          } else {
-            // Fallback: if LLM gave no clear keyword, show a helpful message.
-            updateActive((c) => ({
-              ...c,
-              messages: c.messages.map((message) =>
-                message.id === assistantMsg.id
-                  ? {
-                      ...message,
-                      content:
-                        "请在「/创建测试用例」后附带缺陷 ID（可多个，用逗号/空格分隔），或描述要查找的缺陷主题（如：/创建测试用例 RSU 相关的缺陷），或描述要测试的场景（如：/创建测试用例 蓝牙重连测试）",
-                    }
-                  : message,
-              ),
-              updatedAt: Date.now(),
-            }));
-            setStreaming(false);
-            abortRef.current = null;
-          }
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          updateActive((c) => ({
-            ...c,
-            messages: c.messages.map((message) =>
-              message.id === assistantMsg.id
-                ? { ...message, content: `意图分析失败：${msg}` }
-                : message,
-            ),
-            updatedAt: Date.now(),
-          }));
-          setStreaming(false);
-          abortRef.current = null;
-        }
+        setStreaming(false);
+        abortRef.current = null;
       }
       return;
     }
@@ -2259,11 +1333,6 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
                     m.role === "assistant" && i === active.messages.length - 1;
                   const showDuplicateResults = m.mode === "duplicate-search" && Boolean(m.duplicateResult);
                   const showTestcaseResult = Boolean(m.testcaseResult);
-                  const showTestcaseBatch = Boolean(m.testcaseBatchResult);
-                  const showDefectCandidates = Boolean(m.testcaseDefectCandidates?.length);
-                  const showFilterResult = Boolean(m.testcaseFilterResult?.candidates?.length);
-                  const showPatternDiscovery = Boolean(m.testcasePatternDiscoveryResult);
-                  const showPatternDrafts = Boolean(m.testcasePatternDraftResponse);
                   return (
                     <motion.div
                       key={m.id}
@@ -2365,110 +1434,6 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
                             ) : null}
                             {showTestcaseResult && m.testcaseResult ? (
                               <TestCasePreviewCard result={m.testcaseResult} />
-                            ) : null}
-                            {showDefectCandidates && m.testcaseDefectCandidates ? (
-                              <DefectCandidateList
-                                candidates={m.testcaseDefectCandidates}
-                                onSelect={(ids) => runCreateTestcaseBatch(ids, m.id)}
-                              />
-                            ) : null}
-                            {showFilterResult && m.testcaseFilterResult ? (
-                              <DefectCandidateList
-                                filterResult={m.testcaseFilterResult}
-                                onSelect={(ids) => runCreateTestcaseBatch(ids, m.id)}
-                                onLoadPage={async (page: number) => {
-                                  // Fetch a specific page (1-indexed) from the server.
-                                  const response = await fetch("/api/create-testcase/filter-defects", {
-                                    method: "POST",
-                                    headers: { "Content-Type": "application/json" },
-                                    body: JSON.stringify({
-                                      keyword: m.testcaseFilterResult!.keyword,
-                                      limit: 50,
-                                      offset: (page - 1) * 50,
-                                    }),
-                                  });
-                                  const payload = await response.json().catch(() => ({}));
-                                  if (!payload.success) return null;
-                                  return (payload.candidates || []) as TestCaseFilteredDefect[];
-                                }}
-                                onExportCsv={async (ids) => {
-                                  await runExportCsv(ids, m.testcaseFilterResult!.keyword, m.id);
-                                }}
-                                onDiscoverPatterns={async (ids) => {
-                                  await runPatternDiscovery(ids, m.testcaseFilterResult!.keyword, m.id);
-                                }}
-                                onSelectAll={async () => {
-                                  // Fetch ALL defect IDs (lightweight, no metadata) for "select all".
-                                  const response = await fetch("/api/create-testcase/filter-defects", {
-                                    method: "POST",
-                                    headers: { "Content-Type": "application/json" },
-                                    body: JSON.stringify({
-                                      keyword: m.testcaseFilterResult!.keyword,
-                                      ids_only: true,
-                                    }),
-                                  });
-                                  const payload = await response.json().catch(() => ({}));
-                                  if (!payload.success) return null;
-                                  return (payload.defect_ids || []) as string[];
-                                }}
-                                batchProgress={m.batchProgress}
-                                onCancel={() => {
-                                  abortRef.current?.abort();
-                                }}
-                              />
-                            ) : null}
-                            {showPatternDiscovery && m.testcasePatternDiscoveryResult ? (
-                              <TestCasePatternDiscovery
-                                result={m.testcasePatternDiscoveryResult}
-                                auditResult={m.testcasePatternCoverageAuditResult}
-                                onAuditCoverage={async (patternIds) => {
-                                  await runPatternCoverageAudit(
-                                    patternIds,
-                                    m.testcasePatternDiscoveryResult!,
-                                    m.id,
-                                    m.testcasePatternCoverageAuditResult,
-                                  );
-                                }}
-                                onGenerateDrafts={async (patternIds) => {
-                                  await runPatternDraftGeneration(patternIds, m.testcasePatternDiscoveryResult!, m.id);
-                                }}
-                              />
-                            ) : null}
-                            {m.batchProgress && m.batchProgress.phase !== "done" && m.batchProgress.phase !== "cancelled" && (
-                              <div className="mt-3 rounded-lg border border-border bg-primary/5 px-4 py-3">
-                                <div className="flex items-center justify-between text-xs text-primary mb-1.5">
-                                  <span className="font-medium">
-                                    {m.batchProgress.phase === "generating" && "生成参数化草稿中…"}
-                                    {m.batchProgress.phase === "clustering" && "导出 CSV 中…"}
-                                    {m.batchProgress.phase === "error" && "生成失败"}
-                                  </span>
-                                </div>
-                                {m.batchProgress.total > 0 && (
-                                  <>
-                                    <div className="h-2 w-full rounded-full bg-muted overflow-hidden">
-                                      <div
-                                        className="h-full rounded-full bg-primary transition-all duration-500"
-                                        style={{ width: `${Math.round((m.batchProgress.current / m.batchProgress.total) * 100)}%` }}
-                                      />
-                                    </div>
-                                    <div className="mt-1.5 flex items-center justify-between text-[11px] text-muted-foreground">
-                                      <span>
-                                        {m.batchProgress.current} / {m.batchProgress.total}
-                                        {m.batchProgress.totalBatches > 1 && m.batchProgress.phase === "generating" && (
-                                          <span className="ml-1">（第 {m.batchProgress.batchIndex}/{m.batchProgress.totalBatches} 批）</span>
-                                        )}
-                                      </span>
-                                      <span>{Math.round((m.batchProgress.current / m.batchProgress.total) * 100)}%</span>
-                                    </div>
-                                  </>
-                                )}
-                              </div>
-                            )}
-                            {showPatternDrafts && m.testcasePatternDraftResponse ? (
-                              <TestCasePatternDraftPreview response={m.testcasePatternDraftResponse} />
-                            ) : null}
-                            {showTestcaseBatch && m.testcaseBatchResult ? (
-                              <TestCaseBatchPreview initialResponse={m.testcaseBatchResult} />
                             ) : null}
                           </div>
                         ) : (

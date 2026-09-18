@@ -6,9 +6,16 @@ import sqlite3
 from openpyxl import load_workbook
 
 from backend.analytics.phase09_idcevo_excel_report import (
+    _fallback_processing_summary,
     generate_phase09_idcevo_excel_report,
 )
-from backend.analytics.phase09_idcevo_report import generate_phase09_idcevo_report
+from backend.analytics.phase09_idcevo_llm_summary import (
+    build_phase09_llm_summary_input_records,
+)
+from backend.analytics.phase09_idcevo_report import (
+    build_phase09_idcevo_report_payload,
+    generate_phase09_idcevo_report,
+)
 from backend.analytics.schema import ensure_schema
 
 
@@ -16,6 +23,106 @@ def _report_payload(html: str) -> dict[str, object]:
     match = re.search(r"const REPORT_DATA = (.*?);\n", html)
     assert match is not None
     return json.loads(match.group(1))
+
+
+def test_fallback_processing_summary_redacts_diagnostic_codes_from_ticket_titles() -> None:
+    summary = _fallback_processing_summary(
+        {
+            "name": "NA6 DTC 0xE494F5 - Invalid vehicle signal",
+            "risk_tier": "Evidence incomplete / monitor",
+        }
+    )
+
+    assert "0xE494F5" not in summary
+    assert "[diagnostic code]" in summary
+
+
+def test_phase09_idcevo_scope_uses_final_tproject_not_legacy_project(tmp_path: Path) -> None:
+    db_path = tmp_path / "qgate_raw.db"
+    ensure_schema(db_path)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        existing_columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(octane_defects)").fetchall()
+        }
+        for column_name in (
+            "description",
+            "creation_time",
+            "tproject",
+            "phase",
+            "problem_finder_team",
+            "assigned_ecu",
+            "software_version",
+        ):
+            if column_name not in existing_columns:
+                conn.execute(f"ALTER TABLE octane_defects ADD COLUMN {column_name} TEXT")
+        conn.executemany(
+            """
+            INSERT INTO octane_defects(
+                defect_id, name, description, creation_time, project, tproject,
+                phase, problem_finder_team, assigned_ecu, software_version, fetched_at, raw_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}')
+            """,
+            [
+                (
+                    "D-LEGACY-IDC",
+                    "Legacy IDCEVO ticket with IDC evidence",
+                    "This row must be excluded because final project is IDC.",
+                    "2025-01-01T00:00:00Z",
+                    "IDCEVO",
+                    "IDC",
+                    "09-Concluded without action",
+                    "FIT",
+                    "HU-MGU_02_A",
+                    "BMWIDC23;mainline-24w49.5-1-nodex_IDC23_24w49.5-1-2;idc23",
+                    "2026-09-07T00:00:00Z",
+                ),
+                (
+                    "D-IDCEVO-HU",
+                    "IDCEVO ticket with ECU-only IDC signal",
+                    "This remains in scope because final project is IDCEVO.",
+                    "2025-01-02T00:00:00Z",
+                    "IDCEVO",
+                    "IDCEVO",
+                    "09-Concluded without action",
+                    "FIT",
+                    "HU-MGU_02_A",
+                    "24w49.5-1",
+                    "2026-09-07T00:00:00Z",
+                ),
+                (
+                    "D-CANONICAL-IDCEVO",
+                    "Final IDCEVO ticket with legacy IDC tag",
+                    "This row must be included because final project is IDCEVO.",
+                    "2025-01-03T00:00:00Z",
+                    "IDC",
+                    "IDCEVO",
+                    "09-Concluded without action",
+                    "FIT",
+                    "IDCEVO-25",
+                    "BMW IDCEVO;2607_i460-25w50.2-1;idcevo",
+                    "2026-09-07T00:00:00Z",
+                ),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    payload = build_phase09_idcevo_report_payload(
+        db_path=db_path,
+        include_china_specific=True,
+    )
+    tickets = {ticket["ticket_id"]: ticket for ticket in payload["tickets"]}
+
+    assert set(tickets) == {"D-IDCEVO-HU", "D-CANONICAL-IDCEVO"}
+    assert payload["source"]["project_scope_field"] == "tproject"
+    assert tickets["D-IDCEVO-HU"]["legacy_project"] == "IDCEVO"
+    assert tickets["D-IDCEVO-HU"]["final_project"] == "IDCEVO"
+    assert tickets["D-CANONICAL-IDCEVO"]["legacy_project"] == "IDC"
+    assert tickets["D-CANONICAL-IDCEVO"]["final_project"] == "IDCEVO"
 
 
 def test_generate_phase09_idcevo_report_classifies_scope_and_risk_evidence(
@@ -249,6 +356,9 @@ def test_generate_phase09_idcevo_report_classifies_scope_and_risk_evidence(
             defects,
         )
         conn.execute(
+            "UPDATE octane_defects SET tproject = project WHERE trim(coalesce(project, '')) <> ''"
+        )
+        conn.execute(
             "UPDATE octane_defects SET problem_finder_team = ? WHERE defect_id = ?",
             ("[AT]CoC_EI_IuK", "D-COC"),
         )
@@ -329,6 +439,8 @@ def test_generate_phase09_idcevo_report_classifies_scope_and_risk_evidence(
     assert tickets["D-LOW"]["risk_tier"] == "Normal closure evidence"
     assert tickets["D-DUP"]["risk_tier"] == "Normal closure evidence"
     assert tickets["D-DUP"]["duplicate_parent_phase"] == "06-Concluded"
+    assert tickets["D-DUP"]["parent_child_type"] == "Child"
+    assert tickets["D-DUP"]["relation_to"] == "D-PARENT"
     assert tickets["D-DUP"]["related_resolution_status"] == "Explicit linked ticket reached Phase 06 after current Phase 09"
     assert tickets["D-DUP"]["related_resolution_phase06_at"] == "2025-01-06T00:00:00Z"
     assert tickets["D-RISK"]["risk_tier"] == "Priority production-exposure review"
@@ -387,6 +499,16 @@ def test_generate_phase09_idcevo_report_classifies_scope_and_risk_evidence(
 
     workbook_path = tmp_path / "idcevo_phase09_closure_risk.xlsx"
     llm_summaries_path = tmp_path / "phase09_llm_summaries.jsonl"
+    summary_payload = build_phase09_idcevo_report_payload(
+        db_path=db_path,
+        include_china_specific=True,
+        include_full_evidence=True,
+    )
+    summary_inputs_by_ticket_id = {
+        record["ticket_id"]
+        : record
+        for record in build_phase09_llm_summary_input_records(summary_payload)
+    }
     llm_summaries_path.write_text(
         json.dumps(
             {
@@ -394,12 +516,18 @@ def test_generate_phase09_idcevo_report_classifies_scope_and_risk_evidence(
                 "summary": (
                     "问题：导航功能在可复现条件下失败。\n"
                     "处理过程：当前记录直接由 Phase 01 进入 Phase 09。\n"
-                    "Reject 原因：Management decision。\n"
-                    "闭环证据：未记录目标版本、计划窗口、商业解决日期或 Reprel Shift。\n"
-                    "风险判断：Showstopper Candidate + BI05 且无可审计闭环，需核实是否影响生产/客户现场。"
+                    "Reject/关闭原因：Management decision。\n"
+                    "后续闭环：未记录目标版本、计划窗口、商业解决日期或 Reprel Shift。\n"
+                    "风险判断与待核实：Showstopper Candidate + BI05 且无可审计闭环，需核实是否影响生产/客户现场。"
                 ),
                 "model": "fixture-model",
                 "source": "llm",
+                "input_fingerprint": summary_inputs_by_ticket_id["D-RISK"][
+                    "input_fingerprint"
+                ],
+                "input_version": summary_inputs_by_ticket_id["D-RISK"][
+                    "input_version"
+                ],
             },
             ensure_ascii=False,
         )
@@ -454,12 +582,54 @@ def test_generate_phase09_idcevo_report_classifies_scope_and_risk_evidence(
         }
         for row in priority_sheet.iter_rows(min_row=2, values_only=True)
     }
-    assert "Reject 原因：Management decision" in priority_context_by_ticket_id["D-RISK"]["analysis"]
+    assert "Reject/关闭原因：Management decision" in priority_context_by_ticket_id["D-RISK"]["analysis"]
     assert "Observed failure remains reproducible." not in priority_context_by_ticket_id["D-RISK"]["analysis"]
     assert priority_context_by_ticket_id["D-RISK"]["summary_source"] == "LLM / fixture-model"
     assert "Showstopper_Candidate / 05-unsatisfactory" in priority_context_by_ticket_id["D-RISK"]["risk_basis"]
     assert "No remediation or follow-up evidence" in priority_context_by_ticket_id["D-RISK"]["risk_basis"]
     assert "08_证据原文" in priority_context_by_ticket_id["D-RISK"]["evidence_index"]
+
+    stale_summaries_path = tmp_path / "phase09_stale_llm_summaries.jsonl"
+    stale_summaries_path.write_text(
+        json.dumps(
+            {
+                "ticket_id": "D-RISK",
+                "summary": "问题：错误的旧摘要。\n处理过程：旧处理过程。\nReject/关闭原因：错误原因。\n后续闭环：错误闭环。\n风险判断与待核实：错误风险。",
+                "model": "fixture-model",
+                "source": "llm",
+                "input_fingerprint": "stale-fingerprint",
+                "input_version": "phase09-llm-summary-v0",
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    stale_workbook_path = tmp_path / "idcevo_phase09_stale_summary.xlsx"
+    generate_phase09_idcevo_excel_report(
+        db_path=db_path,
+        output_path=stale_workbook_path,
+        include_china_specific=True,
+        llm_summaries_path=stale_summaries_path,
+    )
+    stale_workbook = load_workbook(stale_workbook_path, read_only=True, data_only=True)
+    stale_priority_sheet = stale_workbook["03_优先复核"]
+    stale_priority_headers = [
+        cell.value for cell in next(stale_priority_sheet.iter_rows(max_row=1))
+    ]
+    stale_priority_ticket_index = stale_priority_headers.index("Ticket ID")
+    stale_priority_summary_index = stale_priority_headers.index("LLM 处理摘要")
+    stale_priority_source_index = stale_priority_headers.index("摘要来源")
+    stale_priority_values = {
+        row[stale_priority_ticket_index]: (
+            row[stale_priority_summary_index],
+            row[stale_priority_source_index],
+        )
+        for row in stale_priority_sheet.iter_rows(min_row=2, values_only=True)
+    }
+    assert stale_priority_values["D-RISK"][1] == "规则摘要 / LLM待生成"
+    assert "错误的旧摘要" not in stale_priority_values["D-RISK"][0]
+    stale_workbook.close()
 
     direct_close_sheet = workbook["05_无证据直关"]
     direct_close_headers = [cell.value for cell in next(direct_close_sheet.iter_rows(max_row=1))]
@@ -473,11 +643,40 @@ def test_generate_phase09_idcevo_report_classifies_scope_and_risk_evidence(
     detail_sheet = workbook["06_全部明细"]
     detail_headers = [cell.value for cell in next(detail_sheet.iter_rows(max_row=1))]
     detail_ticket_index = detail_headers.index("Ticket ID")
+    detail_legacy_project_index = detail_headers.index("原始项目（project）")
+    detail_final_project_index = detail_headers.index("最终项目（tproject）")
+    detail_software_version_index = detail_headers.index("Software Version")
+    detail_processing_summary_index = detail_headers.index("LLM 处理摘要")
+    detail_summary_source_index = detail_headers.index("摘要来源")
     detail_ticket_ids = {
         row[detail_ticket_index]
         for row in detail_sheet.iter_rows(min_row=2, values_only=True)
     }
     assert "D-CHINA" in detail_ticket_ids
+    detail_project_attribution_by_ticket_id = {
+        row[detail_ticket_index]: (
+            row[detail_legacy_project_index],
+            row[detail_final_project_index],
+            row[detail_software_version_index],
+        )
+        for row in detail_sheet.iter_rows(min_row=2, values_only=True)
+    }
+    assert detail_project_attribution_by_ticket_id["D-RISK"][:2] == (
+        "IDCEVO",
+        "IDCEVO",
+    )
+    detail_summary_by_ticket_id = {
+        row[detail_ticket_index]: {
+            "summary": row[detail_processing_summary_index],
+            "source": row[detail_summary_source_index],
+        }
+        for row in detail_sheet.iter_rows(min_row=2, values_only=True)
+    }
+    assert detail_summary_by_ticket_id["D-PLAN"]["source"] == "规则摘要 / LLM待生成"
+    assert detail_summary_by_ticket_id["D-PLAN"]["summary"].startswith(
+        "问题：A fix has a release plan。"
+    )
+    assert "Issue is deferred pending the planned release." not in detail_summary_by_ticket_id["D-PLAN"]["summary"]
 
     evidence_sheet = workbook["08_证据原文"]
     evidence_headers = [cell.value for cell in next(evidence_sheet.iter_rows(max_row=1))]

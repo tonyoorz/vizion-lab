@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 import json
 from pathlib import Path
+import re
 from typing import Any, Mapping, Sequence
 
 from openpyxl import Workbook
@@ -10,6 +11,9 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.table import Table, TableStyleInfo
 
+from backend.analytics.phase09_idcevo_llm_summary import (
+    build_phase09_llm_summary_input_records,
+)
 from backend.analytics.phase09_idcevo_report import build_phase09_idcevo_report_payload
 
 
@@ -54,6 +58,9 @@ DETAIL_HEADERS = (
     "Function2Module",
     "Function Responsible",
     "Assigned ECU",
+    "原始项目（project）",
+    "最终项目（tproject）",
+    "Software Version",
     "Problem Finder Team / fallback",
     "创建时间",
     "关闭处置",
@@ -101,6 +108,9 @@ DETAIL_WIDTHS = (
     20,
     26,
     22,
+    18,
+    18,
+    38,
     28,
     20,
     42,
@@ -154,6 +164,14 @@ EVIDENCE_HEADERS = (
 
 EVIDENCE_WIDTHS = (16, 20, 12, 12, 12, 28, 28, 48, 110, 50)
 EVIDENCE_TEXT_CHUNK_SIZE = 30_000
+REQUIRED_PROCESSING_SUMMARY_LABELS = (
+    "问题：",
+    "处理过程：",
+    "Reject/关闭原因：",
+    "后续闭环：",
+    "风险判断与待核实：",
+)
+HEX_DIAGNOSTIC_PATTERN = re.compile(r"\b0x[0-9a-f]{3,}\b", re.IGNORECASE)
 
 
 def _text(value: object, fallback: str = "") -> str:
@@ -180,7 +198,28 @@ def _tickets(payload: Mapping[str, object]) -> list[dict[str, object]]:
     return [dict(ticket) for ticket in raw_tickets if isinstance(ticket, dict)]
 
 
-def _load_llm_summaries(path: str | Path | None) -> dict[str, dict[str, str]]:
+def _is_valid_llm_processing_summary(value: object) -> bool:
+    summary = _text(value)
+    normalized_summary = summary.casefold()
+    return (
+        bool(summary)
+        and all(label in summary for label in REQUIRED_PROCESSING_SUMMARY_LABELS)
+        and "<html" not in normalized_summary
+        and "end of error description" not in normalized_summary
+    )
+
+
+def _summary_safe_title(value: object) -> str:
+    return HEX_DIAGNOSTIC_PATTERN.sub(
+        "[diagnostic code]", _text(value, "Not recorded")
+    )
+
+
+def _load_llm_summaries(
+    path: str | Path | None,
+    *,
+    expected_inputs_by_ticket_id: Mapping[str, Mapping[str, object]],
+) -> dict[str, dict[str, str]]:
     if path is None:
         return {}
 
@@ -204,7 +243,17 @@ def _load_llm_summaries(path: str | Path | None) -> dict[str, dict[str, str]]:
             continue
         ticket_id = _text(raw_summary.get("ticket_id"))
         summary = _text(raw_summary.get("summary"))
-        if not ticket_id or not summary:
+        expected_input = expected_inputs_by_ticket_id.get(ticket_id)
+        if (
+            not ticket_id
+            or not _is_valid_llm_processing_summary(summary)
+            or expected_input is None
+            or _text(raw_summary.get("source")).casefold() != "llm"
+            or _text(raw_summary.get("input_fingerprint"))
+            != _text(expected_input.get("input_fingerprint"))
+            or _text(raw_summary.get("input_version"))
+            != _text(expected_input.get("input_version"))
+        ):
             continue
         summaries[ticket_id] = {
             "summary": summary,
@@ -217,18 +266,29 @@ def _load_llm_summaries(path: str | Path | None) -> dict[str, dict[str, str]]:
 def _fallback_processing_summary(ticket: Mapping[str, object]) -> str:
     return "\n".join(
         (
-            "LLM 摘要待生成。",
-            "问题标题：{}。".format(_text(ticket.get("name"), "Not recorded")),
-            "关闭/Reject：{}（{}）。".format(
+            "问题：{}。".format(_summary_safe_title(ticket.get("name"))),
+            "处理过程：直接 01 -> 09：{}；09 后重开：{}；09 后进入 06：{}。".format(
+                "是" if bool(ticket.get("direct_close")) else "否",
+                "是" if bool(ticket.get("reopened_after_phase09")) else "否",
+                "是" if bool(ticket.get("entered_phase06_after_phase09")) else "否",
+            ),
+            "Reject/关闭原因：{}（来源：{}；拒绝路径：{}）。".format(
                 _text(ticket.get("effective_reason"), "Not recorded"),
                 _text(ticket.get("reason_source"), "Not recorded"),
+                _text(ticket.get("rejection_route"), "Not recorded"),
             ),
-            "处理状态：{}；关联解决：{}。".format(
+            "后续闭环：{}；Target：{}；计划窗口：{}；商业解决日期：{}；{}；关联解决：{}。".format(
                 _text(ticket.get("follow_up_status"), "Not recorded"),
+                _text(ticket.get("target_version_value"), "Not recorded"),
+                _text(ticket.get("planning_window_value"), "Not recorded"),
+                _text(ticket.get("commercial_solution_date_value"), "Not recorded"),
+                _text(ticket.get("reprel_change_status"), "Not recorded"),
                 _text(ticket.get("related_resolution_status"), "Not recorded"),
             ),
-            "风险结论：{}；详细证据见 08_证据原文。".format(
-                _text(ticket.get("production_exposure_status"), "Not recorded")
+            "风险判断与待核实：{}（风险分：{}）。{}。LLM 问题/过程摘要待补全；完整原文见 08_证据原文。".format(
+                _text(ticket.get("risk_tier"), "Not recorded"),
+                _text(ticket.get("risk_score"), "Not recorded"),
+                _text(ticket.get("production_exposure_status"), "Not recorded"),
             ),
         )
     )
@@ -247,7 +307,7 @@ def _apply_llm_summaries(
             enriched_ticket["llm_processing_summary"] = _fallback_processing_summary(
                 enriched_ticket
             )
-            enriched_ticket["llm_summary_source"] = "待生成"
+            enriched_ticket["llm_summary_source"] = "规则摘要 / LLM待生成"
         else:
             enriched_ticket["llm_processing_summary"] = summary["summary"]
             model = _text(summary.get("model"), "configured model")
@@ -291,6 +351,9 @@ def _detail_rows(tickets: Sequence[Mapping[str, object]]) -> list[list[object]]:
                 ticket.get("function2modul"),
                 ticket.get("function_responsible"),
                 ticket.get("assigned_ecu"),
+                ticket.get("legacy_project"),
+                ticket.get("final_project"),
+                ticket.get("software_version"),
                 ticket.get("team"),
                 ticket.get("creation_time"),
                 ticket.get("closure_disposition"),
@@ -590,9 +653,9 @@ def _write_summary(sheet: Any, payload: Mapping[str, object]) -> None:
 
     metrics = [
         (
-            "Analyzed IDCEVO current Phase 09",
+            "Analyzed final IDCEVO current Phase 09",
             summary_data.get("analyzed_phase09_total"),
-            "All China-specific functions are included; only CoC Problem Finder Teams are excluded.",
+            "Uses final tproject; all China-specific functions are included and only CoC Problem Finder Teams are excluded.",
         ),
         (
             "All current IDCEVO Phase 09",
@@ -834,7 +897,7 @@ def _write_methodology(sheet: Any) -> None:
     rows = [
         [
             "范围",
-            "仅 IDCEVO 当前 Phase 09；包含 China-specific 功能；仅当 Problem Finder Team 包含 CoC 时排除。",
+            "仅最终项目 tproject=IDCEVO 的当前 Phase 09；包含 China-specific 功能；仅当 Problem Finder Team 包含 CoC 时排除。原始 project 仅用于审计，不决定范围。",
         ],
         [
             "可接受关闭",
@@ -886,9 +949,17 @@ def write_phase09_idcevo_excel_report(
     output_path: str | Path,
     llm_summaries_path: str | Path | None = None,
 ) -> Path:
+    summary_inputs_by_ticket_id = {
+        _text(record.get("ticket_id")): record
+        for record in build_phase09_llm_summary_input_records(payload)
+        if _text(record.get("ticket_id"))
+    }
     tickets = _apply_llm_summaries(
         _tickets(payload),
-        _load_llm_summaries(llm_summaries_path),
+        _load_llm_summaries(
+            llm_summaries_path,
+            expected_inputs_by_ticket_id=summary_inputs_by_ticket_id,
+        ),
     )
     priority_tickets = [
         ticket

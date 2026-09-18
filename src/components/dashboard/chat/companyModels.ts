@@ -4,7 +4,6 @@ const DEFAULT_COMPANY_MODEL_IDS = [
   "qwen3.7-max",
   "qwen3.7-flash",
   "glm-5.1",
-  "doubao-seed-2.1-turbo",
 ] as const;
 
 const MODEL_LABELS: Record<string, string> = {
@@ -13,7 +12,6 @@ const MODEL_LABELS: Record<string, string> = {
   "qwen3.7-max": "qwen3.7-max",
   "qwen3.7-flash": "qwen3.7-flash",
   "glm-5.1": "glm-5.1",
-  "doubao-seed-2.1-turbo": "doubao-seed-2.1-turbo",
 };
 
 function parseModelIds(raw: string | undefined) {

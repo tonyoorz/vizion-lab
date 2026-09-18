@@ -3,6 +3,7 @@ import { requestCompanyChatCompletion } from "./companyChat.mjs";
 const REQUIRED_MODEL_FIELDS = ["issue_summary", "process_summary", "review_focus"];
 const MAX_MODEL_FIELD_CHARS = 500;
 const RAW_DIAGNOSTIC_PATTERN = /\b(?:DTC\s*)?(?:0x[0-9a-f]{3,}|[A-Za-z][A-Za-z0-9_]{8,}\s*=)/i;
+const HEX_DIAGNOSTIC_PATTERN = /\b0x[0-9a-f]{3,}\b/gi;
 const UNSUPPORTED_CUSTOMER_IMPACT_PATTERN = /(?:客户|customer)[^。\n]{0,12}(?:不满|体验|satisfaction|dissatisfaction)/i;
 
 function text(value) {
@@ -74,6 +75,17 @@ function yesNo(value) {
   return value ? "是" : "否";
 }
 
+function redactPromptDiagnostics(value) {
+  return text(value).replace(HEX_DIAGNOSTIC_PATTERN, "[diagnostic code]");
+}
+
+function ticketForModel(ticket) {
+  return {
+    ...ticket,
+    title: redactPromptDiagnostics(ticket?.title),
+  };
+}
+
 function lifecycleFacts(facts) {
   return [
     `直接 01 -> 09：${yesNo(facts?.direct_close)}`,
@@ -130,7 +142,7 @@ export function buildPhase09SummaryMessages(ticketInputs) {
       role: "user",
       content: JSON.stringify({
         authoritative_ticket_id: ticketId,
-        ticket: ticketInput.ticket,
+        ticket: ticketForModel(ticketInput.ticket),
       }),
     },
   ];

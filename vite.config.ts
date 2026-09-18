@@ -33,6 +33,14 @@ export default defineConfig(({ mode }) => ({
         target: "http://127.0.0.1:3003",
         changeOrigin: true,
       },
+      "/api/auth": {
+        target: "http://127.0.0.1:3003",
+        changeOrigin: true,
+      },
+      "/api/agent/analytics/defects/export/download": {
+        target: "http://127.0.0.1:3003",
+        changeOrigin: true,
+      },
       "/api": {
         target: "http://127.0.0.1:3004",
         changeOrigin: true,

@@ -438,6 +438,64 @@ function citationFooter(answerValidation) {
   return toolCallId ? `\n\nEvidence source: <cite source="${toolCallId}">governed tool result</cite>` : "";
 }
 
+function repairableSemanticCitationSource(answerValidation, violations) {
+  const evidence = Array.isArray(answerValidation?.semanticEvidence) ? answerValidation.semanticEvidence : [];
+  const toolCallId = evidence.length === 1 ? String(evidence[0]?.toolCallId || "").trim() : "";
+  const repairable = new Set([
+    "ANSWER_CITATION_REQUIRED",
+    "ANSWER_NUMERIC_CLAIM_UNCITED",
+    "ANSWER_RECORD_CLAIM_UNCITED",
+  ]);
+  return toolCallId && /^[A-Za-z0-9._:-]+$/.test(toolCallId)
+    && violations.length > 0
+    && violations.every((violation) => repairable.has(violation))
+    ? toolCallId
+    : "";
+}
+
+function safeSemanticMetricSummary(answerValidation, validation) {
+  if (String(answerValidation?.evidenceGate?.status || "") !== "pass"
+    || !validation?.violations?.includes("ANSWER_CAUSAL_CLAIM_UNSUPPORTED")) {
+    return "";
+  }
+  const evidence = Array.isArray(answerValidation?.semanticEvidence) ? answerValidation.semanticEvidence : [];
+  if (evidence.length !== 1) return "";
+  const item = evidence[0] || {};
+  const toolCallId = String(item.toolCallId || "").trim();
+  const metrics = item?.summary?.metrics || item?.evidence?.metricValues;
+  if (!/^[A-Za-z0-9._:-]+$/.test(toolCallId) || !metrics || typeof metrics !== "object" || Array.isArray(metrics)) {
+    return "";
+  }
+  const metricLines = Object.entries(metrics)
+    .filter(([metricId, value]) => /^[A-Za-z0-9._:-]+$/.test(metricId) && typeof value === "number" && Number.isFinite(value))
+    .slice(0, 12)
+    .map(([metricId, value]) => `${metricId}: ${value}`);
+  if (!metricLines.length) return "";
+  return [
+    "已获取经验证的查询结果：",
+    `<cite source="${toolCallId}">${metricLines.join("\n")}</cite>`,
+    "原回答包含当前数据无法支持的因果解释，因此未予发布。",
+  ].join("\n");
+}
+
+function wrapBufferedAnswerWithCitation(state, toolCallId) {
+  const opening = `<cite source="${toolCallId}">`;
+  const closing = "</cite>";
+  const openingPayload = { choices: [{ delta: { content: opening } }] };
+  const closingPayload = { choices: [{ delta: { content: closing } }] };
+  const extraBytes = Buffer.byteLength(JSON.stringify(openingPayload), "utf8")
+    + Buffer.byteLength(JSON.stringify(closingPayload), "utf8");
+  if (state.gateOverflow || state.bufferedPayloadBytes + extraBytes > MAX_GOVERNED_ANSWER_BYTES) {
+    return false;
+  }
+  state.bufferedPayloadBytes += extraBytes;
+  state.bufferedPayloads.unshift({ payload: openingPayload });
+  state.bufferedPayloads.push({ payload: closingPayload });
+  state.visibleContentParts = [`${opening}${state.visibleContentParts.join("")}${closing}`];
+  state.visibleContentBytes += Buffer.byteLength(opening + closing, "utf8");
+  return true;
+}
+
 function validateAnswerIfNeeded(response, state) {
   if (!state.answerValidation || state.answerValidationEmitted) return null;
   state.answerValidationEmitted = true;
@@ -448,6 +506,15 @@ function validateAnswerIfNeeded(response, state) {
     registry: state.answerValidation.registry,
     evidenceGate: state.answerValidation.evidenceGate,
   });
+  const semanticCitationSource = repairableSemanticCitationSource(state.answerValidation, validation.violations || []);
+  if (semanticCitationSource && wrapBufferedAnswerWithCitation(state, semanticCitationSource)) {
+    validation = validateAnswerTextCitations({
+      text: state.visibleContentParts.join(""),
+      evidence,
+      registry: state.answerValidation.registry,
+      evidenceGate: state.answerValidation.evidenceGate,
+    });
+  }
   if (!state.gateEnabled && validation.violations.length === 1 && validation.violations[0] === "ANSWER_CITATION_REQUIRED") {
     const footer = citationFooter(state.answerValidation);
     if (footer) {
@@ -498,7 +565,8 @@ function finalizeSanitizedStream(response, state) {
     if (validation?.valid) {
       publishBufferedPayloads(response, state);
     } else {
-      writeSseEvent(response, { choices: [{ delta: { content: CLAIM_GATE_FALLBACK_CONTENT } }] });
+      const fallbackContent = safeSemanticMetricSummary(state.answerValidation, validation) || CLAIM_GATE_FALLBACK_CONTENT;
+      writeSseEvent(response, { choices: [{ delta: { content: fallbackContent } }] });
     }
   } else if (validation) {
     writeSseEvent(response, { type: "answer-validation", ...validation });
@@ -572,6 +640,7 @@ export async function requestCompanyChatCompletion({
   resilience,
   imageOcrRunner,
   documentTextRunner,
+  skipDashboardSystemPrompt = false,
 }) {
   const config = resolveChatModelConfig(model || "", process.env);
   if (!config.credential) {
@@ -582,7 +651,10 @@ export async function requestCompanyChatCompletion({
 
   const documentExpandedMessages = await expandMessagesWithDocumentText(messages, process.env, { documentTextRunner });
   const preparedMessages = await expandImageMessagesWithOcr(documentExpandedMessages, process.env, { imageOcrRunner });
-  const mergedMessages = buildMergedMessages(compactChatMessages(preparedMessages), context);
+  const compactedMessages = compactChatMessages(preparedMessages);
+  const mergedMessages = skipDashboardSystemPrompt
+    ? compactedMessages
+    : buildMergedMessages(compactedMessages, context);
 
   const requestConfig = buildChatCompletionRequest({
     selectedModel: config.model,
