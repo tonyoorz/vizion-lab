@@ -103,6 +103,70 @@ def test_run_processor_pipeline_replaces_unknown_defect_project_with_derived_val
     assert (project, tproject) == ("IDCEVO", "IDCEVO")
 
 
+def test_run_processor_pipeline_advances_duplicate_search_revision_for_searchable_dimension_updates(tmp_path: Path) -> None:
+    db_path = tmp_path / "qgate_raw.db"
+    asset_root = tmp_path / "assets"
+    asset_root.mkdir(parents=True)
+    (asset_root / "top_aida_project_fv_mapping.json").write_text(
+        json.dumps(
+            [
+                {
+                    "top_aida": "Scoped feature",
+                    "project": "IDCEVO",
+                    "fv": "Speech",
+                    "fvp": "Voice Experience",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (asset_root / "vin_project_mapping.json").write_text("[]", encoding="utf-8")
+    (asset_root / "mr_nonstandard_platform_ids.json").write_text("[]", encoding="utf-8")
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE octane_defects (
+                defect_id TEXT PRIMARY KEY,
+                project TEXT,
+                top_aida TEXT,
+                market TEXT,
+                pu TEXT,
+                fv TEXT,
+                fvp TEXT
+            );
+            CREATE TABLE octane_manual_runs (mr_id TEXT PRIMARY KEY, defect_id TEXT);
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO octane_defects(defect_id, project, top_aida, market, pu, fv, fvp)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("D-SEARCH-REVISION", "Unknown", "Scoped feature", "", "", "", ""),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    run_processor_pipeline(db_path, asset_root=asset_root)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        revision = conn.execute(
+            """
+            SELECT source_revision
+            FROM duplicate_search_source_state
+            WHERE store_name = 'octane_defects'
+            """
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    assert revision == 1
+
+
 def test_run_processor_pipeline_writes_technical_correction_to_tproject(tmp_path: Path) -> None:
     db_path = tmp_path / "qgate_raw.db"
     asset_root = tmp_path / "assets"
@@ -428,6 +492,105 @@ def test_run_processor_pipeline_can_scope_manual_run_updates(tmp_path: Path) -> 
         conn.close()
 
     assert rows == {"MR-IN-SCOPE": "IDCEVO", "MR-OUT-OF-SCOPE": "Unknown"}
+
+
+def test_run_processor_pipeline_scopes_defects_to_source_and_manual_run_parents(tmp_path: Path) -> None:
+    db_path = tmp_path / "qgate_raw.db"
+    asset_root = tmp_path / "assets"
+    asset_root.mkdir(parents=True)
+    (asset_root / "top_aida_project_fv_mapping.json").write_text(
+        json.dumps(
+            [
+                {
+                    "top_aida": "Scoped feature",
+                    "project": "IDCEVO",
+                    "fv": "Speech",
+                    "fvp": "Voice Experience",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (asset_root / "vin_project_mapping.json").write_text(json.dumps([]), encoding="utf-8")
+    (asset_root / "mr_nonstandard_platform_ids.json").write_text(json.dumps([]), encoding="utf-8")
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE octane_defects (
+                defect_id TEXT PRIMARY KEY,
+                project TEXT,
+                top_aida TEXT,
+                market TEXT,
+                pu TEXT,
+                fv TEXT,
+                fvp TEXT
+            );
+            CREATE TABLE octane_manual_runs (
+                mr_id TEXT PRIMARY KEY,
+                defect_id TEXT,
+                project TEXT,
+                fv TEXT,
+                fvp TEXT,
+                raw_json TEXT
+            );
+            """
+        )
+        conn.executemany(
+            """
+            INSERT INTO octane_defects(defect_id, project, top_aida, market, pu, fv, fvp)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("D-SOURCE", "Unknown", "Scoped feature", "", "", "", ""),
+                ("D-MANUAL", "Unknown", "Scoped feature", "", "", "", ""),
+                ("D-UNSCOPED", "Unknown", "Scoped feature", "", "", "", ""),
+            ],
+        )
+        conn.execute(
+            """
+            INSERT INTO octane_manual_runs(mr_id, defect_id, project, fv, fvp, raw_json)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            ("MR-SCOPED", "D-MANUAL", "Unknown", "", "", "{}"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    progress_messages: list[str] = []
+    summary = run_processor_pipeline(
+        db_path,
+        asset_root=asset_root,
+        defect_ids=("D-SOURCE",),
+        manual_run_ids=("MR-SCOPED",),
+        progress=progress_messages.append,
+    )
+
+    assert summary["defect_updates"] == 2
+    assert summary["updated_defect_ids"] == ["D-MANUAL", "D-SOURCE"]
+    assert any("Processor defects: selected=2 processed=2 updated=2" in message for message in progress_messages)
+    assert any("Processor manual runs: selected=1 processed=1 updated=1" in message for message in progress_messages)
+    assert any("Processor SQLite commit: duration_seconds=" in message for message in progress_messages)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        defect_projects = dict(
+            conn.execute("SELECT defect_id, project FROM octane_defects ORDER BY defect_id").fetchall()
+        )
+        manual_project = conn.execute(
+            "SELECT project FROM octane_manual_runs WHERE mr_id = 'MR-SCOPED'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    assert defect_projects == {
+        "D-MANUAL": "IDCEVO",
+        "D-SOURCE": "IDCEVO",
+        "D-UNSCOPED": "Unknown",
+    }
+    assert manual_project == "IDCEVO"
 
 
 def test_run_processor_pipeline_dry_run_does_not_report_unknown_project_as_fillable(tmp_path: Path) -> None:

@@ -11,6 +11,10 @@ export interface AuthState {
   loading: boolean;
 }
 
+interface LoginOptions {
+  strongAuth?: boolean;
+}
+
 export async function fetchAuthState(): Promise<AuthState> {
   try {
     const resp = await fetch("/api/auth/me", { credentials: "include" });
@@ -31,13 +35,19 @@ export async function fetchAuthState(): Promise<AuthState> {
 export async function login(
   username: string,
   password: string,
+  options: LoginOptions = {},
 ): Promise<{ ok: boolean; error?: string }> {
   try {
-    const resp = await fetch("/api/auth/login", {
+    const strongAuth = options.strongAuth ?? true;
+    const resp = await fetch(strongAuth ? "/api/auth/login" : "/api/auth/browser-login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "include",
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify(
+        strongAuth
+          ? { username, password, strong_auth: true, strong_auth_type: "mobile" }
+          : { username, password },
+      ),
     });
     if (resp.ok) {
       return { ok: true };

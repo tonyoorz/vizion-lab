@@ -22,6 +22,7 @@ from cryptography.fernet import Fernet
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
 from backend.analytics.config import get_password_cache_file_path
@@ -47,6 +48,8 @@ _serializer: Optional[URLSafeTimedSerializer] = None
 # username → (加密密码, 过期时间戳)。进程内缓存，启动时从磁盘 reload。
 _password_cache: dict[str, tuple[str, float]] = {}
 _password_cache_lock = threading.Lock()
+_browser_session_cache: dict[str, object] = {}
+_browser_session_cache_lock = threading.Lock()
 
 
 def _get_secret() -> bytes:
@@ -163,6 +166,31 @@ def _clear_cached_password(username: str) -> None:
     with _password_cache_lock:
         _password_cache.pop(username, None)
         _persist_password_cache()
+    with _browser_session_cache_lock:
+        _browser_session_cache.pop(username, None)
+
+
+def _cache_browser_session(username: str, session: object) -> None:
+    with _browser_session_cache_lock:
+        _browser_session_cache[username] = session
+
+
+def _get_cached_browser_session(username: str) -> Optional[object]:
+    with _browser_session_cache_lock:
+        return _browser_session_cache.get(username)
+
+
+def _clone_browser_session(session: object) -> object:
+    try:
+        import requests
+
+        cloned = requests.Session()
+        cloned.trust_env = False
+        cloned.headers.update(getattr(session, "headers", {}))
+        cloned.cookies.update(getattr(session, "cookies", {}))
+        return cloned
+    except (AttributeError, TypeError):
+        return session
 
 
 # --------------------------------------------------------------------------- #
@@ -200,7 +228,12 @@ def require_current_username(request: Request) -> str:
 # 调用 session_keeper
 # --------------------------------------------------------------------------- #
 
-def _keeper_get_or_create_session(username: str, password: str) -> Optional[object]:
+def _keeper_get_or_create_session(
+    username: str,
+    password: str,
+    strong_auth: bool = False,
+    strong_auth_type: str = "mobile",
+) -> Optional[object]:
     """向 session_keeper 请求 octane session，返回 requests.Session 或 None。
 
     复用 BmwLogin 的 session_keeper.client.get_or_create_session。
@@ -216,9 +249,48 @@ def _keeper_get_or_create_session(username: str, password: str) -> Optional[obje
             tool_key=_get_octane_tool_key(),
             username=username,
             password=password,
+            strong_auth=strong_auth,
+            strong_auth_type=strong_auth_type,
         )
     except Exception:
         log.warning("session_keeper 登录失败 for %s", username, exc_info=True)
+        return None
+
+
+def _get_or_create_login_session(
+    username: str,
+    password: str,
+    strong_auth: bool = False,
+    strong_auth_type: str = "mobile",
+) -> Optional[object]:
+    return _keeper_get_or_create_session(
+        username,
+        password,
+        strong_auth=strong_auth,
+        strong_auth_type=strong_auth_type,
+    )
+
+
+def _create_interactive_browser_session(username: str, password: str) -> Optional[object]:
+    try:
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        from backend.analytics.config import get_octane_base_url
+        from backend.analytics.ingest.auth import build_cookie_session
+        from backend.analytics.ingest.playwright_cookie_manager import capture_interactive_cookie_file
+
+        with TemporaryDirectory(prefix="vizion-octane-browser-login-") as temporary_directory:
+            cookie_file = Path(temporary_directory) / "octane-cookie.txt"
+            capture_interactive_cookie_file(
+                base_url=get_octane_base_url(),
+                cookie_file=cookie_file,
+                username=username,
+                password=password,
+            )
+            return build_cookie_session(cookie_file)
+    except Exception:
+        log.warning("交互式浏览器登录失败 for %s", username, exc_info=True)
         return None
 
 
@@ -227,10 +299,14 @@ def get_user_octane_session(username: str) -> Optional[object]:
 
     返回 None 表示需要重新登录（密码缓存过期或 keeper 不可用）。
     """
+    browser_session = _get_cached_browser_session(username)
+    if browser_session is not None:
+        return _clone_browser_session(browser_session)
+
     password = _get_cached_password(username)
     if password is None:
         return None
-    return _keeper_get_or_create_session(username, password)
+    return _get_or_create_login_session(username, password)
 
 
 # --------------------------------------------------------------------------- #
@@ -244,20 +320,12 @@ class LoginRequest(BaseModel):
     strong_auth_type: str = "mobile"
 
 
-@router.post("/api/auth/login")
-async def login(body: LoginRequest) -> JSONResponse:
-    username = body.username.strip()
-    if not username or not body.password:
-        raise HTTPException(status_code=400, detail="username and password required")
+class BrowserLoginRequest(BaseModel):
+    username: str
+    password: str
 
-    session = _keeper_get_or_create_session(username, body.password)
-    if session is None:
-        raise HTTPException(
-            status_code=401,
-            detail="SSO 登录失败：session keeper 不可用或凭证无效",
-        )
 
-    _cache_password(username, body.password)
+def _issue_dashboard_session_response(username: str) -> JSONResponse:
     token = _issue_session_token(username)
     resp = JSONResponse(
         status_code=200,
@@ -268,11 +336,48 @@ async def login(body: LoginRequest) -> JSONResponse:
         value=token,
         httponly=True,
         samesite="lax",
-        secure=False,  # 本地 http 开发；生产部署到 https 时改 True
+        secure=False,
         max_age=SESSION_MAX_AGE,
         path="/",
     )
     return resp
+
+
+@router.post("/api/auth/login")
+async def login(body: LoginRequest) -> JSONResponse:
+    username = body.username.strip()
+    if not username or not body.password:
+        raise HTTPException(status_code=400, detail="username and password required")
+
+    session = await run_in_threadpool(
+        _get_or_create_login_session,
+        username,
+        body.password,
+        strong_auth=body.strong_auth,
+        strong_auth_type=body.strong_auth_type,
+    )
+    if session is None:
+        raise HTTPException(
+            status_code=401,
+            detail="SSO 登录失败：session keeper 不可用或凭证无效",
+        )
+
+    _cache_password(username, body.password)
+    return _issue_dashboard_session_response(username)
+
+
+@router.post("/api/auth/browser-login")
+async def browser_login(body: BrowserLoginRequest) -> JSONResponse:
+    username = body.username.strip()
+    if not username or not body.password:
+        raise HTTPException(status_code=400, detail="username and password required")
+
+    session = await run_in_threadpool(_create_interactive_browser_session, username, body.password)
+    if session is None:
+        raise HTTPException(status_code=401, detail="浏览器登录未完成或未获取到 Octane 会话")
+
+    _cache_browser_session(username, session)
+    return _issue_dashboard_session_response(username)
 
 
 @router.get("/api/auth/me")

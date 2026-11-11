@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
@@ -11,6 +12,57 @@ import {
   hasViteDevServerOnPort,
   waitForHealthyService,
 } from "../../../scripts/devHelpers.mjs";
+
+describe("resolvePythonCommand", () => {
+  const repoRoot = path.resolve("test-workspace");
+
+  it.each([
+    ["win32", "Scripts", "python.exe"],
+    ["darwin", "bin", "python"],
+    ["linux", "bin", "python"],
+  ])("selects the native virtual environment on %s", (platform, directory, executable) => {
+    expect(devHelpers.resolvePythonCommand).toBeTypeOf("function");
+    const expected = path.join(repoRoot, ".venv", directory, executable);
+    expect(devHelpers.resolvePythonCommand({
+      repoRoot,
+      platform,
+      env: {},
+      existsSync: (candidate) => candidate === expected,
+    })).toBe(expected);
+  });
+
+  it("preserves an existing explicit interpreter before the local environment", () => {
+    expect(devHelpers.resolvePythonCommand).toBeTypeOf("function");
+    const configured = path.join(repoRoot, "custom", "python");
+    expect(devHelpers.resolvePythonCommand({
+      repoRoot,
+      platform: "darwin",
+      env: { VIZION_ANALYTICS_PYTHON: configured },
+      existsSync: () => true,
+    })).toBe(configured);
+  });
+
+  it("skips stale interpreter paths copied from a different computer", () => {
+    expect(devHelpers.resolvePythonCommand).toBeTypeOf("function");
+    const nativePython = path.join(repoRoot, ".venv", "bin", "python");
+    expect(devHelpers.resolvePythonCommand({
+      repoRoot,
+      platform: "darwin",
+      env: { VIZION_ANALYTICS_PYTHON: "C:\\old-machine\\python.exe" },
+      existsSync: (candidate) => candidate === nativePython,
+    })).toBe(nativePython);
+  });
+
+  it.each([["win32", "python"], ["darwin", "python3"]])("uses the platform fallback on %s", (platform, executable) => {
+    expect(devHelpers.resolvePythonCommand).toBeTypeOf("function");
+    expect(devHelpers.resolvePythonCommand({
+      repoRoot,
+      platform,
+      env: {},
+      existsSync: () => false,
+    })).toBe(executable);
+  });
+});
 
 describe("resolveLocalApiEnvironment", () => {
   it("defaults an unset local API authentication mode to internal", () => {
@@ -69,6 +121,37 @@ describe("resolveLocalApiEnvironment", () => {
     expect(devHelpers.resolveLocalApiEnvironment({ VIZION_AGENT_AUTH_MODE: authMode })).toMatchObject({
       VIZION_AGENT_AUTH_MODE: authMode,
     });
+  });
+});
+
+describe("resolvePythonInvocation", () => {
+  it("uses the native Python resolver for standalone npm tools", () => {
+    expect(devHelpers.resolvePythonInvocation).toBeTypeOf("function");
+    const repoRoot = path.resolve("test-workspace");
+    const python = path.join(repoRoot, ".venv", "bin", "python");
+    expect(devHelpers.resolvePythonInvocation({
+      repoRoot,
+      platform: "darwin",
+      env: {},
+      args: ["-m", "backend.analytics_cli", "generate-qgate-kpi-reports"],
+      existsSync: (candidate) => candidate === python,
+    })).toMatchObject({
+      command: python,
+      args: ["-m", "backend.analytics_cli", "generate-qgate-kpi-reports"],
+      cwd: repoRoot,
+      env: { SESSION_KEEPER_URL: "http://127.0.0.1:18090", PYTHONUTF8: "1" },
+    });
+  });
+
+  it("preserves an explicit external keeper for standalone tools", () => {
+    expect(devHelpers.resolvePythonInvocation).toBeTypeOf("function");
+    const invocation = devHelpers.resolvePythonInvocation({
+      repoRoot: process.cwd(),
+      env: { SESSION_KEEPER_URL: "https://keeper.example.test" },
+      args: [],
+      existsSync: () => false,
+    });
+    expect(invocation.env.SESSION_KEEPER_URL).toBe("https://keeper.example.test");
   });
 });
 
@@ -136,6 +219,44 @@ describe("hasViteDevServerOnPort", () => {
 });
 
 describe("hasHealthyServiceOnPort", () => {
+  it.each([0, 2])("recognizes the session keeper health response with %i active sessions", async (activeSessions) => {
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ status: "ok", active_sessions: activeSessions }),
+    });
+
+    await expect(
+      hasHealthyServiceOnPort({
+        port: 8090,
+        expectedService: "session-keeper",
+        fetchImpl,
+        timeoutMs: 0,
+      }),
+    ).resolves.toBe(true);
+    expect(fetchImpl).toHaveBeenCalledWith("http://127.0.0.1:8090/health");
+  });
+
+  it.each([
+    { ok: true, service: "analytics" },
+    { status: "error", active_sessions: 0 },
+    { status: "ok" },
+    { status: "ok", active_sessions: -1 },
+  ])("rejects an unrelated or unhealthy keeper response: %j", async (payload) => {
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => payload,
+    });
+
+    await expect(
+      hasHealthyServiceOnPort({
+        port: 8090,
+        expectedService: "session-keeper",
+        fetchImpl,
+        timeoutMs: 0,
+      }),
+    ).resolves.toBe(false);
+  });
+
   it("returns true when the health endpoint reports ok", async () => {
     const fetchImpl = vi.fn().mockResolvedValue({
       ok: true,

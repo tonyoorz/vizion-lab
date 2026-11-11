@@ -2,15 +2,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
+import requests
+import ssl
 import subprocess
 import threading
 import tempfile
 import time
+import urllib.parse
 from pathlib import Path
 
 
 _OCTANE_AUTH_COOKIE_NAMES = {"access_token", "OCTANE_USER", "JSESSIONID"}
+_MOBILE_PUSH_TIMEOUT_SECONDS = 480
+_LOGGER = logging.getLogger(__name__)
 
 
 def _load_login_info() -> dict[str, str]:
@@ -28,12 +34,20 @@ def _load_login_info() -> dict[str, str]:
         payload = {"username": lines[0].strip(), "password": lines[1].strip()}
         if len(lines) >= 3:
             payload["windows_hello_pin"] = lines[2].strip()
+        if len(lines) >= 4:
+            payload["mobile_push_pin"] = lines[3].strip()
         return payload
     return {
         "username": str(payload.get("username") or "").strip(),
         "password": str(payload.get("password") or "").strip(),
         "windows_hello_pin": str(
             payload.get("windows_hello_pin") or payload.get("windows_pin") or payload.get("pin") or ""
+        ).strip(),
+        "mobile_push_pin": str(
+            payload.get("mobile_push_pin")
+            or payload.get("strong_auth_pin")
+            or payload.get("mobile_pin")
+            or ""
         ).strip(),
     }
 
@@ -45,6 +59,27 @@ def _windows_hello_pin_from_login_info(login_info: dict[str, str]) -> str:
         or login_info.get("pin")
         or ""
     ).strip()
+
+
+def _mobile_push_pin_from_login_info(login_info: dict[str, str]) -> str:
+    configured_pin = str(os.environ.get("VIZION_OCTANE_MOBILE_PUSH_PIN") or "").strip()
+    if configured_pin:
+        return configured_pin
+    return str(
+        login_info.get("mobile_push_pin")
+        or login_info.get("strong_auth_pin")
+        or login_info.get("mobile_pin")
+        or ""
+    ).strip()
+
+
+def _mobile_push_timeout_seconds() -> int:
+    configured_timeout = str(os.environ.get("VIZION_OCTANE_MOBILE_PUSH_TIMEOUT_SECONDS") or "").strip()
+    try:
+        timeout_seconds = int(configured_timeout) if configured_timeout else _MOBILE_PUSH_TIMEOUT_SECONDS
+    except ValueError:
+        timeout_seconds = _MOBILE_PUSH_TIMEOUT_SECONDS
+    return max(120, min(timeout_seconds, 900))
 
 
 def _try_handle_windows_security_pin(pin: str) -> bool:
@@ -543,11 +578,230 @@ def _has_octane_auth_cookie(cookie_header: str) -> bool:
     return any(name in _OCTANE_AUTH_COOKIE_NAMES for name in _cookie_names_from_header(cookie_header))
 
 
-def refresh_cookie_file(*, base_url: str, cookie_file: Path, headless: bool) -> None:
+def _octane_teams_api_url(base_url: str) -> str:
+    return (
+        f"{base_url.rstrip('/')}/api/shared_spaces/1002/workspaces/2001/teams"
+        "?limit=1&fields=id,name"
+    )
+
+
+def _get_mobile_push_session(
+    username: str,
+    strong_auth_pin: str,
+    *,
+    timeout_seconds: int,
+):
+    if not username or not strong_auth_pin:
+        return None
+
+    keeper_url = str(os.environ.get("SESSION_KEEPER_URL") or "http://localhost:8090").rstrip("/")
+    session = requests.Session()
+    session.trust_env = False
+    try:
+        response = session.post(
+            f"{keeper_url}/sessions/octane",
+            json={
+                "username": username,
+                "password": strong_auth_pin,
+                "strong_auth": True,
+                "strong_auth_type": "mobile",
+            },
+            timeout=timeout_seconds,
+        )
+        if response.status_code != 200:
+            _LOGGER.warning("Mobile-push session keeper returned status=%s", response.status_code)
+            return None
+        payload = response.json()
+        cookies = payload.get("cookies") if isinstance(payload, dict) else None
+        if not isinstance(cookies, list) or not cookies:
+            _LOGGER.warning("Mobile-push session keeper returned no cookies")
+            return None
+        for cookie in cookies:
+            if not isinstance(cookie, dict):
+                continue
+            name = str(cookie.get("name") or "").strip()
+            value = str(cookie.get("value") or "")
+            if not name:
+                continue
+            session.cookies.set(
+                name,
+                value,
+                domain=str(cookie.get("domain") or ""),
+                path=str(cookie.get("path") or "/"),
+            )
+        return session
+    except (requests.RequestException, ValueError, TypeError):
+        _LOGGER.warning("Mobile-push session keeper request failed", exc_info=True)
+        return None
+
+
+def _cookie_header_from_session(session, *, base_url: str) -> str:
+    try:
+        session_cookies = list(session.cookies)
+    except Exception:
+        session_cookies = []
+
+    cookies = [
+        {
+            "name": str(getattr(cookie, "name", "") or ""),
+            "value": str(getattr(cookie, "value", "") or ""),
+            "domain": str(getattr(cookie, "domain", "") or ""),
+        }
+        for cookie in session_cookies
+    ]
+    cookie_header = _cookie_header_from_cookies(cookies, base_url=base_url)
+    if cookie_header:
+        return cookie_header
+
+    try:
+        return str(session.headers.get("Cookie") or "").strip()
+    except Exception:
+        return ""
+
+
+def _capture_mobile_push_cookie(
+    *,
+    base_url: str,
+    username: str,
+    strong_auth_pin: str,
+) -> str:
+    session = _get_mobile_push_session(
+        username,
+        strong_auth_pin,
+        timeout_seconds=_mobile_push_timeout_seconds(),
+    )
+    if session is None:
+        return ""
+
+    try:
+        session.trust_env = False
+        trusted_certificates = ssl.create_default_context().get_ca_certs(binary_form=True)
+        if not trusted_certificates:
+            _LOGGER.warning("Octane mobile-push validation found no system-trusted CA certificates")
+            return ""
+        with tempfile.TemporaryDirectory(prefix="vizion-octane-ca-") as certificate_directory:
+            certificate_bundle = Path(certificate_directory) / "system-ca.pem"
+            certificate_bundle.write_text(
+                "".join(ssl.DER_cert_to_PEM_cert(certificate) for certificate in trusted_certificates),
+                encoding="ascii",
+            )
+            response = session.get(
+                _octane_teams_api_url(base_url),
+                timeout=60,
+                allow_redirects=False,
+                verify=str(certificate_bundle),
+            )
+        if int(getattr(response, "status_code", 0) or 0) != 200:
+            return ""
+        payload = response.json()
+        if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+            return ""
+        return _cookie_header_from_session(session, base_url=base_url)
+    except Exception as exc:
+        _LOGGER.warning("Octane mobile-push session validation failed (%s)", type(exc).__name__)
+        return ""
+
+
+def _run_interactive_cookie_capture(
+    *,
+    base_url: str,
+    username: str,
+    password: str,
+    timeout_seconds: int = 300,
+) -> str:
     from playwright.sync_api import sync_playwright
 
+    normalized_base_url = base_url.rstrip("/")
+    octane_host = urllib.parse.urlparse(normalized_base_url).hostname or ""
+    api_url = _octane_teams_api_url(normalized_base_url)
+    configured_profile_dir = str(os.environ.get("VIZION_OCTANE_BROWSER_PROFILE") or "").strip()
+    temporary_profile_dir: tempfile.TemporaryDirectory[str] | None = None
+    if configured_profile_dir:
+        profile_dir = Path(configured_profile_dir)
+        profile_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        temporary_profile_dir = tempfile.TemporaryDirectory(prefix="vizion-octane-interactive-")
+        profile_dir = Path(temporary_profile_dir.name)
+
+    try:
+        with sync_playwright() as playwright:
+            context = playwright.chromium.launch_persistent_context(
+                str(profile_dir),
+                headless=False,
+                ignore_https_errors=True,
+            )
+            try:
+                page = context.new_page()
+                page.goto(normalized_base_url, timeout=60000)
+                _try_submit_login(page, username=username, password=password)
+                deadline = time.monotonic() + max(int(timeout_seconds), 1)
+                while time.monotonic() < deadline:
+                    current_host = urllib.parse.urlparse(page.url).hostname or ""
+                    if current_host == octane_host:
+                        try:
+                            response = page.goto(api_url, timeout=30000)
+                            cookie_header = _cookie_header_from_cookies(
+                                context.cookies(),
+                                base_url=normalized_base_url,
+                            )
+                            if (
+                                response is not None
+                                and response.status == 200
+                                and _has_octane_auth_cookie(cookie_header)
+                            ):
+                                return cookie_header
+                        except Exception:
+                            pass
+                    try:
+                        page.wait_for_timeout(1000)
+                    except Exception as exc:
+                        raise RuntimeError("Interactive Octane login browser was closed") from exc
+                raise RuntimeError("Interactive Octane login timed out before a validated API cookie was captured")
+            finally:
+                context.close()
+    finally:
+        if temporary_profile_dir is not None:
+            temporary_profile_dir.cleanup()
+
+
+def capture_interactive_cookie_file(
+    *,
+    base_url: str,
+    cookie_file: Path,
+    username: str,
+    password: str,
+) -> str:
+    cookie_header = _run_interactive_cookie_capture(
+        base_url=base_url,
+        username=username,
+        password=password,
+        timeout_seconds=300,
+    )
+    cookie_file.parent.mkdir(parents=True, exist_ok=True)
+    cookie_file.write_text(cookie_header, encoding="utf-8")
+    return cookie_header
+
+
+def refresh_cookie_file(*, base_url: str, cookie_file: Path, headless: bool) -> str:
     cookie_file.parent.mkdir(parents=True, exist_ok=True)
     login_info = _load_login_info()
+    mobile_push_pin = _mobile_push_pin_from_login_info(login_info)
+    mobile_push_cookie = ""
+    if mobile_push_pin:
+        _LOGGER.info("Requesting Octane mobile-push authentication; approve the notification to continue")
+        mobile_push_cookie = _capture_mobile_push_cookie(
+            base_url=base_url,
+            username=str(login_info.get("username") or "").strip(),
+            strong_auth_pin=mobile_push_pin,
+        )
+    else:
+        _LOGGER.info("Mobile-push authentication skipped because no strong-auth PIN is configured")
+    if mobile_push_cookie:
+        cookie_file.write_text(mobile_push_cookie, encoding="utf-8")
+        return "mobile-push"
+
+    from playwright.sync_api import sync_playwright
+
     configured_profile_dir = str(os.environ.get("VIZION_OCTANE_BROWSER_PROFILE") or "").strip()
     temporary_profile_dir: tempfile.TemporaryDirectory[str] | None = None
     if configured_profile_dir:
@@ -593,7 +847,7 @@ def refresh_cookie_file(*, base_url: str, cookie_file: Path, headless: bool) -> 
                     page.wait_for_load_state("networkidle", timeout=60000)
                 except Exception:
                     pass
-                api_url = f"{base_url.rstrip('/')}/api/shared_spaces/1002/workspaces/2001/teams?limit=1&fields=id,name"
+                api_url = _octane_teams_api_url(base_url)
                 api_status: int | None = None
                 cookie_header = ""
                 attempts = 1 if headless else 6
@@ -609,7 +863,7 @@ def refresh_cookie_file(*, base_url: str, cookie_file: Path, headless: bool) -> 
                     cookie_header = request_cookie_header if _has_octane_auth_cookie(str(request_cookie_header or "")) else context_cookie_header
                     if api_status == 200 and _has_octane_auth_cookie(cookie_header):
                         cookie_file.write_text(cookie_header, encoding="utf-8")
-                        return
+                        return "playwright"
                     if attempt_index + 1 < attempts:
                         page.wait_for_timeout(10000)
 

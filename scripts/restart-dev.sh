@@ -3,7 +3,7 @@
 #
 # Problem: scripts/dev.mjs reuses existing healthy processes on their ports, so
 # even after Ctrl+C the old local-api (3004) / vite (8080) / analytics (3003) /
-# session-keeper (8090) may still be running with stale code. This script kills
+# session-keeper (18090) may still be running with stale code. This script kills
 # ALL processes on those ports first, then starts fresh.
 #
 # Usage:
@@ -14,7 +14,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-PORTS=(3004 8080 3003 8090)
+PORTS=(3004 8080 3003 18090)
 
 echo "=== Stopping all vizion-lab dev processes ==="
 

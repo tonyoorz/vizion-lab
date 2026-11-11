@@ -17,7 +17,6 @@ import {
   buildDefectReporterAggregateToolCall,
   buildDefectReporterAliasLookupToolCall,
   buildDefectReporterClarificationToolCall,
-  buildDefectReporterExportToolCall,
   buildDefectReporterLookupToolCall,
   buildEmptyDiagnosisToolCall,
   buildSelectedToolsetContext,
@@ -638,9 +637,7 @@ export function createLangGraphChatRuntime({
       }
     }
 
-    const readyNonSimilarityPlan = analyticsContext?.analysisPlan?.status === "ready"
-      && analyticsContext?.analysisPlan?.operation !== "similarity_review";
-    if (body?.useDefectContext === true && !analyticsContext?.skipDefectContext && !readyNonSimilarityPlan && !isOidcScopedActor(state.actorScope)) {
+    if (body?.useDefectContext === true && !analyticsContext?.skipDefectContext && !isOidcScopedActor(state.actorScope)) {
       events.push(emit(config, { type: "defect-context-started", threadId: state.threadId }));
       defectContext = await resolveDefectContext({
         messages: body?.messages,
@@ -741,20 +738,6 @@ export function createLangGraphChatRuntime({
       return {
         plannedToolCalls: [defectReporterAggregate],
         plannedToolCallSource: "defect_reporter_aggregate",
-        toolExecutionMode: "deterministic",
-        stoppedReason: "",
-        runtimeEvents: events,
-      };
-    }
-    const defectReporterExport = buildDefectReporterExportToolCall({
-      messages: body?.messages,
-      toolMessages: state.toolMessages,
-      priorToolCalls: state.toolCalls,
-    });
-    if (defectReporterExport) {
-      return {
-        plannedToolCalls: [defectReporterExport],
-        plannedToolCallSource: "defect_reporter_export",
         toolExecutionMode: "deterministic",
         stoppedReason: "",
         runtimeEvents: events,
@@ -1033,15 +1016,7 @@ export function createLangGraphChatRuntime({
   }
 
   function routeAfterToolExecution(state) {
-    if (state.plannedToolCallSource === "defect_reporter_aggregate") {
-      const defectReporterExport = buildDefectReporterExportToolCall({
-        messages: state.body?.messages,
-        toolMessages: state.toolMessages,
-        priorToolCalls: state.toolCalls,
-      });
-      return defectReporterExport ? "plan_tool_calls" : "finalize";
-    }
-    if (["governed_semantic_plan", "defect_reporter_export"].includes(state.plannedToolCallSource)) {
+    if (["governed_semantic_plan", "defect_reporter_aggregate"].includes(state.plannedToolCallSource)) {
       return "finalize";
     }
     return state.stoppedReason ? "finalize" : "plan_tool_calls";

@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 import backend.analytics_cli as analytics_cli
+import pytest
 from backend.analytics_cli import main
 from backend.analytics.dashboard_snapshot import read_active_snapshot_state
 from backend.analytics.ingest import client as ingest_client
@@ -104,6 +105,51 @@ def test_analytics_cli_generate_qgate_kpi_reports_invokes_native_generators(
     assert "qgate_kpi_compare_2025_2026_20260611_120000.html" in stdout
 
 
+def test_analytics_cli_generates_test_method_evidence_report(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    db_path = tmp_path / "qgate_raw.db"
+    output_root = tmp_path / "test-method-evidence"
+    html_path = output_root / "20261019_120000" / "test_method_evidence_20261019_120000.html"
+    json_path = html_path.with_suffix(".json")
+    captured: dict[str, object] = {}
+
+    def fake_build_timestamped_output_paths(root, file_names):
+        captured["output_root"] = root
+        captured["file_names"] = file_names
+        return (html_path,)
+
+    def fake_generate_report(*, db_path, output_path, team):
+        captured["report"] = {"db_path": db_path, "output_path": output_path, "team": team}
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(output_path).write_text("report", encoding="utf-8")
+        json_path.write_text("{}", encoding="utf-8")
+        return Path(output_path), json_path
+
+    monkeypatch.setattr(analytics_cli, "build_timestamped_output_paths", fake_build_timestamped_output_paths, raising=False)
+    monkeypatch.setattr(analytics_cli, "generate_test_method_evidence_report", fake_generate_report, raising=False)
+
+    exit_code = main([
+        "generate-test-method-evidence-report",
+        "--db-path",
+        str(db_path),
+        "--output-root",
+        str(output_root),
+        "--team-name",
+        "DTSV_China",
+    ])
+
+    stdout = capsys.readouterr().out
+    assert exit_code == 0
+    assert captured["output_root"] == str(output_root)
+    assert captured["file_names"] == ("test_method_evidence_{stamp}.html",)
+    assert captured["report"] == {"db_path": db_path, "output_path": html_path, "team": "DTSV_China"}
+    assert "test_method_evidence_20261019_120000.html" in stdout
+    assert "test_method_evidence_20261019_120000.json" in stdout
+
+
 def test_analytics_cli_refresh_octane_source_invokes_repo_owned_pipeline(
     tmp_path: Path,
     monkeypatch,
@@ -124,16 +170,29 @@ def test_analytics_cli_refresh_octane_source_invokes_repo_owned_pipeline(
             "defect_rows": 1,
             "history_event_rows": 2,
             "manual_run_rows": 3,
+            "defect_ids": ["D-1"],
+            "manual_run_ids": ["MR-1"],
             "testcase_rows": 4,
             "testcase_relation_rows": 5,
         }
 
-    def fake_run_processor_pipeline(db_path, *, asset_root=None, dry_run=False, report_path=None) -> dict[str, int]:
+    def fake_run_processor_pipeline(
+        db_path,
+        *,
+        asset_root=None,
+        dry_run=False,
+        report_path=None,
+        manual_run_ids=None,
+        defect_ids=None,
+        progress=None,
+    ) -> dict[str, int]:
         captured["processor"] = {
             "db_path": db_path,
             "asset_root": asset_root,
             "dry_run": dry_run,
             "report_path": report_path,
+            "manual_run_ids": manual_run_ids,
+            "defect_ids": defect_ids,
         }
         return {"defect_updates": 6, "run_updates": 7}
 
@@ -164,6 +223,8 @@ def test_analytics_cli_refresh_octane_source_invokes_repo_owned_pipeline(
     assert request.include_testing is True
     assert processor_call["db_path"] == request.source_db_path
     assert processor_call["dry_run"] is False
+    assert processor_call["manual_run_ids"] == ("MR-1",)
+    assert processor_call["defect_ids"] == ("D-1",)
     assert '"testcase_relation_rows": 5' in stdout
     assert '"defect_updates": 6' in stdout
     assert '"run_updates": 7' in stdout
@@ -193,13 +254,23 @@ def test_analytics_cli_refresh_manual_runs_source_invokes_repo_owned_pipeline(
             progress("Refreshing manual runs for DTSV_China 2025 with full fetch")
         return {"manual_run_rows": 3}
 
-    def fake_run_processor_pipeline(db_path, *, asset_root=None, dry_run=False, report_path=None, manual_run_ids=None) -> dict[str, int]:
+    def fake_run_processor_pipeline(
+        db_path,
+        *,
+        asset_root=None,
+        dry_run=False,
+        report_path=None,
+        manual_run_ids=None,
+        defect_ids=None,
+        progress=None,
+    ) -> dict[str, int]:
         captured["processor"] = {
             "db_path": db_path,
             "asset_root": asset_root,
             "dry_run": dry_run,
             "report_path": report_path,
             "manual_run_ids": manual_run_ids,
+            "defect_ids": defect_ids,
         }
         return {"defect_updates": 0, "run_updates": 5}
 
@@ -229,6 +300,7 @@ def test_analytics_cli_refresh_manual_runs_source_invokes_repo_owned_pipeline(
         "dry_run": False,
         "report_path": None,
         "manual_run_ids": None,
+        "defect_ids": None,
     }
     assert "Starting manual-runs refresh for DTSV_China years=2025,2026" in stdout
     assert "Refreshing manual runs for DTSV_China 2025 with full fetch" in stdout
@@ -330,6 +402,31 @@ def test_analytics_cli_refresh_octane_cookie_validates_refreshed_cookie(
     assert [name for name, _ in calls] == ["refresh", "validate"]
     assert calls[0][1]["headless"] is True
     assert '"cookie_validated": true' in stdout
+
+
+def test_analytics_cli_reports_mobile_push_cookie_refresh_mode(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setenv("VIZION_REPO_ROOT_OVERRIDE", str(tmp_path))
+
+    def fake_refresh_cookie_file(*, base_url, cookie_file, headless):
+        Path(cookie_file).write_text("SESSION=valid", encoding="utf-8")
+        return "mobile-push"
+
+    class FakeClient:
+        def list_teams(self):
+            return [{"id": "1", "name": "DTSV_China"}]
+
+    monkeypatch.setattr(analytics_cli, "refresh_cookie_file", fake_refresh_cookie_file)
+    monkeypatch.setattr(ingest_client, "build_default_octane_client", lambda: FakeClient())
+
+    exit_code = main(["refresh-octane-cookie", "--headless"])
+
+    stdout = capsys.readouterr().out
+    assert exit_code == 0
+    assert '"mode": "mobile-push"' in stdout
 
 
 def test_analytics_cli_refresh_octane_cookie_can_update_cookie_file_in_place(
@@ -455,10 +552,21 @@ def test_analytics_cli_refresh_full_picture_outcomes_reports_progress(
     assert '"row_count": 12' in stdout
 
 
+@pytest.mark.parametrize(
+    ("processor_defect_updates", "processor_updated_defect_ids", "expected_outcome_defect_ids", "expected_scope_message"),
+    [
+        (0, [], ("D-1", "D-2"), "Materializing full-picture outcomes for 2 changed defects..."),
+        (2, ["D-3"], ("D-1", "D-2", "D-3"), "Materializing full-picture outcomes for 3 changed defects..."),
+    ],
+)
 def test_analytics_cli_refresh_all_sources_runs_steps_in_order(
     tmp_path: Path,
     monkeypatch,
     capsys,
+    processor_defect_updates: int,
+    processor_updated_defect_ids: list[str],
+    expected_outcome_defect_ids: tuple[str, ...] | None,
+    expected_scope_message: str,
 ) -> None:
     database_root = tmp_path / "database"
     source_db_path = database_root / "source" / "qgate_raw.db"
@@ -487,15 +595,29 @@ def test_analytics_cli_refresh_all_sources_runs_steps_in_order(
             progress("manual progress line")
         return {"manual_run_rows": 7}
 
-    def fake_run_processor_pipeline(db_path, *, asset_root=None, dry_run=False, report_path=None, manual_run_ids=None):
+    def fake_run_processor_pipeline(
+        db_path,
+        *,
+        asset_root=None,
+        dry_run=False,
+        report_path=None,
+        manual_run_ids=None,
+        defect_ids=None,
+        progress=None,
+    ):
         calls.append(("processor", {
             "db_path": db_path,
             "asset_root": asset_root,
             "dry_run": dry_run,
             "report_path": report_path,
             "manual_run_ids": manual_run_ids,
+            "defect_ids": defect_ids,
         }))
-        return {"defect_updates": 2, "run_updates": 3}
+        return {
+            "defect_updates": processor_defect_updates,
+            "run_updates": 3,
+            "updated_defect_ids": processor_updated_defect_ids,
+        }
 
     def fake_refresh_materialized_outcomes(source_db_path, hot_db_path, force, defect_ids=None):
         calls.append(("outcomes", {
@@ -504,7 +626,13 @@ def test_analytics_cli_refresh_all_sources_runs_steps_in_order(
             "force": force,
             "defect_ids": defect_ids,
         }))
-        return {"row_count": 11, "skipped": False, "source_signature": "sig-2"}
+        return {
+            "row_count": 11,
+            "updated_row_count": 2,
+            "incremental": defect_ids is not None,
+            "skipped": False,
+            "source_signature": "sig-2",
+        }
 
     monkeypatch.setattr(ingest_pipeline, "refresh_octane_source", fake_refresh_octane_source)
     monkeypatch.setattr(ingest_client, "build_default_octane_client", fake_build_default_octane_client)
@@ -546,6 +674,8 @@ def test_analytics_cli_refresh_all_sources_runs_steps_in_order(
     assert "Step 2/3: refreshing manual runs source..." in stdout
     assert "manual progress line" in stdout
     assert "Step 3/3: refreshing full-picture outcomes..." in stdout
+    assert expected_scope_message in stdout
+    assert f"Full-picture outcomes materialized: row_count=11 updated_row_count=2 incremental={expected_outcome_defect_ids is not None}" in stdout
     assert '"manual_run_rows": 7' in stdout
     assert '"row_count": 11' in stdout
     assert calls[1][1]["request"].years == (2025, 2026)
@@ -553,7 +683,8 @@ def test_analytics_cli_refresh_all_sources_runs_steps_in_order(
     assert calls[1][1]["request"].team_max_workers == 2
     assert calls[3][1]["years"] == (2026,)
     assert calls[4][1]["manual_run_ids"] is None
-    assert calls[5][1]["defect_ids"] == ("D-1", "D-2")
+    assert calls[4][1]["defect_ids"] == ("D-1", "D-2")
+    assert calls[5][1]["defect_ids"] == expected_outcome_defect_ids
 
 
 def test_analytics_cli_refresh_all_sources_defaults_to_current_year(
@@ -586,8 +717,21 @@ def test_analytics_cli_refresh_all_sources_defaults_to_current_year(
         }))
         return {"manual_run_rows": 0}
 
-    def fake_run_processor_pipeline(db_path, *, asset_root=None, dry_run=False, report_path=None, manual_run_ids=None):
-        calls.append(("processor", {"db_path": db_path, "manual_run_ids": manual_run_ids}))
+    def fake_run_processor_pipeline(
+        db_path,
+        *,
+        asset_root=None,
+        dry_run=False,
+        report_path=None,
+        manual_run_ids=None,
+        defect_ids=None,
+        progress=None,
+    ):
+        calls.append(("processor", {
+            "db_path": db_path,
+            "manual_run_ids": manual_run_ids,
+            "defect_ids": defect_ids,
+        }))
         return {"defect_updates": 0, "run_updates": 0}
 
     def fake_refresh_materialized_outcomes(source_db_path, hot_db_path, force, defect_ids=None):
@@ -755,7 +899,16 @@ def test_analytics_cli_refresh_all_sources_can_prepare_duplicate_index_after_out
         calls.append("manual_runs")
         return {"manual_run_rows": 7}
 
-    def fake_run_processor_pipeline(db_path, *, asset_root=None, dry_run=False, report_path=None, manual_run_ids=None):
+    def fake_run_processor_pipeline(
+        db_path,
+        *,
+        asset_root=None,
+        dry_run=False,
+        report_path=None,
+        manual_run_ids=None,
+        defect_ids=None,
+        progress=None,
+    ):
         calls.append("processor")
         return {"defect_updates": 2, "run_updates": 3}
 

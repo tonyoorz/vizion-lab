@@ -1,6 +1,6 @@
 param(
   [string]$TaskName = "VizionLab Nightly Source Refresh",
-  [string]$StartTime = "01:00",
+  [string]$StartTime = "23:00",
   [string]$RunScriptPath = (Join-Path $PSScriptRoot "run-nightly-source-refresh.ps1"),
   [string]$RunAsUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name,
   [int]$PrepareDuplicateIndex = 1,

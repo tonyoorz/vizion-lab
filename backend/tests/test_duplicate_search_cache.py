@@ -1,4 +1,6 @@
 import importlib.util
+import os
+import sqlite3
 from pathlib import Path
 
 import pandas as pd
@@ -228,6 +230,57 @@ def test_search_uses_prepared_index_manifest_without_loading_defect_df(monkeypat
     assert result["result"]["dataset_size"] == 42
     assert result["result"]["timings"]["prepared_index_manifest_hit"] is True
     assert result["result"]["timings"]["load_defect_df_cache_hit"] is True
+
+
+def test_sqlite_source_signature_uses_duplicate_search_revision_not_file_mtime(monkeypatch, tmp_path):
+    bridge = _load_duplicate_search_bridge_module()
+    source_db = tmp_path / "qgate_raw.db"
+    conn = sqlite3.connect(source_db)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE duplicate_search_source_state (
+                store_name TEXT PRIMARY KEY,
+                source_revision INTEGER NOT NULL,
+                indexed_revision INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO duplicate_search_source_state(
+                store_name, source_revision, indexed_revision, updated_at
+            ) VALUES (?, ?, ?, ?)
+            """,
+            ("octane_defects", 7, 7, "2026-10-16T00:00:00Z"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setenv("DUPSEARCH_SQLITE_PATH", str(source_db))
+    first_signature = bridge._build_defect_source_signature(tmp_path)
+
+    stat = source_db.stat()
+    os.utime(source_db, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+    assert bridge._build_defect_source_signature(tmp_path) == first_signature
+
+    conn = sqlite3.connect(source_db)
+    try:
+        conn.execute(
+            """
+            UPDATE duplicate_search_source_state
+            SET source_revision = source_revision + 1
+            WHERE store_name = ?
+            """,
+            ("octane_defects",),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert bridge._build_defect_source_signature(tmp_path) != first_signature
 
 
 def test_resolve_sqlite_path_prefers_local_source_copy(monkeypatch, tmp_path):

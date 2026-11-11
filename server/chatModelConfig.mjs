@@ -167,6 +167,12 @@ function buildStreamRequestFields(stream) {
   return stream ? { stream_options: { include_usage: true } } : {};
 }
 
+function buildResponseFormatRequestFields(responseFormat) {
+  return responseFormat && typeof responseFormat === "object"
+    ? { response_format: responseFormat }
+    : {};
+}
+
 export function buildChatCompletionRequest({
   selectedModel,
   messages,
@@ -175,10 +181,12 @@ export function buildChatCompletionRequest({
   tools,
   toolChoice,
   maxTokens,
+  responseFormat,
 }) {
   const config = resolveChatModelConfig(selectedModel || "", env);
   const toolRequestFields = buildToolRequestFields(tools, toolChoice);
   const streamRequestFields = buildStreamRequestFields(stream);
+  const responseFormatFields = buildResponseFormatRequestFields(responseFormat);
   // Only override the default token limit when the caller explicitly requests one.
   const tokenLengthOverride = maxTokens != null ? { max_token_length: maxTokens } : {};
   const maxTokensOverride = maxTokens != null ? { max_tokens: maxTokens } : {};
@@ -198,6 +206,7 @@ export function buildChatCompletionRequest({
         max_token_length: 2048,
         stream,
         ...streamRequestFields,
+        ...responseFormatFields,
         ...toolRequestFields,
         ...tokenLengthOverride,
       },
@@ -223,6 +232,7 @@ export function buildChatCompletionRequest({
       messages,
       stream,
       ...streamRequestFields,
+      ...responseFormatFields,
       ...toolRequestFields,
       ...maxTokensOverride,
     },

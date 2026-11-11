@@ -19,6 +19,17 @@ It is designed for demo, review, and local daily operation: clone the repository
 - Native KPI Reports: QGate dashboard and compare reports generated directly from this repository.
 - Operator-friendly refresh: one-command source refresh and optional Windows scheduled task wrapper.
 
+## Move To Another Computer
+
+See [Windows and macOS local deployment](docs/portable-deployment.md) for native setup, external BmwLogin/GLMProxy installation, redacted diagnostics, private SQLite/model/report transfers, and feature acceptance.
+
+```text
+npm run deploy:setup -- --keeper-source ../BmwLogin --asr
+npm run deploy:doctor -- --services
+```
+
+Transfers require explicit data/model/report options and a private destination. Credentials, cookies, SSO sessions, application code and virtual environments are not exported. The deployment profile requires Node 24 and native Python 3.11-3.13; prefer Python 3.13. The target computer, especially macOS, still needs actual functional acceptance.
+
 ## Demo Flow
 
 A reviewer can evaluate the project in this order:
@@ -47,6 +58,7 @@ flowchart LR
   Browser --> AnalyticsAPI[FastAPI Analytics<br/>:3003]
   NodeAPI --> DuplicateSearch[Python Duplicate Search]
   NodeAPI --> ModelAPI[Configured Company Model API]
+  AnalyticsAPI --> SessionKeeper[SSO Session Keeper<br/>:18090]
   DuplicateSearch --> SourceDB[(database/source/qgate_raw.db)]
   AnalyticsAPI --> SourceDB
   AnalyticsAPI --> HotDB[(database/hot/vizion_serving.db)]
@@ -99,20 +111,33 @@ If you need browser-based Octane cookie refresh, install Chromium once:
 npm run dev
 ```
 
-The dev command starts three local services:
+The dev command starts four local services by default:
 
 | Service | URL | Purpose |
 | --- | --- | --- |
+| SSO Session Keeper | `http://127.0.0.1:18090` | BMW SSO login and session keepalive |
 | Frontend | `http://127.0.0.1:8080` | dashboard UI |
 | Local Node API | `http://127.0.0.1:3004` | AI chat, duplicate search, transcription |
 | Analytics API | `http://127.0.0.1:3003` | full-picture and analytics endpoints |
 
+The keeper starts first and must pass its health check before the APIs start. Its `session_keeper` package, provided by BmwLogin, must already be installed in the selected Python environment; the dev command does not install Python dependencies. Python selection uses `VIZION_ANALYTICS_PYTHON`, then `DUPSEARCH_AGENT_PYTHON`, then `.venv\Scripts\python.exe`, then `python`.
+
+Healthy existing services are reused. On exit, the dev command stops only the child processes it started. Set `SESSION_KEEPER_URL` to use an externally managed keeper without launching a local one. Local HTTP URLs using `localhost` or `127.0.0.1` are managed automatically on their configured port.
+
+Vizion defaults `SESSION_KEEPER_URL` to `http://127.0.0.1:18090` and `SESSION_STORE_DIR` to the repository's ignored `backend/cache/session-keeper` directory. Both values are passed to child services and can be overridden. This keeps the default instance separate from LibreChat's keeper on port `8090`.
+
+Restart all Vizion dev services when changing these settings: an already healthy service is reused and retains the environment from its original launch.
+
+Starting an empty keeper does not initiate SSO login. Separate keepers can hold separate upstream sessions once each application requests a login; whether simultaneous sessions are allowed depends on the upstream SSO policy.
+
 ### 5. Verify Services
 
 ```powershell
+$keeper = Invoke-WebRequest -Uri 'http://127.0.0.1:18090/health' -UseBasicParsing -TimeoutSec 5
 $frontend = Invoke-WebRequest -Uri 'http://127.0.0.1:8080' -UseBasicParsing -TimeoutSec 5
 $localApi = Invoke-WebRequest -Uri 'http://127.0.0.1:3004/health' -UseBasicParsing -TimeoutSec 5
 $analytics = Invoke-WebRequest -Uri 'http://127.0.0.1:3003/health' -UseBasicParsing -TimeoutSec 5
+"KEEPER $($keeper.StatusCode) $($keeper.Content)"
 "FRONTEND $($frontend.StatusCode)"
 "LOCALAPI $($localApi.StatusCode) $($localApi.Content)"
 "ANALYTICS $($analytics.StatusCode) $($analytics.Content)"
@@ -139,7 +164,10 @@ Default paths:
 
 ### Pull Data From Octane
 
+Standalone Python commands do not inherit the dev launcher's environment. Point them at Vizion's running keeper explicitly:
+
 ```powershell
+$env:SESSION_KEEPER_URL = "http://127.0.0.1:18090"
 .\.venv\Scripts\python.exe -m backend.analytics_cli refresh-octane-cookie --headless
 .\.venv\Scripts\python.exe -m backend.analytics_cli refresh-all-sources --teams "DTSV_China" --years 2026 --manual-years 2026 --team-name DTSV_China
 ```

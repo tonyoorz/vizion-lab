@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
 from pathlib import Path
 
 from backend.analytics.config import (
@@ -77,6 +79,219 @@ def test_playwright_cookie_header_requires_auth_cookie() -> None:
     assert not _has_octane_auth_cookie("HPECLIENTTYPE=standard; XSRF_COOKIE=csrf")
     assert _has_octane_auth_cookie("JSESSIONID=abc; XSRF_COOKIE=csrf")
     assert _has_octane_auth_cookie("access_token=token; XSRF_COOKIE=csrf")
+
+
+def test_mobile_push_cookie_capture_validates_octane_session(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeCookie:
+        name = "JSESSIONID"
+        value = "mobile-session"
+        domain = ".octane-prod.bmwgroup.net"
+
+    class FakeSession:
+        headers: dict[str, str] = {}
+        cookies = [FakeCookie()]
+        trust_env = True
+
+        def get(self, url: str, timeout: int, **kwargs):
+            captured["url"] = url
+            captured["timeout"] = timeout
+            certificate_bundle = kwargs.get("verify")
+            captured["system_certificate_bundle"] = (
+                isinstance(certificate_bundle, str)
+                and Path(certificate_bundle).is_file()
+                and "-----BEGIN CERTIFICATE-----" in Path(certificate_bundle).read_text(encoding="ascii")
+            )
+            captured["allow_redirects"] = kwargs.get("allow_redirects")
+            return SimpleNamespace(status_code=200, json=lambda: {"data": [{"id": "1"}]})
+
+    session = FakeSession()
+    monkeypatch.setattr(
+        playwright_cookie_manager,
+        "_get_mobile_push_session",
+        lambda username, strong_auth_pin, *, timeout_seconds: session,
+    )
+
+    header = playwright_cookie_manager._capture_mobile_push_cookie(
+        base_url="https://octane-prod.bmwgroup.net",
+        username="q123456",
+        strong_auth_pin="strong-pin",
+    )
+
+    assert header == "JSESSIONID=mobile-session"
+    assert session.trust_env is False
+    assert captured == {
+        "url": "https://octane-prod.bmwgroup.net/api/shared_spaces/1002/workspaces/2001/teams?limit=1&fields=id,name",
+        "timeout": 60,
+        "system_certificate_bundle": True,
+        "allow_redirects": False,
+    }
+
+
+def test_mobile_push_cookie_capture_rejects_html_login_page(monkeypatch) -> None:
+    response = playwright_cookie_manager.requests.Response()
+    response.status_code = 200
+    response._content = b"<html><body>Sign in</body></html>"
+
+    class FakeSession:
+        headers: dict[str, str] = {}
+        cookies = [SimpleNamespace(name="JSESSIONID", value="not-authenticated", domain=".octane-prod.bmwgroup.net")]
+        trust_env = True
+
+        def get(self, url: str, timeout: int, **kwargs):
+            return response
+
+    monkeypatch.setattr(
+        playwright_cookie_manager,
+        "_get_mobile_push_session",
+        lambda username, strong_auth_pin, *, timeout_seconds: FakeSession(),
+    )
+
+    assert playwright_cookie_manager._capture_mobile_push_cookie(
+        base_url="https://octane-prod.bmwgroup.net",
+        username="q123456",
+        strong_auth_pin="strong-pin",
+    ) == ""
+
+
+def test_mobile_push_session_uses_strong_auth_pin_and_configured_timeout(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeCookies:
+        def set(self, name, value, domain="", path="/") -> None:
+            captured.setdefault("cookies", []).append((name, value, domain, path))
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.cookies = FakeCookies()
+            self.trust_env = True
+
+        def post(self, url, json, timeout):
+            captured["url"] = url
+            captured["payload"] = json
+            captured["timeout"] = timeout
+            return SimpleNamespace(
+                status_code=200,
+                json=lambda: {
+                    "cookies": [
+                        {
+                            "name": "JSESSIONID",
+                            "value": "mobile-session",
+                            "domain": ".octane-prod.bmwgroup.net",
+                            "path": "/",
+                        }
+                    ]
+                },
+            )
+
+    session = FakeSession()
+    monkeypatch.setattr(playwright_cookie_manager.requests, "Session", lambda: session)
+    monkeypatch.setenv("SESSION_KEEPER_URL", "http://localhost:8090")
+
+    result = playwright_cookie_manager._get_mobile_push_session(
+        "q123456",
+        "strong-pin",
+        timeout_seconds=480,
+    )
+
+    assert result is session
+    assert session.trust_env is False
+    assert captured == {
+        "url": "http://localhost:8090/sessions/octane",
+        "payload": {
+            "username": "q123456",
+            "password": "strong-pin",
+            "strong_auth": True,
+            "strong_auth_type": "mobile",
+        },
+        "timeout": 480,
+        "cookies": [("JSESSIONID", "mobile-session", ".octane-prod.bmwgroup.net", "/")],
+    }
+
+
+def test_mobile_push_pin_is_loaded_separately_from_regular_password(monkeypatch, tmp_path: Path) -> None:
+    login_file = tmp_path / "login_info.txt"
+    login_file.write_text(
+        json.dumps(
+            {
+                "username": "q123456",
+                "password": "regular-password",
+                "strong_auth_pin": "mobile-pin",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("VIZION_OCTANE_LOGIN_FILE", str(login_file))
+
+    login_info = playwright_cookie_manager._load_login_info()
+
+    assert login_info["password"] == "regular-password"
+    assert playwright_cookie_manager._mobile_push_pin_from_login_info(login_info) == "mobile-pin"
+
+
+def test_cookie_refresh_prefers_mobile_push_before_playwright(monkeypatch, tmp_path: Path) -> None:
+    cookie_file = tmp_path / "cookie.txt"
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        playwright_cookie_manager,
+        "_load_login_info",
+        lambda: {
+            "username": "q123456",
+            "password": "regular-password",
+            "mobile_push_pin": "mobile-pin",
+        },
+    )
+    monkeypatch.setattr(
+        playwright_cookie_manager,
+        "_capture_mobile_push_cookie",
+        lambda **kwargs: captured.update(kwargs) or "JSESSIONID=mobile-session",
+    )
+
+    mode = playwright_cookie_manager.refresh_cookie_file(
+        base_url="https://octane-prod.bmwgroup.net",
+        cookie_file=cookie_file,
+        headless=True,
+    )
+
+    assert mode == "mobile-push"
+    assert cookie_file.read_text(encoding="utf-8") == "JSESSIONID=mobile-session"
+    assert captured["strong_auth_pin"] == "mobile-pin"
+    assert captured["strong_auth_pin"] != "regular-password"
+
+
+def test_interactive_cookie_capture_uses_explicit_login_credentials(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    def capture_cookie(**kwargs: object) -> str:
+        captured.update(kwargs)
+        return "JSESSIONID=abc"
+
+    monkeypatch.setattr(playwright_cookie_manager, "_run_interactive_cookie_capture", capture_cookie)
+
+    cookie_file = tmp_path / "interactive-cookie.txt"
+    result = playwright_cookie_manager.capture_interactive_cookie_file(
+        base_url="https://octane-prod.bmwgroup.net",
+        cookie_file=cookie_file,
+        username="q123456",
+        password="tss-password",
+    )
+
+    assert result == "JSESSIONID=abc"
+    assert cookie_file.read_text(encoding="utf-8") == "JSESSIONID=abc"
+    assert captured == {
+        "base_url": "https://octane-prod.bmwgroup.net",
+        "username": "q123456",
+        "password": "tss-password",
+        "timeout_seconds": 300,
+    }
+
+
+def test_interactive_cookie_capture_has_url_parser() -> None:
+    assert (
+        playwright_cookie_manager.urllib.parse.urlparse("https://octane-prod.bmwgroup.net").hostname
+        == "octane-prod.bmwgroup.net"
+    )
 
 
 def test_try_submit_login_selects_other_sign_in_option_before_password(monkeypatch) -> None:

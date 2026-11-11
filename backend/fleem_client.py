@@ -312,7 +312,7 @@ def fetch_platform_snapshot_from_browser_profile(
         context = playwright.chromium.launch_persistent_context(
             str(resolved_profile_dir),
             headless=headless,
-            ignore_https_errors=True,
+            ignore_https_errors=False,
         )
         try:
             page = context.pages[0] if context.pages else context.new_page()

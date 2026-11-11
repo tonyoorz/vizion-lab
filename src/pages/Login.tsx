@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from "react";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Navigate, useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 
@@ -14,6 +15,7 @@ const Login = () => {
   const { authenticated, loading } = useAuth();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [strongAuth, setStrongAuth] = useState(true);
   const [submitting, setSubmitting] = useState(false);
 
   // 已登录则跳回首页
@@ -25,7 +27,7 @@ const Login = () => {
     e.preventDefault();
     if (submitting) return;
     setSubmitting(true);
-    const result = await login(username, password);
+    const result = await login(username, password, { strongAuth });
     setSubmitting(false);
     if (result.ok) {
       toast.success("登录成功");
@@ -67,7 +69,7 @@ const Login = () => {
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="password">密码</Label>
+              <Label htmlFor="password">{strongAuth ? "强认证 PIN" : "密码"}</Label>
               <Input
                 id="password"
                 type="password"
@@ -78,9 +80,23 @@ const Login = () => {
                 disabled={submitting}
               />
             </div>
+            <div className="flex items-center gap-2">
+              <Checkbox
+                id="strong-auth"
+                checked={strongAuth}
+                onCheckedChange={(checked) => setStrongAuth(checked === true)}
+                disabled={submitting}
+              />
+              <Label htmlFor="strong-auth">使用手机强认证</Label>
+            </div>
             <Button type="submit" className="w-full" disabled={submitting}>
-              {submitting ? "登录中…" : "登录"}
+              {submitting ? (strongAuth ? "正在等待手机确认…" : "请在浏览器完成登录…") : "登录"}
             </Button>
+            {submitting ? (
+              <p className="text-center text-sm text-muted-foreground" role="status">
+                {strongAuth ? "请在手机上完成认证" : "请在打开的浏览器中完成认证"}
+              </p>
+            ) : null}
           </form>
           <p className="mt-4 text-center text-xs text-muted-foreground">
             使用 BMW 内网 SSO 凭证登录，将以本人身份访问 Octane

@@ -1,4 +1,3 @@
-import fs from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,6 +10,7 @@ import {
   hasTcpServiceOnPort,
   hasViteDevServerOnPort,
   resolveLocalApiEnvironment,
+  resolvePythonCommand,
   waitForHealthyService,
 } from "./devHelpers.mjs";
 import { assertSupportedNodeVersion } from "./nodeVersion.mjs";
@@ -20,9 +20,15 @@ const __dirname = path.dirname(__filename);
 const repoRoot = path.resolve(__dirname, "..");
 loadLocalEnv();
 Object.assign(process.env, resolveLocalApiEnvironment(process.env));
+process.env.SESSION_KEEPER_URL ||= "http://127.0.0.1:18090";
+process.env.SESSION_STORE_DIR ||= path.join(repoRoot, "backend", "cache", "session-keeper");
 const analyticsPort = Number(process.env.VIZION_ANALYTICS_PORT || "3003");
 const apiPort = Number(process.env.VIZION_API_PORT || "3004");
 const webPort = Number(process.env.VIZION_WEB_PORT || "8080");
+const webHost = String(process.env.VIZION_WEB_HOST || process.env.HOST || "0.0.0.0").trim() || "0.0.0.0";
+const sessionKeeperUrl = new URL(process.env.SESSION_KEEPER_URL);
+const useLocalSessionKeeper = sessionKeeperUrl.protocol === "http:" &&
+  ["localhost", "127.0.0.1"].includes(sessionKeeperUrl.hostname);
 
 assertSupportedNodeVersion();
 
@@ -46,26 +52,6 @@ function terminateChild(child, signal = "SIGTERM") {
   }
 
   child.kill(termination.args[0]);
-}
-
-function resolvePythonCommand() {
-  const candidates = [
-    process.env.VIZION_ANALYTICS_PYTHON,
-    process.env.DUPSEARCH_AGENT_PYTHON,
-    path.join(repoRoot, ".venv", "Scripts", "python.exe"),
-    "python",
-  ];
-
-  for (const candidate of candidates) {
-    if (!candidate) {
-      continue;
-    }
-    if (candidate === "python" || fs.existsSync(candidate)) {
-      return candidate;
-    }
-  }
-
-  return "python";
 }
 
 function launch(command, args, name, isHealthy) {
@@ -100,17 +86,34 @@ function launch(command, args, name, isHealthy) {
   console.log(`[vizion-dev] started ${name}`);
 }
 
-async function launchIfNeeded({ name, command, args, port, expectedService, isHealthy: checkHealth }) {
-  const isHealthy = checkHealth || (() => hasHealthyServiceOnPort({ port, expectedService }));
+async function launchIfNeeded({ name, command, args, port, expectedService, isHealthy: checkHealth, waitUntilHealthy = false }) {
+  if (exiting) {
+    return;
+  }
 
-  if (await isHealthy()) {
+  const isHealthy = checkHealth || (() => hasHealthyServiceOnPort({ port, expectedService }));
+  const healthy = await isHealthy();
+  if (exiting) {
+    return;
+  }
+
+  if (healthy) {
     console.log(`[vizion-dev] reusing existing ${name} on http://127.0.0.1:${port}`);
     return;
   }
 
-  if (await hasTcpServiceOnPort({ port })) {
+  const portInUse = await hasTcpServiceOnPort({ port });
+  if (exiting) {
+    return;
+  }
+
+  if (portInUse) {
     console.log(`[vizion-dev] waiting for existing ${name} on http://127.0.0.1:${port} to become healthy`);
-    if (await waitForHealthyService(isHealthy, serviceWaitOptions)) {
+    const existingServiceHealthy = await waitForHealthyService(isHealthy, serviceWaitOptions);
+    if (exiting) {
+      return;
+    }
+    if (existingServiceHealthy) {
       console.log(`[vizion-dev] reusing existing ${name} on http://127.0.0.1:${port}`);
       return;
     }
@@ -124,11 +127,49 @@ async function launchIfNeeded({ name, command, args, port, expectedService, isHe
   }
 
   launch(command, args, name, isHealthy);
+  if (waitUntilHealthy) {
+    const ready = await waitForHealthyService(isHealthy, serviceWaitOptions);
+    if (exiting) {
+      return;
+    }
+    if (!ready) {
+      console.error(`[vizion-dev] ${name} did not become healthy on http://127.0.0.1:${port}`);
+      shutdown("SIGTERM");
+      process.exit(1);
+    }
+    console.log(`[vizion-dev] ${name} ready on http://127.0.0.1:${port}`);
+  }
+}
+
+process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("exit", () => shutdown("SIGTERM"));
+
+if (useLocalSessionKeeper) {
+  const sessionKeeperPort = Number(sessionKeeperUrl.port || "80");
+  await launchIfNeeded({
+    name: "session-keeper",
+    command: resolvePythonCommand({ repoRoot }),
+    args: [
+      "-m",
+      "uvicorn",
+      "session_keeper.app:app",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      String(sessionKeeperPort),
+    ],
+    port: sessionKeeperPort,
+    expectedService: "session-keeper",
+    waitUntilHealthy: true,
+  });
+} else {
+  console.log("[vizion-dev] using configured external session-keeper; skipping local launch");
 }
 
 await launchIfNeeded({
   name: "analytics-api",
-  command: resolvePythonCommand(),
+  command: resolvePythonCommand({ repoRoot }),
   args: [
     "-m",
     "uvicorn",
@@ -150,7 +191,7 @@ await launchIfNeeded({
 await launchIfNeeded({
   name: "vite",
   command: process.execPath,
-  args: [path.join(repoRoot, "node_modules", "vite", "bin", "vite.js"), "--port", String(webPort)],
+  args: [path.join(repoRoot, "node_modules", "vite", "bin", "vite.js"), "--host", webHost, "--port", String(webPort)],
   port: webPort,
   isHealthy: () => hasViteDevServerOnPort({ port: webPort }),
 });
@@ -165,7 +206,3 @@ function shutdown(signal) {
     terminateChild(child, signal);
   }
 }
-
-process.on("SIGINT", () => shutdown("SIGINT"));
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("exit", () => shutdown("SIGTERM"));

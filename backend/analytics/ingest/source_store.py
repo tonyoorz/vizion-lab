@@ -7,10 +7,25 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from backend.analytics.duplicate_search_state import (
+    DUPLICATE_SEARCH_RELEVANT_DEFECT_COLUMNS,
+    advance_duplicate_search_source_revision,
+    ensure_duplicate_search_source_state,
+)
 from backend.analytics.schema import ensure_schema
 
 
 SQLITE_MAX_QUERY_VARIABLES = 32000
+
+DEFECT_WATERMARK_TEAM_SQL = (
+    "COALESCE(NULLIF(TRIM(CAST(problem_finder_team AS TEXT)), ''), "
+    "NULLIF(TRIM(CAST(team AS TEXT)), ''))"
+)
+DEFECT_WATERMARK_YEAR_SQL = "CAST(year AS INTEGER)"
+DEFECT_WATERMARK_VALUE_SQL = (
+    "COALESCE(NULLIF(TRIM(CAST(last_modified AS TEXT)), ''), "
+    "NULLIF(TRIM(CAST(fetched_at AS TEXT)), ''))"
+)
 
 
 DEFECT_ADDITIONAL_COLUMNS: dict[str, str] = {
@@ -266,6 +281,23 @@ def _preserve_processed_tproject(existing: sqlite3.Row | None) -> str:
     return str(existing["tproject"] or "").strip()
 
 
+def _duplicate_search_content_changed(
+    existing: sqlite3.Row | None,
+    columns: tuple[str, ...],
+    incoming: tuple[object, ...],
+) -> bool:
+    if existing is None:
+        return True
+
+    incoming_by_column = dict(zip(columns, incoming))
+    for column_name in DUPLICATE_SEARCH_RELEVANT_DEFECT_COLUMNS:
+        previous_value = str(existing[column_name] or "").strip() if column_name in existing.keys() else ""
+        next_value = str(incoming_by_column.get(column_name) or "").strip()
+        if previous_value != next_value:
+            return True
+    return False
+
+
 def _normalize_relation_subtype(value: object) -> str:
     return str(value or "").strip().lower()
 
@@ -345,6 +377,33 @@ def _run_traceability_relations(row: dict[str, Any]) -> list[dict[str, str]]:
     return relations
 
 
+def normalize_defect_history_evidence(payload: dict[str, Any]) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    events = [event for event in list(payload.get("data") or []) if isinstance(event, dict)]
+    for entry_index, entry in enumerate(events):
+        base = {
+            "event_timestamp": str(entry.get("timestamp") or "").strip(),
+            "action": str(entry.get("action") or "").strip(),
+            "user_name": _coalesce(_nested_value(entry.get("user"), "full_name"), _nested_value(entry.get("user"), "name"), _scalar_text(entry.get("user"))),
+            "entry_index": entry_index,
+        }
+        changes = list(entry.get("change_set") or [])
+        if not changes:
+            rows.append({**base, "change_index": 0, **{field: "" for field in ("field_name", "old_value", "new_value", "old_value_text", "new_value_text")}})
+        for change_index, change in enumerate(changes):
+            if not isinstance(change, dict):
+                continue
+            rows.append({
+                **base, "change_index": change_index,
+                "field_name": str(change.get("field_name") or "").strip(),
+                "old_value": str(change.get("old_value") or "").strip(),
+                "new_value": str(change.get("value") or change.get("new_value") or "").strip(),
+                "old_value_text": str(change.get("old_value_text") or change.get("old_value") or "").strip(),
+                "new_value_text": str(change.get("value_text") or change.get("new_value_text") or change.get("value") or "").strip(),
+            })
+    return rows
+
+
 class OctaneSourceStore:
     def __init__(self, db_path: Path | str):
         self.db_path = Path(db_path)
@@ -358,6 +417,9 @@ class OctaneSourceStore:
     def commit(self) -> None:
         self._conn.commit()
 
+    def rollback(self) -> None:
+        self._conn.rollback()
+
     def create_tables(self) -> None:
         ensure_schema(self.db_path)
         self._ensure_columns("octane_defects", DEFECT_ADDITIONAL_COLUMNS)
@@ -368,6 +430,17 @@ class OctaneSourceStore:
         self._ensure_columns("octane_traceability_testcases", TRACEABILITY_TESTCASE_ADDITIONAL_COLUMNS)
         self._ensure_comment_refresh_state_table()
         self._ensure_history_refresh_state_table()
+        ensure_duplicate_search_source_state(self._conn)
+        self._conn.execute(
+            f"""
+            CREATE INDEX IF NOT EXISTS idx_octane_defects_incremental_watermark
+            ON octane_defects(
+                {DEFECT_WATERMARK_TEAM_SQL},
+                {DEFECT_WATERMARK_YEAR_SQL},
+                {DEFECT_WATERMARK_VALUE_SQL}
+            )
+            """
+        )
         self._conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_octane_defect_history_events_defect_timestamp
@@ -519,6 +592,9 @@ class OctaneSourceStore:
     def record_comment_refresh_state(self, rows: list[tuple[str, str, str]]) -> None:
         if not rows:
             return
+        existing_tickets = self._load_existing_rows(
+            "octane_defects", "defect_id", [row[0] for row in rows]
+        )
         refreshed_at = _utc_now()
         existing_columns = {
             str(row[1]).strip()
@@ -551,6 +627,24 @@ class OctaneSourceStore:
             """,
             values,
         )
+        canonical_updates: list[tuple[str, str, str]] = []
+        for defect_id, _last_modified, comments_json in rows:
+            existing_ticket = existing_tickets.get(defect_id)
+            if existing_ticket is None:
+                continue
+            raw_payload = json.loads(str(existing_ticket["raw_json"] or "{}"))
+            raw_payload["comments"] = json.loads(comments_json)
+            canonical_updates.append((comments_json, _json_text(raw_payload), defect_id))
+        self._conn.executemany(
+            "UPDATE octane_defects SET comments=?, raw_json=? WHERE defect_id=?",
+            canonical_updates,
+        )
+        if any(
+            comments_json != str(existing_tickets[defect_id]["comments"] or "[]")
+            for comments_json, _raw_json, defect_id in canonical_updates
+        ):
+            ensure_duplicate_search_source_state(self._conn)
+            advance_duplicate_search_source_revision(self._conn)
 
     def plan_history_refreshes(self, defects: list[dict[str, Any]]) -> tuple[dict[str, str | None], int]:
         defect_last_modified = {
@@ -614,22 +708,37 @@ class OctaneSourceStore:
         refresh_since, skipped_count = self.plan_history_refreshes(defects)
         return sorted(refresh_since), skipped_count
 
-    def upsert_defects(self, defects: list[dict[str, Any]], *, team: str, year: int | None = None) -> int:
+    def upsert_defects(self, defects: list[dict[str, Any]], *, team: str, year: int | None = None, commit: bool = True) -> int:
+        ensure_duplicate_search_source_state(self._conn)
         defect_ids = [str(row.get("id") or "").strip() for row in defects if str(row.get("id") or "").strip()]
         existing_rows = self._load_existing_rows("octane_defects", "defect_id", defect_ids)
+        defect_columns = (
+            "defect_id", "name", "project", "market", "pu", "fv", "fvp", "team", "lead_model",
+            "raw_json", "fetched_at", "description", "comments", "requirement", "requirements_json", "creation_time", "last_modified",
+            "program", "author", "user_tags", "phase", "severity", "problem_severity", "owner",
+            "detected_by", "detected_in_release", "vin", "ecu_no_of_changes", "parent_id",
+            "parent_child_type", "relation_to", "test_week", "risk_score", "tqr", "blocking_reason",
+            "error_occurrence", "solution_responsible", "reporting_class", "involved_i_step",
+            "first_use_sop_of_function", "tolerated_count", "reprel_changes", "tproject",
+            "function2modul", "model_series", "defect_category", "status_phase", "problem_finder_team",
+            "year", "assigned_ecu", "top_aida", "aida_english", "aida_businesskey", "solution_cluster",
+            "product_areas", "software_version", "function_responsible", "ecu_to_modul",
+        )
         payload: list[tuple[object, ...]] = []
+        duplicate_search_content_changed = False
         fetched_at = _utc_now()
         for row in defects:
             defect_id = str(row.get("id") or "").strip()
             if not defect_id:
                 continue
             existing = existing_rows.get(defect_id)
+            if "comments" not in row and existing is not None:
+                row = {**row, "comments": json.loads(str(existing["comments"] or "[]"))}
             status_phase = _first_named_value(row.get("phase"))
             incoming_team = _coalesce(_first_named_value(row.get("team")), team)
             lead_model = _first_named_value(row.get("lead_model_udf"))
             requirement_names = _reference_names(row.get("requirements"))
-            payload.append(
-                (
+            row_values = (
                     defect_id,
                     str(row.get("name") or "").strip(),
                     _preserve_dimension(existing, "project", ""),
@@ -688,27 +797,21 @@ class OctaneSourceStore:
                     _coalesce(str(row.get("software_version") or "").strip(), str(row.get("software_version_udf") or "").strip()),
                     _coalesce(_joined_named_values(row.get("function_responsible1_udf")), str(row.get("function_responsible") or "").strip()),
                     _coalesce(_first_named_value(row.get("ecu_to_modul_udf")), str(row.get("ecu_to_modul") or "").strip()),
-                )
             )
+            payload.append(row_values)
+            if _duplicate_search_content_changed(existing, defect_columns, row_values):
+                duplicate_search_content_changed = True
 
         self._upsert_rows(
             "octane_defects",
-            (
-                "defect_id", "name", "project", "market", "pu", "fv", "fvp", "team", "lead_model",
-                "raw_json", "fetched_at", "description", "comments", "requirement", "requirements_json", "creation_time", "last_modified",
-                "program", "author", "user_tags", "phase", "severity", "problem_severity", "owner",
-                "detected_by", "detected_in_release", "vin", "ecu_no_of_changes", "parent_id",
-                "parent_child_type", "relation_to", "test_week", "risk_score", "tqr", "blocking_reason",
-                "error_occurrence", "solution_responsible", "reporting_class", "involved_i_step",
-                "first_use_sop_of_function", "tolerated_count", "reprel_changes", "tproject",
-                "function2modul", "model_series", "defect_category", "status_phase", "problem_finder_team",
-                "year", "assigned_ecu", "top_aida", "aida_english", "aida_businesskey", "solution_cluster",
-                "product_areas", "software_version", "function_responsible", "ecu_to_modul"
-            ),
+            defect_columns,
             payload,
             conflict_columns=("defect_id",),
         )
-        self._conn.commit()
+        if duplicate_search_content_changed:
+            advance_duplicate_search_source_revision(self._conn)
+        if commit:
+            self._conn.commit()
         return len(payload)
 
     def replace_defect_history_events(
@@ -986,6 +1089,12 @@ class OctaneSourceStore:
             existing = existing_rows.get(mr_id)
             incoming_team = _coalesce(_first_named_value(row.get("run_team_000_udf")), team)
             incoming_lead_model = _first_named_value(row.get("exec_model_series_udf"))
+            if "testplatformid_udf" in row:
+                incoming_platform_identifier = _scalar_text(row.get("testplatformid_udf"))
+            elif "testplatformid" in row:
+                incoming_platform_identifier = _scalar_text(row.get("testplatformid"))
+            else:
+                incoming_platform_identifier = _preserve_dimension(existing, "testplatformid", "")
             payload.append(
                 (
                     mr_id,
@@ -1024,7 +1133,7 @@ class OctaneSourceStore:
                     _first_named_value(row.get("testing_tool_type")),
                     _joined_named_values(row.get("taxonomies")),
                     _coalesce(_first_named_value(row.get("set_udf")), _scalar_text(row.get("set_field"))),
-                    _scalar_text(row.get("testplatformid")),
+                    incoming_platform_identifier,
                     str(spec or "").strip(),
                     str(row.get("creation_time") or "").strip(),
                     str(row.get("last_modified") or "").strip(),

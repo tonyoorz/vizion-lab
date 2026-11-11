@@ -849,6 +849,10 @@ def _warmup(payload: Dict[str, Any], repo_root: Path) -> Dict[str, Any]:
     }
 
 
+def warmup_duplicate_search() -> Dict[str, Any]:
+    return _warmup({}, REPO_ROOT)
+
+
 def _feedback(payload: Dict[str, Any], repo_root: Path) -> Dict[str, Any]:
     query_text = str(payload.get('query_text') or '').strip()
     ticket_id = str(payload.get('ticket_id') or '').strip()

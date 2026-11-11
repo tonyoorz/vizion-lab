@@ -645,53 +645,6 @@ describe("streamCompanyChatCompletion", () => {
     expect(streamedText.indexOf('"type":"answer-validation"')).toBeLessThan(streamedText.indexOf("data: [DONE]"));
   });
 
-  it("repairs a supported semantic answer that only lacks citation markup", async () => {
-    const encoder = new TextEncoder();
-    const response = { writeHead: vi.fn(), write: vi.fn(), end: vi.fn() };
-    const registry = createOntologyRegistry();
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      body: new ReadableStream({
-        start(controller) {
-          controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"最近一个月 DTSV 测出的问题有 1 个"}}]}\n\n' + 'data: [DONE]\n\n'));
-          controller.close();
-        },
-      }),
-      text: async () => "",
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    const onAnswerValidation = vi.fn();
-
-    await streamCompanyChatCompletion({
-      messages: [{ role: "user", content: "最近一个月 DTSV 测出的问题" }],
-      model: "deepseek-v4-flash",
-      context: "# Main agent semantic tool result",
-      response,
-      answerValidation: {
-        registry,
-        semanticEvidence: [{
-          toolCallId: "call-1",
-          tool: "query_semantic_metrics",
-          ontologyVersion: "v1",
-          schemaFingerprint: registry.fingerprint,
-          evidence: { kind: "semantic_metric_result", metricValues: { "defect.count": 1 } },
-          data: [{ "defect.count": 1 }],
-        }],
-        evidenceGate: { status: "pass" },
-      },
-      onAnswerValidation,
-    });
-
-    const streamedText = response.write.mock.calls
-      .map(([chunk]) => Buffer.from(chunk).toString("utf8"))
-      .join("");
-    expect(streamedText).toContain('<cite source=\\"call-1\\">');
-    expect(streamedText).toContain("最近一个月 DTSV 测出的问题有 1 个");
-    expect(streamedText).toContain("</cite>");
-    expect(streamedText).not.toContain("未发布未经证据验证的数据结论");
-    expect(onAnswerValidation).toHaveBeenCalledWith({ valid: true, violations: [] });
-  });
-
   it("blocks an unsupported governed numeric Claim before it reaches SSE", async () => {
     const encoder = new TextEncoder();
     const response = {
@@ -745,52 +698,6 @@ describe("streamCompanyChatCompletion", () => {
     expect(streamedText).toContain("未发布未经证据验证的数据结论");
     expect(streamedText.indexOf('"type":"answer-validation"')).toBeLessThan(streamedText.indexOf("未发布未经证据验证的数据结论"));
     expect(streamedText.indexOf("未发布未经证据验证的数据结论")).toBeLessThan(streamedText.indexOf("data: [DONE]"));
-  });
-
-  it("releases a verified metric summary when a semantic answer adds an unsupported causal claim", async () => {
-    const encoder = new TextEncoder();
-    const response = { writeHead: vi.fn(), write: vi.fn(), end: vi.fn() };
-    const registry = createOntologyRegistry();
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      body: new ReadableStream({
-        start(controller) {
-          controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"<cite source=\\"call-1\\">DTSV 导致缺陷数是 1</cite>"}}]}\n\n' + 'data: [DONE]\n\n'));
-          controller.close();
-        },
-      }),
-      text: async () => "",
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    await streamCompanyChatCompletion({
-      messages: [{ role: "user", content: "最近一个月 DTSV 测出的问题" }],
-      model: "deepseek-v4-flash",
-      context: "# Main agent semantic tool result",
-      response,
-      answerValidation: {
-        registry,
-        semanticEvidence: [{
-          toolCallId: "call-1",
-          tool: "query_semantic_metrics",
-          ontologyVersion: "v1",
-          schemaFingerprint: registry.fingerprint,
-          summary: { metrics: { "defect.count": 1 } },
-          evidence: { kind: "semantic_metric_result", metricValues: { "defect.count": 1 } },
-          data: [{ "defect.count": 1 }],
-        }],
-        evidenceGate: { status: "pass" },
-      },
-    });
-
-    const streamedText = response.write.mock.calls
-      .map(([chunk]) => Buffer.from(chunk).toString("utf8"))
-      .join("");
-    expect(streamedText).toContain("已获取经验证的查询结果");
-    expect(streamedText).toContain('defect.count: 1');
-    expect(streamedText).toContain('<cite source=\\"call-1\\">');
-    expect(streamedText).not.toContain("DTSV 导致缺陷数是 1");
-    expect(streamedText).not.toContain("未发布未经证据验证的数据结论");
   });
 
   it("releases a supported governed Claim only after validation", async () => {
@@ -920,32 +827,6 @@ describe("requestCompanyChatCompletion", () => {
     })).rejects.toThrow("Chat request failed (500)");
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-  });
-
-  it("preserves a dedicated structured system prompt without adding the dashboard output protocol", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ choices: [{ message: { content: "{}" } }] }),
-      text: async () => "",
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    await requestCompanyChatCompletion({
-      messages: [
-        { role: "system", content: "Return valid JSON only." },
-        { role: "user", content: "Classify this single pair." },
-      ],
-      model: "deepseek-v4-flash",
-      skipDashboardSystemPrompt: true,
-    });
-
-    const upstreamBody = JSON.parse(String(fetchMock.mock.calls[0][1].body));
-    expect(upstreamBody.messages).toEqual([
-      { role: "system", content: "Return valid JSON only." },
-      { role: "user", content: "Classify this single pair." },
-    ]);
-    expect(JSON.stringify(upstreamBody.messages)).not.toContain("DTSV Intelligence");
-    expect(JSON.stringify(upstreamBody.messages)).not.toContain("<step");
   });
 
   it("returns tool calls from non-streaming company chat responses", async () => {

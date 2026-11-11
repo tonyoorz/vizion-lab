@@ -4,13 +4,20 @@ import concurrent.futures
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 import json
+import hashlib
 import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from backend.analytics.ingest.source_store import OctaneSourceStore
+from backend.analytics.ingest.source_store import (
+    DEFECT_WATERMARK_TEAM_SQL,
+    DEFECT_WATERMARK_VALUE_SQL,
+    DEFECT_WATERMARK_YEAR_SQL,
+    OctaneSourceStore,
+)
+from backend.analytics.ingest.client import DEFECT_FIELDS
 
 
 MANUAL_RUN_OVERLAP_DAYS = 3
@@ -53,6 +60,149 @@ class _TeamYearFetchResult:
     skipped_history_count: int
     history_payloads: dict[str, dict[str, Any]]
     manual_runs: list[dict[str, Any]]
+
+
+def refresh_octane_tickets_by_ids(
+    *,
+    source_db_path: Path,
+    ticket_ids: list[str],
+    client: Any,
+    evidence_directory: Path,
+    batch_size: int = 50,
+    allow_unavailable: bool = False,
+    expected_unavailable_ids: list[str] | None = None,
+) -> dict[str, object]:
+    normalized_ids = sorted({str(ticket_id).strip() for ticket_id in ticket_ids if str(ticket_id).strip()})
+    if not normalized_ids:
+        raise ValueError("Exact ticket scope must not be empty")
+    allowed_unavailable = {str(ticket_id).strip() for ticket_id in (expected_unavailable_ids or [])}
+    if not allowed_unavailable <= set(normalized_ids):
+        raise ValueError("Expected unavailable IDs fall outside the approved ticket scope")
+    if allow_unavailable and not allowed_unavailable:
+        raise ValueError("Unavailable exceptions must be explicitly enumerated")
+    if allowed_unavailable and not allow_unavailable:
+        raise ValueError("Explicit unavailable exceptions require allow_unavailable")
+    evidence_directory.mkdir(parents=True, exist_ok=True)
+    store = OctaneSourceStore(source_db_path)
+    store.create_tables()
+    store._conn.execute(
+        "CREATE TABLE IF NOT EXISTS octane_ticket_evidence_refresh_state ("
+        "defect_id TEXT PRIMARY KEY, defect_last_modified TEXT NOT NULL, "
+        "refreshed_at TEXT NOT NULL, comments_count INTEGER NOT NULL, "
+        "history_count INTEGER NOT NULL, evidence_fingerprint TEXT NOT NULL, "
+        "snapshot_file TEXT NOT NULL)"
+    )
+    store.commit()
+    verified_count = 0
+    total_comments = 0
+    total_history_rows = 0
+    unavailable_ticket_ids: list[str] = []
+    try:
+        for start in range(0, len(normalized_ids), max(1, batch_size)):
+            batch = normalized_ids[start:start + max(1, batch_size)]
+            batch_key = hashlib.sha256(json.dumps(batch).encode("utf-8")).hexdigest()[:16]
+            checkpoint = evidence_directory / f"batch_{start:05d}_{batch_key}.json"
+            if checkpoint.exists():
+                snapshot = json.loads(checkpoint.read_text(encoding="utf-8"))
+            else:
+                id_expression = ",".join("'" + ticket_id.replace("'", "\\'") + "'" for ticket_id in batch)
+                defects = client.fetch_rows(
+                    "defects", fields=DEFECT_FIELDS,
+                    query='"(id IN ' + id_expression + ')"', limit=max(100, len(batch) + 1),
+                )
+                returned_ids = {str(row.get("id")) for row in defects}
+                if len(returned_ids) != len(defects) or not returned_ids <= set(batch):
+                    raise ValueError("Unexpected metadata IDs in exact ticket scope")
+                missing_ids = sorted(set(batch) - returned_ids)
+                if missing_ids and not allow_unavailable:
+                    raise ValueError("Incomplete metadata coverage for exact ticket scope")
+                if set(missing_ids) - allowed_unavailable:
+                    raise ValueError(f"Unapproved unavailable ticket IDs: {sorted(set(missing_ids) - allowed_unavailable)}")
+                available_ids = sorted(returned_ids)
+                comments = client.fetch_comments_for_defects(available_ids) if available_ids else []
+                histories = client.fetch_histories_for_defects(available_ids, max_workers=2) if available_ids else {}
+                snapshot = {
+                    "ticket_ids": batch,
+                    "unavailable_ticket_ids": missing_ids,
+                    "fetched_at": datetime.now(timezone.utc).isoformat(),
+                    "defects": defects, "comments": comments, "histories": histories,
+                }
+            if snapshot.get("ticket_ids") != batch:
+                raise ValueError("Checkpoint ticket scope mismatch")
+            defects = snapshot["defects"]
+            histories = snapshot["histories"]
+            available_ids = {str(row["id"]) for row in defects}
+            missing_ids = sorted(set(batch) - available_ids)
+            if len(available_ids) != len(defects) or not available_ids <= set(batch) or missing_ids != sorted(snapshot.get("unavailable_ticket_ids", [])):
+                raise ValueError("Invalid metadata/unavailable coverage in source checkpoint")
+            fetched_at = datetime.fromisoformat(str(snapshot["fetched_at"]).replace("Z", "+00:00"))
+            if fetched_at.tzinfo is None or fetched_at < datetime.now(timezone.utc) - timedelta(hours=24):
+                raise ValueError("Stale source checkpoint; start a new approved repair directory")
+            if missing_ids and not allow_unavailable:
+                raise ValueError("Incomplete metadata coverage for exact ticket scope")
+            if set(missing_ids) - allowed_unavailable:
+                raise ValueError(f"Unapproved unavailable ticket IDs: {sorted(set(missing_ids) - allowed_unavailable)}")
+            if set(histories) != available_ids:
+                raise ValueError("Incomplete history coverage for exact ticket scope")
+            comments_by_ticket: dict[str, list[dict[str, object]]] = {ticket_id: [] for ticket_id in available_ids}
+            for comment in snapshot["comments"]:
+                ticket_id = str(comment.get("defect_id") or (comment.get("owner_work_item") or {}).get("id") or "")
+                if ticket_id not in comments_by_ticket:
+                    raise ValueError("Comment owner does not match requested ticket scope")
+                comments_by_ticket[ticket_id].append(comment)
+            for ticket_id, history in histories.items():
+                if not isinstance(history.get("data"), list) or history.get("total_count") != len(history["data"]):
+                    raise ValueError(f"Incomplete history coverage for {ticket_id}")
+            if not checkpoint.exists():
+                checkpoint.write_text(json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
+            try:
+                for defect in defects:
+                    ticket_id = str(defect["id"])
+                    defect = {**defect, "comments": comments_by_ticket[ticket_id]}
+                    last_modified = str(defect.get("last_modified") or "")
+                    store.upsert_defects([defect], team="", commit=False)
+                    store.record_comment_refresh_state(
+                        [(ticket_id, last_modified, json.dumps(defect["comments"], ensure_ascii=False))]
+                    )
+                    history_count = store.upsert_defect_history_events(
+                        defect_id=ticket_id, payload=histories[ticket_id],
+                        defect_last_modified=last_modified, commit=False,
+                    )
+                    fingerprint = hashlib.sha256(
+                        json.dumps({"defect": defect, "history": histories[ticket_id]}, sort_keys=True, ensure_ascii=False).encode("utf-8")
+                    ).hexdigest()
+                    stored = store._conn.execute(
+                        "SELECT comments, raw_json FROM octane_defects WHERE defect_id=?", (ticket_id,)
+                    ).fetchone()
+                    if json.loads(stored["comments"]) != defect["comments"] or json.loads(stored["raw_json"])["comments"] != defect["comments"]:
+                        raise ValueError(f"Canonical comment verification failed for {ticket_id}")
+                    store._conn.execute(
+                        "INSERT INTO octane_ticket_evidence_refresh_state VALUES (?, ?, ?, ?, ?, ?, ?) "
+                        "ON CONFLICT(defect_id) DO UPDATE SET defect_last_modified=excluded.defect_last_modified, "
+                        "refreshed_at=excluded.refreshed_at, comments_count=excluded.comments_count, "
+                        "history_count=excluded.history_count, evidence_fingerprint=excluded.evidence_fingerprint, snapshot_file=excluded.snapshot_file",
+                        (ticket_id, last_modified, snapshot["fetched_at"], len(defect["comments"]), history_count, fingerprint, str(checkpoint.resolve())),
+                    )
+                    total_comments += len(defect["comments"])
+                    total_history_rows += history_count
+                store.commit()
+            except Exception:
+                store.rollback()
+                raise
+            verified_count += len(available_ids)
+            unavailable_ticket_ids.extend(missing_ids)
+            print(f"Exact-ID source refresh processed={start + len(batch)}/{len(normalized_ids)} verified={verified_count} unavailable={len(unavailable_ticket_ids)} comments={total_comments} history_rows={total_history_rows}", flush=True)
+    finally:
+        store.close()
+    return {
+        "requested_ticket_count": len(normalized_ids),
+        "verified_ticket_count": verified_count,
+        "comment_count": total_comments,
+        "history_row_count": total_history_rows,
+        "unavailable_ticket_ids": sorted(unavailable_ticket_ids),
+        "expected_unavailable_ticket_ids": sorted(allowed_unavailable),
+        "evidence_directory": str(evidence_directory),
+    }
 
 
 def _select_teams(request: IngestRequest, client: Any) -> list[dict[str, str]]:
@@ -164,33 +314,53 @@ def _load_incremental_defect_since_by_year(
     years: tuple[int, ...],
     overlap_days: int = DEFECT_OVERLAP_DAYS,
 ) -> dict[int, str | None]:
-    watermarks: dict[int, str | None] = {int(year): None for year in years}
-    if not source_db_path.exists() or not years:
+    return _load_incremental_defect_since_by_team(
+        source_db_path=source_db_path,
+        team_names=(team_name,),
+        years=years,
+        overlap_days=overlap_days,
+    )[team_name]
+
+
+def _load_incremental_defect_since_by_team(
+    *,
+    source_db_path: Path,
+    team_names: tuple[str, ...],
+    years: tuple[int, ...],
+    overlap_days: int = DEFECT_OVERLAP_DAYS,
+) -> dict[str, dict[int, str | None]]:
+    watermarks: dict[str, dict[int, str | None]] = {
+        team_name: {int(year): None for year in years}
+        for team_name in team_names
+    }
+    if not source_db_path.exists() or not team_names or not years:
         return watermarks
 
+    placeholders_teams = ", ".join("?" for _ in team_names)
     placeholders_years = ", ".join("?" for _ in years)
     query = f"""
         SELECT
-            CAST(year AS INTEGER) AS defect_year,
-            MAX(COALESCE(NULLIF(TRIM(CAST(last_modified AS TEXT)), ''), NULLIF(TRIM(CAST(fetched_at AS TEXT)), ''))) AS watermark
+            {DEFECT_WATERMARK_TEAM_SQL} AS scope_team,
+            {DEFECT_WATERMARK_YEAR_SQL} AS defect_year,
+            MAX({DEFECT_WATERMARK_VALUE_SQL}) AS watermark
         FROM octane_defects
-        WHERE CAST(year AS INTEGER) IN ({placeholders_years})
-          AND COALESCE(NULLIF(TRIM(CAST(problem_finder_team AS TEXT)), ''), NULLIF(TRIM(CAST(team AS TEXT)), '')) = ?
-        GROUP BY CAST(year AS INTEGER)
+        WHERE {DEFECT_WATERMARK_TEAM_SQL} IN ({placeholders_teams})
+          AND {DEFECT_WATERMARK_YEAR_SQL} IN ({placeholders_years})
+        GROUP BY {DEFECT_WATERMARK_TEAM_SQL}, {DEFECT_WATERMARK_YEAR_SQL}
     """
     conn = sqlite3.connect(str(source_db_path))
     try:
-        rows = conn.execute(query, [*years, team_name]).fetchall()
+        rows = conn.execute(query, [*team_names, *years]).fetchall()
     except sqlite3.Error:
         rows = []
     finally:
         conn.close()
 
-    for defect_year, watermark in rows:
+    for team_name, defect_year, watermark in rows:
         parsed = _parse_iso_datetime(watermark)
         if parsed is None:
             continue
-        watermarks[int(defect_year)] = (
+        watermarks[str(team_name)][int(defect_year)] = (
             parsed - timedelta(days=max(0, int(overlap_days)))
         ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     return watermarks
@@ -364,12 +534,38 @@ def _fetch_team_year_source(
 
 
 def refresh_octane_source(*, request: IngestRequest, client: Any) -> dict[str, int]:
+    if request.include_history:
+        preflight_started_at = time.perf_counter()
+        print("Source refresh history access preflight...", flush=True)
+        try:
+            client.check_history_access()
+        except Exception as exc:
+            status_code = getattr(getattr(exc, "response", None), "status_code", "unknown")
+            print(
+                "Source refresh history access preflight failed: "
+                f"status={status_code} duration_seconds={_elapsed_seconds(preflight_started_at)}",
+                flush=True,
+            )
+            raise
+        print(
+            "Source refresh history access preflight passed: "
+            f"duration_seconds={_elapsed_seconds(preflight_started_at)}",
+            flush=True,
+        )
+
+    store_started_at = time.perf_counter()
+    print("Source refresh initializing local store...", flush=True)
     store = OctaneSourceStore(request.source_db_path)
     store.create_tables()
+    print(
+        f"Source refresh local store ready duration_seconds={_elapsed_seconds(store_started_at)}",
+        flush=True,
+    )
 
     defect_rows = 0
     history_rows = 0
     manual_run_rows = 0
+    manual_run_ids: list[str] = []
     testcase_rows = 0
     testcase_relation_rows = 0
     defect_ids: list[str] = []
@@ -379,19 +575,26 @@ def refresh_octane_source(*, request: IngestRequest, client: Any) -> dict[str, i
     history_skipped_defects = 0
 
     try:
+        selected_teams = _select_teams(request, client)
+        incremental_defect_since_by_team: dict[str, dict[int, str | None]] = {}
+        if not request.force_defect_refresh:
+            watermark_started_at = time.perf_counter()
+            print(f"Source refresh loading defect watermarks teams={len(selected_teams)}...", flush=True)
+            incremental_defect_since_by_team = _load_incremental_defect_since_by_team(
+                source_db_path=request.source_db_path,
+                team_names=tuple(str(team.get("name") or "").strip() for team in selected_teams),
+                years=request.years,
+            )
+            print(
+                "Source refresh defect watermarks loaded: "
+                f"teams={len(selected_teams)} duration_seconds={_elapsed_seconds(watermark_started_at)}",
+                flush=True,
+            )
         targets: list[_TeamYearTarget] = []
-        for team in _select_teams(request, client):
+        for team in selected_teams:
             team_id = str(team.get("id") or "").strip()
             team_name = str(team.get("name") or "").strip()
-            incremental_defect_since = (
-                {int(year): None for year in request.years}
-                if request.force_defect_refresh
-                else _load_incremental_defect_since_by_year(
-                    source_db_path=request.source_db_path,
-                    team_name=team_name,
-                    years=request.years,
-                )
-            )
+            incremental_defect_since = incremental_defect_since_by_team.get(team_name, {})
             for year in request.years:
                 targets.append(
                     _TeamYearTarget(
@@ -462,6 +665,11 @@ def refresh_octane_source(*, request: IngestRequest, client: Any) -> dict[str, i
 
             if request.include_testing:
                 manual_run_rows += store.upsert_manual_runs(result.manual_runs, team=target.team_name, year=target.year)
+                manual_run_ids.extend(
+                    str(row.get("id") or "").strip()
+                    for row in result.manual_runs
+                    if str(row.get("id") or "").strip()
+                )
                 testcase_summary = store.rebuild_testcases_from_runs(result.manual_runs, team=target.team_name)
                 testcase_rows += testcase_summary["testcase_rows"]
                 testcase_relation_rows += testcase_summary["relation_rows"]
@@ -481,6 +689,7 @@ def refresh_octane_source(*, request: IngestRequest, client: Any) -> dict[str, i
         "history_skipped_defects": history_skipped_defects,
         "history_event_rows": history_rows,
         "manual_run_rows": manual_run_rows,
+        "manual_run_ids": sorted(set(manual_run_ids)),
         "testcase_rows": testcase_rows,
         "testcase_relation_rows": testcase_relation_rows,
     }

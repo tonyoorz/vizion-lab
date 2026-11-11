@@ -3,12 +3,15 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import time
+from collections.abc import Callable
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
 
 from backend.analytics.asset_loader import load_mapping_assets
+from backend.analytics.duplicate_search_state import advance_duplicate_search_source_revision
 
 
 BUSINESS_PROJECT_RULE_VERSION = "2026-09-03-v1"
@@ -548,7 +551,9 @@ def run_processor_pipeline(
     dry_run: bool = False,
     report_path: Path | str | None = None,
     manual_run_ids: Sequence[str] | None = None,
-) -> dict[str, int]:
+    defect_ids: Sequence[str] | None = None,
+    progress: Callable[[str], None] | None = None,
+) -> dict[str, object]:
     assets = load_mapping_assets(asset_root)
     aida_map = _aida_dimension_map(assets.aida_rows)
     vin_market_map = _vin_market_map(assets.vin_project_rows)
@@ -558,6 +563,36 @@ def run_processor_pipeline(
     try:
         defect_columns = _table_columns(conn, "octane_defects")
         _ensure_tproject_column(conn, defect_columns, apply=not dry_run)
+        manual_run_columns = _table_columns(conn, "octane_manual_runs")
+        normalized_manual_run_ids = (
+            tuple(sorted({str(run_id).strip() for run_id in manual_run_ids if str(run_id).strip()}))
+            if manual_run_ids is not None
+            else None
+        )
+        normalized_defect_ids = (
+            tuple(sorted({str(defect_id).strip() for defect_id in defect_ids if str(defect_id).strip()}))
+            if defect_ids is not None
+            else None
+        )
+        manual_parent_defect_ids: set[str] = set()
+        if normalized_manual_run_ids and "defect_id" in manual_run_columns:
+            for start_index in range(0, len(normalized_manual_run_ids), 900):
+                batch_ids = normalized_manual_run_ids[start_index : start_index + 900]
+                placeholders = ", ".join("?" for _ in batch_ids)
+                manual_parent_defect_ids.update(
+                    str(row[0]).strip()
+                    for row in conn.execute(
+                        f"SELECT DISTINCT defect_id FROM octane_manual_runs WHERE mr_id IN ({placeholders})",
+                        batch_ids,
+                    ).fetchall()
+                    if str(row[0] or "").strip()
+                )
+
+        scoped_defect_ids: tuple[str, ...] | None
+        if normalized_defect_ids is None and normalized_manual_run_ids is None:
+            scoped_defect_ids = None
+        else:
+            scoped_defect_ids = tuple(sorted(set(normalized_defect_ids or ()) | manual_parent_defect_ids))
         defect_select_parts = [
             "defect_id",
             "project",
@@ -577,11 +612,34 @@ def run_processor_pipeline(
             "fv",
             "fvp",
         ]
-        defect_rows = conn.execute(
-            f"SELECT {', '.join(defect_select_parts)} FROM octane_defects ORDER BY defect_id"
-        ).fetchall()
+        defect_selection_started_at = time.perf_counter()
+        if scoped_defect_ids is None:
+            defect_rows = conn.execute(
+                f"SELECT {', '.join(defect_select_parts)} FROM octane_defects ORDER BY defect_id"
+            ).fetchall()
+        elif not scoped_defect_ids:
+            defect_rows = []
+        else:
+            defect_rows = []
+            for start_index in range(0, len(scoped_defect_ids), 900):
+                batch_ids = scoped_defect_ids[start_index : start_index + 900]
+                placeholders = ", ".join("?" for _ in batch_ids)
+                defect_rows.extend(
+                    conn.execute(
+                        f"""
+                        SELECT {', '.join(defect_select_parts)}
+                        FROM octane_defects
+                        WHERE defect_id IN ({placeholders})
+                        ORDER BY defect_id
+                        """,
+                        batch_ids,
+                    ).fetchall()
+                )
+        defect_selection_duration_seconds = round(time.perf_counter() - defect_selection_started_at, 3)
 
+        defect_processing_started_at = time.perf_counter()
         defect_updates: list[tuple[str, str, str, str]] = []
+        duplicate_search_dimension_updates: set[str] = set()
         tproject_updates: list[tuple[str, str]] = []
         fillable_rows: list[dict[str, object]] = []
         conflict_rows: list[dict[str, object]] = []
@@ -642,6 +700,8 @@ def run_processor_pipeline(
 
             if project != str(row["project"] or "").strip() or fv != str(row["fv"] or "").strip() or fvp != str(row["fvp"] or "").strip() or pu != str(row["pu"] or "").strip() or market != str(row["market"] or "").strip():
                 defect_updates.append((project, market, fv, fvp, pu, str(row["defect_id"])))
+                if project != str(row["project"] or "").strip() or pu != str(row["pu"] or "").strip():
+                    duplicate_search_dimension_updates.add(str(row["defect_id"]))
 
         if defect_updates and not dry_run:
             conn.executemany(
@@ -653,8 +713,18 @@ def run_processor_pipeline(
                 "UPDATE octane_defects SET tproject=? WHERE defect_id=?",
                 tproject_updates,
             )
+        if duplicate_search_dimension_updates and not dry_run:
+            advance_duplicate_search_source_revision(conn)
+        defect_processing_duration_seconds = round(time.perf_counter() - defect_processing_started_at, 3)
+        if progress is not None:
+            progress(
+                "Processor defects: "
+                f"selected={len(defect_rows)} processed={len(defect_rows)} "
+                f"updated={len(defect_updates)} tproject_updates={len(tproject_updates)} "
+                f"select_duration_seconds={defect_selection_duration_seconds} "
+                f"process_duration_seconds={defect_processing_duration_seconds}"
+            )
 
-        manual_run_columns = _table_columns(conn, "octane_manual_runs")
         run_select_parts = [
             "mr_id",
             "defect_id",
@@ -667,12 +737,7 @@ def run_processor_pipeline(
             "tester" if "tester" in manual_run_columns else "'' AS tester",
             "raw_json" if "raw_json" in manual_run_columns else "'{}' AS raw_json",
         ]
-        normalized_manual_run_ids = None
-        if manual_run_ids is not None:
-            normalized_manual_run_ids = tuple(
-                sorted({str(run_id).strip() for run_id in manual_run_ids if str(run_id).strip()})
-            )
-
+        manual_run_selection_started_at = time.perf_counter()
         if normalized_manual_run_ids is None:
             run_rows = conn.execute(
                 f"SELECT {', '.join(run_select_parts)} FROM octane_manual_runs ORDER BY mr_id"
@@ -695,11 +760,13 @@ def run_processor_pipeline(
                         batch_ids,
                     ).fetchall()
                 )
+        manual_run_selection_duration_seconds = round(time.perf_counter() - manual_run_selection_started_at, 3)
         run_update_fields = [
             field_name
             for field_name in ("project", "fv", "fvp", "test_week", "pu", "top_aida", "tester")
             if field_name in manual_run_columns
         ]
+        manual_run_processing_started_at = time.perf_counter()
         run_updates: list[tuple[object, ...]] = []
         for row in run_rows:
             parent = resolved_defect_dimensions.get(str(row["defect_id"] or "").strip(), {})
@@ -779,6 +846,19 @@ def run_processor_pipeline(
                 f"UPDATE octane_manual_runs SET {set_clause} WHERE mr_id=?",
                 run_updates,
             )
+        manual_run_processing_duration_seconds = round(time.perf_counter() - manual_run_processing_started_at, 3)
+        if progress is not None:
+            progress(
+                "Processor manual runs: "
+                f"selected={len(run_rows)} processed={len(run_rows)} updated={len(run_updates)} "
+                f"select_duration_seconds={manual_run_selection_duration_seconds} "
+                f"process_duration_seconds={manual_run_processing_duration_seconds}"
+            )
+
+        updated_defect_ids = sorted(
+            {str(update[-1]) for update in defect_updates}
+            | {str(defect_id) for _, defect_id in tproject_updates}
+        )
 
         if dry_run:
             conn.rollback()
@@ -802,13 +882,21 @@ def run_processor_pipeline(
                 "tproject_updates": 0,
                 "fillable_rows": len(fillable_rows),
                 "conflict_rows": len(conflict_rows),
+                "updated_defect_ids": [],
             }
 
+        commit_started_at = time.perf_counter()
         conn.commit()
+        if progress is not None:
+            progress(
+                "Processor SQLite commit: "
+                f"duration_seconds={round(time.perf_counter() - commit_started_at, 3)}"
+            )
         return {
             "defect_updates": len(defect_updates),
             "run_updates": len(run_updates),
             "tproject_updates": len(tproject_updates),
+            "updated_defect_ids": updated_defect_ids,
         }
     finally:
         conn.close()

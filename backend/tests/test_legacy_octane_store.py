@@ -7,7 +7,31 @@ from pathlib import Path
 from backend.analytics.schema import ensure_schema
 from backend.analytics.legacy_octane_db import OctaneSQLiteStore
 from backend.analytics.ingest.source_store import OctaneSourceStore
-from backend.analytics.ingest.client import DEFECT_FIELDS
+from backend.analytics.ingest.client import DEFECT_FIELDS, MANUAL_RUN_FIELDS
+
+
+def test_manual_run_platform_field_prefers_native_and_preserves_omitted_updates(tmp_path: Path) -> None:
+    assert "testplatformid_udf" in MANUAL_RUN_FIELDS
+    db_path = tmp_path / "platform_source.db"
+    ensure_schema(db_path)
+    store = OctaneSQLiteStore(str(db_path))
+    try:
+        store.create_tables()
+        store.upsert_manual_runs_batch([
+            {"id": "MR-NATIVE", "testplatformid_udf": "CURRENT", "testplatformid": "OLD"},
+            {"id": "MR-LEGACY", "testplatformid": "LEGACY"},
+        ], year=2026, spec="R-26-01")
+        store.upsert_manual_runs_batch([{"id": "MR-NATIVE", "status": {"name": "Passed"}}], year=2026, spec="R-26-01")
+        with sqlite3.connect(db_path) as connection:
+            rows = dict(connection.execute("SELECT mr_id, testplatformid FROM octane_manual_runs"))
+        assert rows == {"MR-NATIVE": "CURRENT", "MR-LEGACY": "LEGACY"}
+        store.upsert_manual_runs_batch([
+            {"id": "MR-NATIVE", "testplatformid_udf": None, "testplatformid": "STALE"},
+        ], year=2026, spec="R-26-01")
+    finally:
+        store.close()
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("SELECT testplatformid FROM octane_manual_runs WHERE mr_id='MR-NATIVE'").fetchone()[0] == ""
 
 
 def test_legacy_octane_store_writes_into_current_source_schema(tmp_path: Path) -> None:
@@ -73,6 +97,7 @@ def test_legacy_octane_store_writes_into_current_source_schema(tmp_path: Path) -
                     "run_by": {"full_name": "Tester One"},
                     "release": {"name": "R-26-01"},
                     "finished_udf": "2026-01-04T00:00:00Z",
+                    "testplatformid_udf": "PLATFORM-A",
                 }
             ],
             year=2026,
@@ -136,7 +161,7 @@ def test_legacy_octane_store_writes_into_current_source_schema(tmp_path: Path) -
             "SELECT action, user_name, old_value_text, new_value_text FROM octane_defect_history_events WHERE defect_id='D-1'"
         ).fetchone()
         manual_row = conn.execute(
-            "SELECT mr_id, test_id, team, lead_model, tester, top_aida FROM octane_manual_runs WHERE mr_id='MR-1'"
+            "SELECT mr_id, test_id, team, lead_model, tester, top_aida, testplatformid FROM octane_manual_runs WHERE mr_id='MR-1'"
         ).fetchone()
         testcase_row = conn.execute(
             "SELECT test_id, scope_team, scope_release, defect_ids_json, feature_ids_json, story_ids_json, manual_test_ids_json FROM octane_testcases WHERE test_id='T-1'"
@@ -189,7 +214,7 @@ def test_legacy_octane_store_writes_into_current_source_schema(tmp_path: Path) -
     assert history_row[2] == "In Review"
     assert history_row[3] == "Open"
 
-    assert manual_row == ("MR-1", "T-1", "DTSV_China", "NA5", "Tester One", "Speech AIDA")
+    assert manual_row == ("MR-1", "T-1", "DTSV_China", "NA5", "Tester One", "Speech AIDA", "PLATFORM-A")
     assert testcase_row[0] == "T-1"
     assert testcase_row[1] == "DTSV_China"
     assert testcase_row[2] == "R-26-01"
@@ -594,6 +619,63 @@ def test_octane_source_store_preserves_unknown_tproject_during_reingest(tmp_path
         conn.close()
 
     assert tproject == "Unknown"
+
+
+def test_octane_source_store_advances_duplicate_search_revision_only_for_searchable_changes(tmp_path: Path) -> None:
+    db_path = tmp_path / "qgate_raw.db"
+    ensure_schema(db_path)
+    base_defect = {
+        "id": "D-SEARCH-REVISION",
+        "name": "Wake word does not work",
+        "description": "Initial searchable description",
+        "team": {"name": "DTSV_China"},
+        "phase": {"name": "03-In Analysis"},
+        "severity": {"name": "Medium"},
+    }
+
+    store = OctaneSourceStore(db_path)
+    try:
+        store.create_tables()
+        store.upsert_defects([base_defect], team="DTSV_China", year=2026)
+        first_revision = store._conn.execute(
+            """
+            SELECT source_revision
+            FROM duplicate_search_source_state
+            WHERE store_name = 'octane_defects'
+            """
+        ).fetchone()[0]
+
+        store.upsert_defects(
+            [{**base_defect, "severity": {"name": "High"}}],
+            team="DTSV_China",
+            year=2026,
+        )
+        second_revision = store._conn.execute(
+            """
+            SELECT source_revision
+            FROM duplicate_search_source_state
+            WHERE store_name = 'octane_defects'
+            """
+        ).fetchone()[0]
+
+        store.upsert_defects(
+            [{**base_defect, "description": "Changed searchable description"}],
+            team="DTSV_China",
+            year=2026,
+        )
+        third_revision = store._conn.execute(
+            """
+            SELECT source_revision
+            FROM duplicate_search_source_state
+            WHERE store_name = 'octane_defects'
+            """
+        ).fetchone()[0]
+    finally:
+        store.close()
+
+    assert first_revision == 1
+    assert second_revision == first_revision
+    assert third_revision == first_revision + 1
 
 
 def test_octane_source_store_flattens_requirement_names_from_defect_payload(tmp_path: Path) -> None:

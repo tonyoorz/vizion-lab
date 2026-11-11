@@ -6,6 +6,7 @@ from backend.fleem_client import (
     FLEEM_GRAPHQL_URL,
     fetch_platform_snapshot,
     fetch_platform_snapshot_from_browser_page,
+    fetch_platform_snapshot_from_browser_profile,
 )
 
 
@@ -132,6 +133,48 @@ def test_fetch_platform_snapshot_from_browser_page_keeps_bearer_token_in_browser
     }
     assert "localStorage.getItem('token')" in page.script
     assert "Authorization" in page.script
+
+
+def test_browser_profile_requires_tls_certificate_validation(tmp_path, monkeypatch) -> None:
+    import sys
+    from types import SimpleNamespace
+
+    launch_options = {}
+    closed = []
+
+    class FakePage:
+        def goto(self, *args, **kwargs):
+            return None
+
+        def wait_for_function(self, *args, **kwargs):
+            return None
+
+        def evaluate(self, script, arguments):
+            return {"page": {"total": 1}, "platforms": [{"_id": "one", "ids": {"vin": "VIN-1"}}]}
+
+    class FakeChromium:
+        def launch_persistent_context(self, profile_dir, **kwargs):
+            launch_options.update(kwargs)
+            return SimpleNamespace(pages=[FakePage()], close=lambda: closed.append(True))
+
+    class FakePlaywright:
+        def __enter__(self):
+            return SimpleNamespace(chromium=FakeChromium())
+
+        def __exit__(self, *args):
+            return None
+
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", SimpleNamespace(sync_playwright=FakePlaywright))
+
+    snapshot = fetch_platform_snapshot_from_browser_profile(
+        profile_dir=tmp_path / "browser-profile",
+        view_url='https://integrate.bmwgroup.net/fleem/Platforms?iql=ids.fleet%3D%22TEST%22&platformStatus=Active',
+        headless=True,
+    )
+
+    assert launch_options.get("ignore_https_errors") is False
+    assert snapshot["total"] == 1
+    assert closed == [True]
 
 
 def test_fetch_platform_snapshot_includes_project_market_classification_from_vin() -> None:

@@ -12,10 +12,6 @@ dist
 dist-ssr
 *.local
 
-# Environment files (contain secrets — never commit)
-.env
-.env.local
-
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
@@ -26,6 +22,8 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+.env
+.deployment/
 backend/database/octane_data.db
 backend/database/*.sqlite
 backend/database/*.db
@@ -40,7 +38,6 @@ graphify-out/
 cookie.txt
 cookie.txt.candidate
 login_info.txt
-.session_cache/
 vite.config.ts.timestamp-*
 database/hot/*.db-shm
 database/hot/*.db-wal
@@ -51,11 +48,15 @@ database/**/*.sqlite
 database/**/*.duckdb
 database/**/*.db.bak-*
 database/cold/parquet/**
+database/hot/business_project_*audit*.json
+database/hot/business_project_*before_apply*.json
 docs/qgate-reports/generated_runs/
 docs/agent-research-*.html
 docs/text2sql-chatbi-ecosystem-report-*.md
+exports/
 scripts/after_over_comments.py
 scripts/mine_qgate_comments.py
+scripts/IDC_EVO_Phase09_Rejected_Ticket_Analysis.xlsx
 scripts/report_data.json
 scripts/sem_accuracy_*.html
 scripts/sem_accuracy_*.json

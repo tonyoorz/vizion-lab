@@ -3,6 +3,7 @@ import sqlite3
 
 import pytest
 
+from backend.analytics import read_models
 from backend.analytics.config import (
 	DEFAULT_FULL_PICTURE_SOURCE_DB_PATH,
 	DEFAULT_FULL_PICTURE_HOT_DB_PATH,
@@ -185,6 +186,57 @@ def test_ensure_outcome_store_rejects_null_defect_id(tmp_path):
 				""",
 				(None, 0, 0, None, None, 0, "sig", "2026-05-26T00:00:00Z"),
 			)
+	finally:
+		conn.close()
+
+
+def test_dashboard_snapshot_pruning_preserves_published_version_and_bounds_retention():
+	conn = sqlite3.connect(":memory:")
+	try:
+		conn.executescript(
+			"""
+			CREATE TABLE dashboard_ticket_snapshot_rows (
+				snapshot_version TEXT NOT NULL,
+				ticket_id TEXT NOT NULL
+			);
+			CREATE TABLE dashboard_ticket_snapshot_state (
+				snapshot_version TEXT PRIMARY KEY,
+				row_count INTEGER NOT NULL,
+				refreshed_at TEXT NOT NULL
+			);
+			CREATE TABLE dashboard_snapshot_pointer (
+				pointer_name TEXT PRIMARY KEY,
+				snapshot_version TEXT NOT NULL
+			);
+			INSERT INTO dashboard_snapshot_pointer VALUES ('active', 'snapshot-published');
+			INSERT INTO dashboard_ticket_snapshot_rows VALUES
+				('snapshot-published', 'D-1'), ('snapshot-obsolete', 'D-1'), ('live-current', 'D-1');
+			INSERT INTO dashboard_ticket_snapshot_state VALUES
+				('snapshot-published', 1, '2026-10-20T09:59:09Z'),
+				('snapshot-obsolete', 1, '2026-10-19T09:59:09Z'),
+				('live-current', 1, '2026-10-20T10:06:08Z');
+			"""
+		)
+
+		removed_rows = read_models._prune_stale_dashboard_snapshots(conn, keep_version="live-current")
+
+		assert removed_rows == 1
+		assert {row[0] for row in conn.execute("SELECT snapshot_version FROM dashboard_ticket_snapshot_rows")} == {
+			"snapshot-published", "live-current",
+		}
+		assert {row[0] for row in conn.execute("SELECT snapshot_version FROM dashboard_ticket_snapshot_state")} == {
+			"snapshot-published", "live-current",
+		}
+		assert conn.execute("SELECT snapshot_version FROM dashboard_snapshot_pointer WHERE pointer_name='active'").fetchone()[0] == "snapshot-published"
+
+		conn.execute("UPDATE dashboard_snapshot_pointer SET snapshot_version='live-current' WHERE pointer_name='active'")
+		conn.execute("INSERT INTO dashboard_ticket_snapshot_rows VALUES ('live-next', 'D-1')")
+		conn.execute("INSERT INTO dashboard_ticket_snapshot_state VALUES ('live-next', 1, '2026-10-21T01:00:00Z')")
+		read_models._prune_stale_dashboard_snapshots(conn, keep_version="live-next")
+
+		assert {row[0] for row in conn.execute("SELECT snapshot_version FROM dashboard_ticket_snapshot_rows")} == {
+			"live-current", "live-next",
+		}
 	finally:
 		conn.close()
 
@@ -504,7 +556,7 @@ def test_refresh_materialized_outcomes_can_update_selected_defects(tmp_path):
 	assert loaded["D-2"]["is_rejected_directly"] is True
 
 
-def test_refresh_materialized_outcomes_can_update_selected_snapshot_rows(tmp_path):
+def test_refresh_materialized_outcomes_can_update_selected_snapshot_rows(tmp_path, monkeypatch):
 	source_db = tmp_path / "qgate_data.db"
 	hot_db = tmp_path / "database" / "hot" / "vizion_serving.db"
 	_seed_history_events(
@@ -541,6 +593,14 @@ def test_refresh_materialized_outcomes_can_update_selected_snapshot_rows(tmp_pat
 		conn.close()
 
 	refresh_materialized_outcomes(source_db, hot_db, force=True)
+	build_calls: list[object] = []
+	original_build_dataset = read_models._build_full_picture_dataset
+
+	def record_build_dataset(*args, **kwargs):
+		build_calls.append(kwargs.get("defect_ids"))
+		return original_build_dataset(*args, **kwargs)
+
+	monkeypatch.setattr(read_models, "_build_full_picture_dataset", record_build_dataset)
 	conn = sqlite3.connect(source_db)
 	try:
 		conn.execute("UPDATE octane_defects SET name='Updated D2' WHERE defect_id='D-2'")
@@ -551,6 +611,7 @@ def test_refresh_materialized_outcomes_can_update_selected_snapshot_rows(tmp_pat
 	second = refresh_materialized_outcomes(source_db, hot_db, force=False, defect_ids=("D-2",))
 
 	assert second["incremental"] is True
+	assert build_calls == [("D-2",)]
 
 	conn = sqlite3.connect(hot_db)
 	try:
@@ -571,10 +632,78 @@ def test_refresh_materialized_outcomes_can_update_selected_snapshot_rows(tmp_pat
 			""",
 			(latest_snapshot_version,),
 		).fetchall()
+		snapshot_row_count = conn.execute(
+			"""
+			SELECT row_count
+			FROM dashboard_ticket_snapshot_state
+			WHERE snapshot_version = ?
+			""",
+			(latest_snapshot_version,),
+		).fetchone()[0]
 	finally:
 		conn.close()
 
 	assert rows == [("D-1", "Original D1"), ("D-2", "Updated D2")]
+	assert snapshot_row_count == 2
+
+
+def test_selected_snapshot_refresh_rebuilds_when_china_scope_rule_version_changes(tmp_path, monkeypatch):
+	source_db = tmp_path / "qgate_data.db"
+	hot_db = tmp_path / "database" / "hot" / "vizion_serving.db"
+	_seed_history_events(
+		source_db,
+		[
+			("D-1", "status_phase", "2026-05-25T00:00:00Z", 1, 1, "08", "06", "08-Resolved Forward", "06-Ready for Test"),
+			("D-2", "status_phase", "2026-05-26T00:00:00Z", 1, 1, "01", "03", "01-New", "03-In Analysis"),
+		],
+	)
+	conn = sqlite3.connect(source_db)
+	try:
+		conn.executescript(
+			"""
+			CREATE TABLE octane_defects (
+				defect_id TEXT PRIMARY KEY,
+				name TEXT,
+				status_phase TEXT,
+				creation_time TEXT,
+				problem_finder_team TEXT,
+				year TEXT,
+				project TEXT
+			);
+			"""
+		)
+		conn.executemany(
+			"""
+			INSERT INTO octane_defects(
+				defect_id, name, status_phase, creation_time, problem_finder_team, year, project
+			) VALUES (?, ?, ?, ?, ?, ?, ?)
+			""",
+			[
+				("D-1", "Original D1", "06-Ready for Test", "2026-05-25T00:00:00Z", "DTSV_China", "2026", "IDCEVO"),
+				("D-2", "Original D2", "03-In Analysis", "2026-05-26T00:00:00Z", "DTSV_China", "2026", "IDCEVO"),
+			],
+		)
+		conn.commit()
+	finally:
+		conn.close()
+
+	refresh_materialized_outcomes(source_db, hot_db, force=True)
+	build_calls: list[object] = []
+	original_build_dataset = read_models._build_full_picture_dataset
+
+	def record_build_dataset(*args, **kwargs):
+		build_calls.append(kwargs.get("defect_ids"))
+		return original_build_dataset(*args, **kwargs)
+
+	monkeypatch.setattr(read_models, "_build_full_picture_dataset", record_build_dataset)
+	read_models.publish_dashboard_snapshot_rows(
+		"snapshot-china-scope-v2-0123456789abcdef",
+		defect_db_path=source_db,
+		hot_db_path=hot_db,
+		defect_ids=("D-2",),
+	)
+
+	assert build_calls == [None]
 
 
 def test_load_materialized_outcomes_batches_large_defect_id_lists(tmp_path):

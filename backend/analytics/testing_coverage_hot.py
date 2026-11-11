@@ -395,7 +395,6 @@ def refresh_materialized_testing_coverage(
                 refreshed_at,
             ),
         )
-        _prune_stale_testing_coverage_snapshots(hot_conn, keep_version=snapshot_version)
         hot_conn.commit()
     finally:
         hot_conn.close()
@@ -406,21 +405,3 @@ def refresh_materialized_testing_coverage(
         "source_signature": source_signature,
             "snapshot_version": snapshot_version,
     }
-
-
-def _prune_stale_testing_coverage_snapshots(conn, *, keep_version: str) -> int:
-    """Delete all testing-coverage snapshot versions except the one just written.
-
-    Same rationale as ``_prune_stale_dashboard_snapshots`` in read_models.py:
-    queries always read via ``WHERE snapshot_version = <active>`` (see
-    ``_build_materialized_ticket_where_clause``), so old versions are dead weight.
-    """
-    cursor = conn.execute(
-        f"DELETE FROM {TESTING_COVERAGE_STORE_NAME} WHERE snapshot_version != ?",
-        (keep_version,),
-    )
-    conn.execute(
-        f"DELETE FROM {TESTING_COVERAGE_SNAPSHOT_STATE_TABLE} WHERE snapshot_version != ?",
-        (keep_version,),
-    )
-    return cursor.rowcount

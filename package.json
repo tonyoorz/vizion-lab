@@ -5,7 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "node ./scripts/dev.mjs",
-    "dev:analytics": "python -m uvicorn backend.analytics.api:app --host 127.0.0.1 --port 3003",
+    "deploy:setup": "node ./scripts/deploy.mjs setup",
+    "deploy:doctor": "node ./scripts/deploy.mjs doctor",
+    "deploy:export": "node ./scripts/deploy.mjs export",
+    "deploy:import": "node ./scripts/deploy.mjs import",
+    "dev:analytics": "node ./scripts/runPython.mjs -m uvicorn backend.analytics.api:app --host 127.0.0.1 --port 3003",
     "dev:client": "vite",
     "dev:server": "node ./server/devLocalApi.mjs",
     "build": "vite build",
@@ -17,12 +21,12 @@
     "benchmark:asr": "node ./scripts/benchmarkTranscription.mjs",
     "test:watch": "vitest",
     "test:agent-evals": "vitest run src/test/server/mainAgentGolden.test.ts src/test/server/ontology/semanticGolden.test.ts src/test/server/ontology/semanticQualityGolden.test.ts src/test/server/mainAgentExecutionGolden.test.ts src/test/server/mainAgentPolicyGolden.test.ts src/test/server/mainAgentToolRecovery.test.ts src/test/server/answerValidator.test.ts",
-    "report:qgate-kpi": "python -m backend.analytics_cli generate-qgate-kpi-reports",
+    "report:qgate-kpi": "node ./scripts/runPython.mjs -m backend.analytics_cli generate-qgate-kpi-reports",
     "ontology:compile": "node scripts/compileOntology.mjs --emit-graph",
     "ontology:graph": "node scripts/compileOntology.mjs --emit-graph",
     "ontology:check": "node scripts/compileOntology.mjs --check",
     "ontology:sync-vault": "node scripts/sync-vault-graph.mjs",
-    "test:ontology": "vitest run src/test/server/ontology && python -m pytest backend/tests/test_ontology_contract.py -q"
+    "test:ontology": "vitest run src/test/server/ontology && node ./scripts/runPython.mjs -m pytest backend/tests/test_ontology_contract.py -q"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",

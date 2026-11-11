@@ -546,24 +546,6 @@ def _extract_problem_severity(raw_payload: dict[str, Any]) -> str:
     )
 
 
-_TOP_ISSUE_TAG_PREFIXES = ("top_issue", "topissue", "aq_top_issue", "dtc_top_issue")
-
-
-def _extract_top_issue_priority(raw_payload: dict[str, Any]) -> str:
-    """Extract the top-issue tag (e.g. ``Top_Issue_High_Prio``) from ``user_tags``."""
-    user_tags = raw_payload.get("user_tags") or {}
-    tags_data = user_tags.get("data") if isinstance(user_tags, dict) else None
-    if not isinstance(tags_data, list):
-        return ""
-    top_issue_names = [
-        str(tag.get("name") or "").strip()
-        for tag in tags_data
-        if isinstance(tag, dict)
-        and str(tag.get("name") or "").strip().casefold().startswith(_TOP_ISSUE_TAG_PREFIXES)
-    ]
-    return top_issue_names[0] if top_issue_names else ""
-
-
 def _matches_query_filters(row: dict[str, Any], query: FullPictureDashboardQuery) -> bool:
     comparisons = (
         (query.years, row.get("year")),
@@ -623,7 +605,6 @@ def _load_local_analytics_defect_rows(
             "phase": _first_non_empty(raw_payload.get("phase"), raw_payload.get("status_phase")),
             "classification": _extract_problem_classification(raw_payload),
             "problem_severity": _extract_problem_severity(raw_payload),
-            "top_issue_priority": _extract_top_issue_priority(raw_payload),
             "requirement_names": _extract_reference_names(raw_payload.get("requirements")),
             "requirement": " | ".join(_extract_reference_names(raw_payload.get("requirements"))),
             "defect_category": _first_non_empty(
@@ -793,10 +774,6 @@ def _load_defect_rows(
             normalized["problem_severity"] = _first_non_empty(
                 normalized.get("problem_severity"),
                 _extract_problem_severity(raw_payload),
-            )
-            normalized["top_issue_priority"] = _first_non_empty(
-                normalized.get("top_issue_priority"),
-                _extract_top_issue_priority(raw_payload),
             )
         else:
             normalized["requirement_names"] = _parse_string_list(normalized.get("requirements_json"))
@@ -969,7 +946,6 @@ def _build_ticket_rows(
             "problem_finder_team": str(row.get("problem_finder_team") or "").strip(),
             "classification": str(row.get("classification") or "").strip(),
             "problem_severity": str(row.get("problem_severity") or "").strip(),
-            "top_issue_priority": str(row.get("top_issue_priority") or "").strip(),
             "group": group,
             "phase": phase,
             "requirement": str(row.get("requirement") or "").strip(),
@@ -1300,7 +1276,6 @@ CREATE TABLE IF NOT EXISTS dashboard_ticket_snapshot_rows (
     problem_finder_team TEXT NOT NULL,
     classification TEXT NOT NULL,
     problem_severity TEXT NOT NULL,
-    top_issue_priority TEXT NOT NULL DEFAULT '',
     group_name TEXT NOT NULL,
     phase TEXT NOT NULL,
     requirement TEXT NOT NULL,
@@ -1338,7 +1313,6 @@ MATERIALIZED_TICKET_SORT_COLUMNS = {
     "problem_finder_team": "problem_finder_team",
     "classification": "classification",
     "problem_severity": "problem_severity",
-    "top_issue_priority": "top_issue_priority",
     "group": "group_name",
     "phase": "phase",
     "requirement": "requirement",
@@ -1365,7 +1339,6 @@ def _ensure_dashboard_ticket_store(conn: sqlite3.Connection) -> bool:
         ("creation_time", "TEXT NOT NULL DEFAULT ''"),
         ("classification", "TEXT NOT NULL DEFAULT ''"),
         ("problem_severity", "TEXT NOT NULL DEFAULT ''"),
-        ("top_issue_priority", "TEXT NOT NULL DEFAULT ''"),
         ("requirement", "TEXT NOT NULL DEFAULT ''"),
         ("requirements_json", "TEXT NOT NULL DEFAULT '[]'"),
     ):
@@ -1444,7 +1417,6 @@ def _materialize_snapshot_ticket_rows(
                 problem_finder_team,
                 classification,
                 problem_severity,
-                top_issue_priority,
                 group_name,
                 phase,
                 requirement,
@@ -1460,7 +1432,7 @@ def _materialize_snapshot_ticket_rows(
                 pu,
                 market,
                 lead_model
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -1475,7 +1447,6 @@ def _materialize_snapshot_ticket_rows(
                     str(row.get("problem_finder_team") or ""),
                     str(row.get("classification") or ""),
                     str(row.get("problem_severity") or ""),
-                    str(row.get("top_issue_priority") or ""),
                     str(row.get("group") or ""),
                     str(row.get("phase") or ""),
                     str(row.get("requirement") or ""),
@@ -1505,30 +1476,9 @@ def _materialize_snapshot_ticket_rows(
             """,
             (normalized_snapshot_version, len(ticket_rows), refreshed_at),
         )
-        _prune_stale_dashboard_snapshots(conn, keep_version=normalized_snapshot_version)
         conn.commit()
     finally:
         conn.close()
-
-
-def _prune_stale_dashboard_snapshots(conn, *, keep_version: str) -> int:
-    """Delete all snapshot versions except the one just written.
-
-    Dashboard queries always read via ``WHERE snapshot_version = <active>`` (see
-    ``_build_materialized_ticket_where_clause``). Historical versions are never
-    read back — trend/ring-comparison is computed by time-period, not by snapshot
-    version. Without this prune every refresh accumulated another full copy
-    (~100k rows), reaching 30M+ rows / ~10GB.
-    """
-    cursor = conn.execute(
-        "DELETE FROM dashboard_ticket_snapshot_rows WHERE snapshot_version != ?",
-        (keep_version,),
-    )
-    conn.execute(
-        "DELETE FROM dashboard_ticket_snapshot_state WHERE snapshot_version != ?",
-        (keep_version,),
-    )
-    return cursor.rowcount
 
 
 def has_materialized_dashboard_snapshot_rows(
@@ -1664,7 +1614,6 @@ def _load_materialized_ticket_rows(
                 problem_finder_team,
                 classification,
                 problem_severity,
-                top_issue_priority,
                 group_name AS "group",
                 phase,
                 requirement,
@@ -1790,7 +1739,6 @@ def _list_materialized_ticket_rows(
                 problem_finder_team,
                 classification,
                 problem_severity,
-                top_issue_priority,
                 group_name AS "group",
                 phase,
                 requirement,
@@ -2514,53 +2462,6 @@ def build_full_picture_payload(**kwargs: Any) -> dict[str, Any]:
     }
 
 
-def build_semantic_defect_payload(**kwargs: Any) -> dict[str, Any]:
-    """Return all governed defect rows from one stable dashboard snapshot.
-
-    Semantic aggregate and records execution share this provider so a follow-up
-    can reuse the exact active revision or fail closed after a refresh.
-    """
-    query = normalize_query(**kwargs)
-    requested_snapshot_version = str(kwargs.get("snapshot_version") or "").strip()
-    snapshot_metadata = _read_snapshot_metadata()
-    snapshot_version = _resolve_effective_snapshot_version(snapshot_metadata)
-    if requested_snapshot_version and snapshot_version and requested_snapshot_version != snapshot_version:
-        raise FullPictureDashboardRequestError(
-            f"Requested snapshot version is stale: {requested_snapshot_version}"
-        )
-
-    if snapshot_version:
-        if snapshot_version.startswith("live-"):
-            _materialize_snapshot_ticket_rows(snapshot_version)
-        snapshot_metadata = _read_snapshot_metadata()
-        snapshot_version_after = _resolve_effective_snapshot_version(snapshot_metadata)
-        if snapshot_version_after != snapshot_version:
-            raise FullPictureDashboardRequestError("Dashboard snapshot changed during request")
-        if requested_snapshot_version and requested_snapshot_version != snapshot_version_after:
-            raise FullPictureDashboardRequestError(
-                f"Requested snapshot version is stale: {requested_snapshot_version}"
-            )
-        generated_from = _build_generated_from_payload(query)
-        ticket_rows = _load_materialized_ticket_rows(
-            snapshot_version=snapshot_version_after,
-            query=query,
-        )
-        snapshot_version = snapshot_version_after
-    else:
-        snapshot_metadata, generated_from, ticket_rows = _build_snapshot_bound_dataset(
-            query,
-            requested_snapshot_version=requested_snapshot_version,
-        )
-        snapshot_version = _resolve_snapshot_version(snapshot_metadata)
-
-    return {
-        "snapshot_version": snapshot_version,
-        "generated_from": generated_from,
-        "refresh_metadata": snapshot_metadata,
-        "ticket_rows": ticket_rows,
-    }
-
-
 def _connect() -> sqlite3.Connection:
     configured = str(os.environ.get("VIZION_ANALYTICS_DB_PATH", "")).strip()
     if configured:
@@ -2678,75 +2579,6 @@ def build_filter_metadata() -> dict[str, list[str]]:
         "fvps": sorted({row["fvp"] for row in defects if row["fvp"]}),
         "teams": sorted({row["team"] for row in defects if row["team"]}),
         "lead_models": sorted({row["lead_model"] for row in defects if row["lead_model"]}),
-    }
-
-
-FILTER_VALUE_SEARCH_FIELDS = frozenset({"detected_by", "assigned_ecu", "business_module", "problem_finder_team"})
-
-
-def _normalize_filter_value_limit(value: Any) -> int:
-    if value in {None, ""}:
-        return 20
-    try:
-        limit = int(str(value).strip())
-    except (TypeError, ValueError) as exc:
-        raise FullPictureDashboardRequestError(f"Invalid filter value search limit: {value}") from exc
-    if limit <= 0:
-        raise FullPictureDashboardRequestError(f"Invalid filter value search limit: {value}")
-    return min(limit, 50)
-
-
-def _filter_value_from_ticket_row(row: dict[str, Any], field: str) -> str:
-    if field == "business_module":
-        return str(row.get("solution_cluster") or row.get("defect_category") or "UNCLASSIFIED").strip()
-    return str(row.get(field) or "").strip()
-
-
-def build_analytics_filter_value_search_payload(**kwargs: Any) -> dict[str, object]:
-    dataset = str(kwargs.get("dataset") or "defects").strip()
-    if dataset != "defects":
-        raise FullPictureDashboardRequestError(f"Unsupported filter value dataset: {dataset or 'empty'}")
-    field = str(kwargs.get("field") or "").strip()
-    if field not in FILTER_VALUE_SEARCH_FIELDS:
-        raise FullPictureDashboardRequestError(f"Unsupported filter value field: {field or 'empty'}")
-
-    snapshot_metadata = _read_snapshot_metadata()
-    snapshot_version = _resolve_effective_snapshot_version(snapshot_metadata)
-    if not snapshot_version:
-        raise FullPictureDashboardDataError("No active dashboard snapshot is available for filter value search")
-    if snapshot_version.startswith("live-"):
-        _materialize_snapshot_ticket_rows(snapshot_version)
-
-    query_text = str(kwargs.get("query") or "").strip()
-    normalized_query = query_text.casefold()
-    limit = _normalize_filter_value_limit(kwargs.get("limit"))
-    filters = kwargs.get("filters") if isinstance(kwargs.get("filters"), dict) else {}
-    ticket_rows = _load_materialized_ticket_rows(
-        snapshot_version=snapshot_version,
-        query=normalize_query(**filters),
-    )
-
-    counts: dict[str, int] = {}
-    for row in ticket_rows:
-        value = _filter_value_from_ticket_row(row, field)
-        if not value:
-            continue
-        if normalized_query and normalized_query not in value.casefold():
-            continue
-        counts[value] = counts.get(value, 0) + 1
-
-    ranked_values = sorted(counts.items(), key=lambda item: (-item[1], _sortable_value(item[0])))
-    returned_values = ranked_values[:limit]
-    return {
-        "schema_version": "1.0",
-        "dataset": dataset,
-        "field": field,
-        "query": query_text,
-        "snapshot_version": snapshot_version,
-        "values": [{"value": value, "count": count} for value, count in returned_values],
-        "total_values": len(ranked_values),
-        "returned_values": len(returned_values),
-        "truncated": len(ranked_values) > limit,
     }
 
 

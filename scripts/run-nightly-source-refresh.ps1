@@ -1,5 +1,5 @@
 param(
-  [string]$PythonLauncher = "py",
+  [string]$PythonLauncher = "",
   [string]$PythonVersion = "-3.11",
   [string]$Teams = "DTSV_China,[AT]CoC_EI_IuK,Plant-Tiexi FIT,[AT]FIT_LAENDER_CHINA,Plant-Dadong FIT,[AT]BBA_Basis-FIT,Spotlight_FIT",
   [string]$Years = "2025,2026",
@@ -11,7 +11,7 @@ param(
   [ValidateSet("include", "skip")]
   [string]$CommentMode = "include",
   [int]$IncludeComments = 0,
-  [int]$PrepareDuplicateIndex = 1,
+  [int]$PrepareDuplicateIndex = 0,
   [string]$LogPath = "",
   [bool]$AutoRefreshCookieOnAuthFailure = $true,
   [bool]$CookieRefreshHeadless = $false
@@ -21,6 +21,25 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
+
+if ([string]::IsNullOrWhiteSpace($PythonLauncher)) {
+  $projectPythonLauncher = Join-Path $repoRoot ".venv\Scripts\python.exe"
+  if (Test-Path -LiteralPath $projectPythonLauncher -PathType Leaf) {
+    $PythonLauncher = $projectPythonLauncher
+  }
+  else {
+    $PythonLauncher = "py"
+  }
+}
+
+$pythonLauncherName = [System.IO.Path]::GetFileName($PythonLauncher).ToLowerInvariant()
+$pythonLauncherArguments = @()
+if (
+  ($pythonLauncherName -eq "py" -or $pythonLauncherName -eq "py.exe") -and
+  -not [string]::IsNullOrWhiteSpace($PythonVersion)
+) {
+  $pythonLauncherArguments += $PythonVersion
+}
 
 $latestLogPath = $null
 $logEncoding = New-Object System.Text.UTF8Encoding($false)
@@ -77,7 +96,7 @@ if ($IncludeComments) {
 $startedAt = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 Write-LogLine -Message "[$startedAt] Starting refresh-all-sources"
 Write-LogLine -Message ("[$startedAt] Log file: " + $LogPath)
-Write-LogLine -Message ("[$startedAt] Runtime config teams=" + $Teams + " years=" + $Years + " manual_years=" + $ManualRunYears + " team_name=" + $TeamName + " history_max_workers=" + $HistoryMaxWorkers + " team_max_workers=" + $TeamMaxWorkers + " force_defect_refresh=" + [bool]$ForceDefectRefresh + " skip_comments=" + $effectiveSkipComments + " prepare_duplicate_index=" + [bool]$PrepareDuplicateIndex + " auto_refresh_cookie_on_auth_failure=" + $AutoRefreshCookieOnAuthFailure + " cookie_refresh_headless=" + $CookieRefreshHeadless)
+Write-LogLine -Message ("[$startedAt] Runtime config python_launcher=" + $PythonLauncher + " python_version=" + ($pythonLauncherArguments -join " ") + " teams=" + $Teams + " years=" + $Years + " manual_years=" + $ManualRunYears + " team_name=" + $TeamName + " history_max_workers=" + $HistoryMaxWorkers + " team_max_workers=" + $TeamMaxWorkers + " force_defect_refresh=" + [bool]$ForceDefectRefresh + " skip_comments=" + $effectiveSkipComments + " prepare_duplicate_index=" + [bool]$PrepareDuplicateIndex + " auto_refresh_cookie_on_auth_failure=" + $AutoRefreshCookieOnAuthFailure + " cookie_refresh_headless=" + $CookieRefreshHeadless)
 
 function Format-CmdArgument {
   param([string]$Value)
@@ -117,9 +136,10 @@ function Invoke-AnalyticsCli {
   $ErrorActionPreference = "Continue"
   try {
     $started = Get-Date
-    Write-LogLine -Message ("[" + ($started.ToString("yyyy-MM-dd HH:mm:ss")) + "] Running " + $CommandId + ": " + ($PythonLauncher + " " + (($CliArguments | ForEach-Object { Format-CmdArgument $_ }) -join " ")))
+    $effectiveCliArguments = @($pythonLauncherArguments + $CliArguments)
+    Write-LogLine -Message ("[" + ($started.ToString("yyyy-MM-dd HH:mm:ss")) + "] Running " + $CommandId + ": " + ($PythonLauncher + " " + (($effectiveCliArguments | ForEach-Object { Format-CmdArgument $_ }) -join " ")))
     try {
-      & $PythonLauncher @CliArguments 2>&1 | ForEach-Object {
+      & $PythonLauncher @effectiveCliArguments 2>&1 | ForEach-Object {
         if ($_ -is [System.Management.Automation.ErrorRecord]) {
           $line = $_.Exception.Message
         }
@@ -191,11 +211,11 @@ function Test-AuthFailure {
 
   $localizedAuthFailure = [string]::Concat([char]0x8BA4, [char]0x8BC1, [char]0x6D4B, [char]0x8BD5, [char]0x5931, [char]0x8D25)
   $outputText = ($OutputLines -join "`n")
-  return ($outputText -match "401") -or ($outputText -match "Failed to authenticate legacy Octane session") -or ($outputText -match [regex]::Escape($localizedAuthFailure))
+  $http401Pattern = '\bHTTPError:\s*401\b|\bHTTP(?:/\d(?:\.\d)?)?\s+401\b|\bstatus(?:_code)?\s*[:=]\s*401\b|\b401\s+(?:Client Error:\s*)?Unauthorized\b'
+  return ($outputText -match $http401Pattern) -or ($outputText -match "Failed to authenticate legacy Octane session") -or ($outputText -match [regex]::Escape($localizedAuthFailure))
 }
 
 $refreshArguments = @(
-  $PythonVersion,
   "-m",
   "backend.analytics_cli",
   "refresh-all-sources",
@@ -232,7 +252,6 @@ if ($refreshResult.ExitCode -ne 0 -and $AutoRefreshCookieOnAuthFailure -and (Tes
   Write-LogLine -Message "[$retryAt] Detected auth failure, refreshing Octane cookie and retrying refresh-all-sources once"
 
   $cookieArguments = @(
-    $PythonVersion,
     "-m",
     "backend.analytics_cli",
     "refresh-octane-cookie"

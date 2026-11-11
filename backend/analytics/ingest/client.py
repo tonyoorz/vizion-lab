@@ -54,6 +54,7 @@ MANUAL_RUN_FIELDS: tuple[str, ...] = (
     "last_modified",
     "started",
     "finished_udf",
+    "testplatformid_udf",
     "release{name}",
     "run_team_000_udf{name}",
     "run_by{full_name,name}",
@@ -435,25 +436,44 @@ class OctaneApiClient:
             since_clause = f";timestamp>='{_escape_octane_text(str(modified_since).strip())}'"
         return f'"({entity_clause};entity_type=\'defect\'{since_clause})"'
 
+    def check_history_access(self) -> None:
+        payload = self._fetch_history_page(
+            query=self._history_query(defect_ids=("0",)),
+            limit=1,
+            offset=0,
+            timeout=30,
+        )
+        if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+            raise ValueError("Octane history access preflight did not return an API data list")
+
+    def _fetch_history_page(self, *, query: str, limit: int, offset: int, timeout: int) -> dict[str, Any]:
+        response = self._session.get(
+            f"{self._api_base}/history_logs",
+            headers={"HPECLIENTTYPE": "HPE_MQM_UI"},
+            params={
+                "query": query,
+                "limit": limit,
+                "offset": offset,
+                "order_by": "-timestamp",
+            },
+            timeout=timeout,
+            verify=False,
+        )
+        response.raise_for_status()
+        return response.json()
+
     def _fetch_history_payload(self, *, query: str) -> dict[str, Any]:
         offset = 0
         limit = 10000
         rows: list[dict[str, Any]] = []
         total_count: int | None = None
         while True:
-            response = self._session.get(
-                f"{self._api_base}/history_logs",
-                params={
-                    "query": query,
-                    "limit": limit,
-                    "offset": offset,
-                    "order_by": "-timestamp",
-                },
+            payload = self._fetch_history_page(
+                query=query,
+                limit=limit,
+                offset=offset,
                 timeout=90,
-                verify=False,
             )
-            response.raise_for_status()
-            payload = response.json()
             batch = [row for row in list(payload.get("data") or []) if isinstance(row, dict)]
             rows.extend(batch)
             if total_count is None:

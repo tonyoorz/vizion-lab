@@ -1,5 +1,7 @@
 import { randomBytes } from "node:crypto";
+import fs from "node:fs";
 import net from "node:net";
+import path from "node:path";
 
 const LOCAL_INTERNAL_ROW_SCOPE_KEYS = [
   "VIZION_INTERNAL_TEAM_IDS",
@@ -7,6 +9,44 @@ const LOCAL_INTERNAL_ROW_SCOPE_KEYS = [
   "VIZION_INTERNAL_WORKSPACE_IDS",
 ];
 const LOCAL_INTERNAL_ROW_POLICY = "agent.operations.read";
+
+export function resolvePythonCommand({
+  repoRoot,
+  platform = process.platform,
+  env = process.env,
+  existsSync = fs.existsSync,
+}) {
+  const isWindows = platform === "win32";
+  const fallback = isWindows ? "python" : "python3";
+  const candidates = [
+    env.VIZION_ANALYTICS_PYTHON,
+    env.DUPSEARCH_AGENT_PYTHON,
+    path.join(repoRoot, ".venv", isWindows ? "Scripts" : "bin", isWindows ? "python.exe" : "python"),
+  ];
+
+  for (const rawCandidate of candidates) {
+    const candidate = String(rawCandidate || "").trim();
+    if (candidate && (["python", "python3"].includes(candidate) || existsSync(candidate))) {
+      return candidate;
+    }
+  }
+
+  return fallback;
+}
+
+export function resolvePythonInvocation({ repoRoot, args, env = process.env, ...options }) {
+  return {
+    command: resolvePythonCommand({ repoRoot, env, ...options }),
+    args,
+    cwd: repoRoot,
+    env: {
+      ...env,
+      SESSION_KEEPER_URL: env.SESSION_KEEPER_URL || "http://127.0.0.1:18090",
+      PYTHONUTF8: "1",
+      PYTHONIOENCODING: "utf-8",
+    },
+  };
+}
 
 export function resolveLocalApiEnvironment(env = process.env) {
   const authMode = String(env?.VIZION_AGENT_AUTH_MODE || "").trim();
@@ -92,6 +132,11 @@ export async function hasHealthyServiceOnPort({
     }
 
     const payload = await response.json();
+    if (expectedService === "session-keeper") {
+      return payload?.status === "ok" &&
+        Number.isInteger(payload.active_sessions) && payload.active_sessions >= 0;
+    }
+
     if (!payload || payload.ok !== true) {
       return false;
     }

@@ -7,10 +7,13 @@ import time
 from pathlib import Path
 from typing import Any
 
+import pytest
 import requests
 
+from backend.analytics.ingest import pipeline as ingest_pipeline
 from backend.analytics.ingest.client import OctaneApiClient
 from backend.analytics.ingest.pipeline import IngestRequest, refresh_octane_manual_runs_only, refresh_octane_source
+from backend.analytics.ingest.source_store import OctaneSourceStore
 
 
 class FakeOctaneClient:
@@ -19,6 +22,10 @@ class FakeOctaneClient:
         self.manual_run_calls: list[dict[str, object]] = []
         self.comment_calls: list[list[str]] = []
         self.history_calls: list[list[str]] = []
+        self.history_access_checks = 0
+
+    def check_history_access(self) -> None:
+        self.history_access_checks += 1
 
     def list_teams(self) -> list[dict[str, str]]:
         return [
@@ -121,6 +128,56 @@ class FakeOctaneClient:
         ]
 
 
+def test_refresh_octane_source_checks_history_access_before_opening_source(tmp_path: Path) -> None:
+    class ForbiddenHistoryClient(FakeOctaneClient):
+        def check_history_access(self) -> None:
+            self.history_access_checks += 1
+            response = requests.Response()
+            response.status_code = 403
+            response.url = "https://octane.example.com/api/shared_spaces/1002/workspaces/2001/history_logs"
+            response.raise_for_status()
+
+    client = ForbiddenHistoryClient()
+    db_path = tmp_path / "source" / "qgate_raw.db"
+
+    with pytest.raises(requests.HTTPError, match="403"):
+        refresh_octane_source(
+            request=IngestRequest(
+                source_db_path=db_path,
+                teams=("all",),
+                years=(2026,),
+                include_history=True,
+                include_comments=True,
+                include_testing=False,
+            ),
+            client=client,
+        )
+
+    assert client.history_access_checks == 1
+    assert client.defect_calls == []
+    assert client.comment_calls == []
+    assert not db_path.exists()
+
+
+def test_refresh_octane_source_skips_history_access_check_when_history_is_disabled(tmp_path: Path) -> None:
+    client = FakeOctaneClient()
+
+    refresh_octane_source(
+        request=IngestRequest(
+            source_db_path=tmp_path / "qgate_raw.db",
+            teams=("DTSV_China",),
+            years=(2026,),
+            include_history=False,
+            include_comments=False,
+            include_testing=False,
+        ),
+        client=client,
+    )
+
+    assert client.history_access_checks == 0
+    assert len(client.defect_calls) == 1
+
+
 def test_refresh_octane_source_writes_all_core_entities(tmp_path: Path) -> None:
     db_path = tmp_path / "qgate_raw.db"
 
@@ -145,6 +202,7 @@ def test_refresh_octane_source_writes_all_core_entities(tmp_path: Path) -> None:
         "history_skipped_defects": 0,
         "history_event_rows": 2,
         "manual_run_rows": 2,
+        "manual_run_ids": ["MR-1-2026", "MR-2-2026"],
         "testcase_rows": 2,
         "testcase_relation_rows": 6,
     }
@@ -228,6 +286,109 @@ def test_refresh_octane_source_passes_defect_modified_since_watermark(tmp_path: 
 
     assert client.defect_calls == [
         {"team_id": "1", "year": 2026, "modified_since": "2026-06-09T12:00:00Z"}
+    ]
+
+
+def test_incremental_defect_watermarks_batch_teams_with_one_indexed_query(monkeypatch, tmp_path: Path) -> None:
+    db_path = tmp_path / "qgate_raw.db"
+    store = OctaneSourceStore(db_path)
+    try:
+        store.create_tables()
+    finally:
+        store.close()
+
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.executemany(
+            """
+            INSERT INTO octane_defects(
+                defect_id, problem_finder_team, team, year, last_modified, fetched_at, raw_json
+            ) VALUES (?, ?, ?, ?, ?, ?, '{}')
+            """,
+            [
+                ("D-1", " DTSV_China ", "Other", "2026", "2026-06-12T12:00:00Z", "2026-06-13T00:00:00Z"),
+                ("D-2", "", " [AT]CoC_EI_IuK ", "2026", "", "2026-06-10T09:00:00Z"),
+                ("D-3", None, "DTSV_China", "2025", None, "2026-06-09T08:00:00Z"),
+                ("D-4", "Other", "DTSV_China", "2026", "2099-01-01T00:00:00Z", "2026-06-13T00:00:00Z"),
+                ("D-5", "DTSV_China", "DTSV_China", "2024", "2099-01-01T00:00:00Z", "2026-06-13T00:00:00Z"),
+            ],
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    statements: list[str] = []
+    original_connect = sqlite3.connect
+
+    def tracked_connect(*args, **kwargs):
+        connection = original_connect(*args, **kwargs)
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(ingest_pipeline.sqlite3, "connect", tracked_connect)
+
+    watermarks = ingest_pipeline._load_incremental_defect_since_by_team(
+        source_db_path=db_path,
+        team_names=("DTSV_China", "[AT]CoC_EI_IuK", "Missing"),
+        years=(2025, 2026),
+    )
+
+    assert watermarks == {
+        "DTSV_China": {2025: "2026-06-06T08:00:00Z", 2026: "2026-06-09T12:00:00Z"},
+        "[AT]CoC_EI_IuK": {2025: None, 2026: "2026-06-07T09:00:00Z"},
+        "Missing": {2025: None, 2026: None},
+    }
+    watermark_selects = [
+        statement
+        for statement in statements
+        if statement.lstrip().upper().startswith("SELECT") and "FROM OCTANE_DEFECTS" in statement.upper()
+    ]
+    assert len(watermark_selects) == 1
+
+    connection = original_connect(db_path)
+    try:
+        query_plan = connection.execute("EXPLAIN QUERY PLAN " + watermark_selects[0]).fetchall()
+    finally:
+        connection.close()
+
+    assert any("idx_octane_defects_incremental_watermark" in str(row[3]) for row in query_plan)
+    assert all("SCAN octane_defects" not in str(row[3]) for row in query_plan)
+
+
+def test_refresh_octane_source_loads_all_team_watermarks_once(monkeypatch, tmp_path: Path) -> None:
+    calls: list[dict[str, object]] = []
+    db_path = tmp_path / "qgate_raw.db"
+
+    def load_watermarks(*, source_db_path, team_names, years):
+        calls.append({"source_db_path": source_db_path, "team_names": team_names, "years": years})
+        return {
+            "DTSV_China": {2026: "2026-06-09T12:00:00Z"},
+            "[AT]CoC_EI_IuK": {2026: None},
+        }
+
+    monkeypatch.setattr(ingest_pipeline, "_load_incremental_defect_since_by_team", load_watermarks, raising=False)
+    client = FakeOctaneClient()
+
+    refresh_octane_source(
+        request=IngestRequest(
+            source_db_path=db_path,
+            teams=("all",),
+            years=(2026,),
+            include_history=False,
+            include_comments=False,
+            include_testing=False,
+        ),
+        client=client,
+    )
+
+    assert calls == [{
+        "source_db_path": db_path,
+        "team_names": ("DTSV_China", "[AT]CoC_EI_IuK"),
+        "years": (2026,),
+    }]
+    assert client.defect_calls == [
+        {"team_id": "1", "year": 2026, "modified_since": "2026-06-09T12:00:00Z"},
+        {"team_id": "2", "year": 2026, "modified_since": None},
     ]
 
 
@@ -628,6 +789,194 @@ def test_refresh_octane_source_reuses_comments_for_unchanged_defects(tmp_path: P
 
     assert "fresh D-CHANGED" in rows["D-CHANGED"]
     assert "cached unchanged" in rows["D-UNCHANGED"]
+
+
+def test_comment_refresh_state_updates_canonical_ticket_comments(tmp_path: Path) -> None:
+    from backend.analytics.ingest.source_store import OctaneSourceStore
+
+    database_path = tmp_path / "comments.db"
+    store = OctaneSourceStore(database_path)
+    store.create_tables()
+    try:
+        store.upsert_defects(
+            [{"id": "D-CACHE", "name": "Fixture", "last_modified": "2026-10-01T00:00:00Z"}],
+            team="fixture",
+            year=2026,
+        )
+        comments = [{"id": "C-1", "text": "New evidence"}]
+        store.record_comment_refresh_state(
+            [("D-CACHE", "2026-10-01T00:00:00Z", json.dumps(comments))]
+        )
+        store.commit()
+    finally:
+        store.close()
+    connection = sqlite3.connect(database_path)
+    try:
+        row = connection.execute(
+            "SELECT comments, raw_json FROM octane_defects WHERE defect_id='D-CACHE'"
+        ).fetchone()
+        assert json.loads(row[0]) == comments
+        assert json.loads(row[1])["comments"] == comments
+    finally:
+        connection.close()
+
+
+def test_defect_refresh_without_comments_preserves_existing_evidence(tmp_path: Path) -> None:
+    from backend.analytics.ingest.source_store import OctaneSourceStore
+
+    database_path = tmp_path / "preserve.db"
+    store = OctaneSourceStore(database_path)
+    store.create_tables()
+    comments = [{"id": "C-1", "text": "Recorded resolution"}]
+    try:
+        store.upsert_defects(
+            [{"id": "D-PRESERVE", "name": "Before", "comments": comments}],
+            team="fixture", year=2026,
+        )
+        store.upsert_defects(
+            [{"id": "D-PRESERVE", "name": "After"}],
+            team="fixture", year=2026,
+        )
+        store.commit()
+    finally:
+        store.close()
+    connection = sqlite3.connect(database_path)
+    try:
+        row = connection.execute(
+            "SELECT comments, raw_json FROM octane_defects WHERE defect_id='D-PRESERVE'"
+        ).fetchone()
+        assert json.loads(row[0]) == comments
+        assert json.loads(row[1])["comments"] == comments
+    finally:
+        connection.close()
+
+
+def test_exact_id_refresh_requires_all_sources_before_applying(tmp_path: Path) -> None:
+    import pytest
+    from backend.analytics.ingest.pipeline import refresh_octane_tickets_by_ids
+
+    class ScopedClient(FakeOctaneClient):
+        def fetch_rows(self, endpoint, *, fields, query=None, limit=1000):
+            return [{"id": "2531406", "name": "Fixture", "last_modified": "2026-10-20T00:00:00Z", "phase": {"name": "05-In Testing"}}]
+
+        def fetch_comments_for_defects(self, defect_ids):
+            return [{"id": "C-1", "defect_id": "2531406", "text": "Fix in testing"}]
+
+        def fetch_histories_for_defects(self, defect_ids, **kwargs):
+            return {}
+
+    database_path = tmp_path / "scoped.db"
+    with pytest.raises(ValueError, match="history coverage"):
+        refresh_octane_tickets_by_ids(
+            source_db_path=database_path, ticket_ids=["2531406"],
+            client=ScopedClient(), evidence_directory=tmp_path / "evidence",
+        )
+    if database_path.exists():
+        connection = sqlite3.connect(database_path)
+        try:
+            assert connection.execute("SELECT count(*) FROM octane_defects").fetchone()[0] == 0
+        finally:
+            connection.close()
+
+
+def test_exact_id_refresh_verifies_canonical_comments_and_empty_history(tmp_path: Path) -> None:
+    from backend.analytics.ingest.pipeline import refresh_octane_tickets_by_ids
+
+    class ScopedClient(FakeOctaneClient):
+        def fetch_rows(self, endpoint, *, fields, query=None, limit=1000):
+            return [{"id": "2531406", "name": "Fixture", "last_modified": "2026-10-20T00:00:00Z", "phase": {"name": "05-In Testing"}}]
+
+        def fetch_comments_for_defects(self, defect_ids):
+            return [{"id": "C-1", "defect_id": "2531406", "text": "Fix in testing"}]
+
+        def fetch_histories_for_defects(self, defect_ids, **kwargs):
+            return {"2531406": {"data": [], "total_count": 0}}
+
+    database_path = tmp_path / "scoped.db"
+    summary = refresh_octane_tickets_by_ids(
+        source_db_path=database_path, ticket_ids=["2531406"],
+        client=ScopedClient(), evidence_directory=tmp_path / "evidence",
+    )
+    assert summary["verified_ticket_count"] == 1
+    connection = sqlite3.connect(database_path)
+    try:
+        comments, raw_json = connection.execute("SELECT comments, raw_json FROM octane_defects").fetchone()
+        assert len(json.loads(comments)) == 1
+        assert json.loads(raw_json)["comments"] == json.loads(comments)
+        state = connection.execute("SELECT comments_count, history_count FROM octane_ticket_evidence_refresh_state").fetchone()
+        assert state == (1, 0)
+    finally:
+        connection.close()
+
+
+def test_exact_id_refresh_reports_unavailable_without_deleting_local_evidence(tmp_path: Path) -> None:
+    from backend.analytics.ingest.pipeline import refresh_octane_tickets_by_ids
+    from backend.analytics.ingest.source_store import OctaneSourceStore
+
+    class UnavailableClient(FakeOctaneClient):
+        def fetch_rows(self, endpoint, **kwargs):
+            return []
+
+    database_path = tmp_path / "unavailable.db"
+    store = OctaneSourceStore(database_path)
+    store.create_tables()
+    store.upsert_defects(
+        [{"id": "2111699", "name": "Historical", "comments": [{"text": "retained"}]}],
+        team="fixture", year=2026,
+    )
+    store.close()
+    summary = refresh_octane_tickets_by_ids(
+        source_db_path=database_path, ticket_ids=["2111699"],
+        client=UnavailableClient(), evidence_directory=tmp_path / "evidence",
+        allow_unavailable=True, expected_unavailable_ids=["2111699"],
+    )
+    assert summary["verified_ticket_count"] == 0
+    assert summary["unavailable_ticket_ids"] == ["2111699"]
+    connection = sqlite3.connect(database_path)
+    try:
+        assert json.loads(connection.execute("SELECT comments FROM octane_defects").fetchone()[0]) == [{"text": "retained"}]
+    finally:
+        connection.close()
+
+
+def test_exact_id_refresh_rejects_unlisted_unavailable_ids(tmp_path: Path) -> None:
+    import pytest
+    from backend.analytics.ingest.pipeline import refresh_octane_tickets_by_ids
+
+    class MissingClient(FakeOctaneClient):
+        def fetch_rows(self, endpoint, **kwargs):
+            return []
+
+    with pytest.raises(ValueError, match="Unapproved unavailable"):
+        refresh_octane_tickets_by_ids(
+            source_db_path=tmp_path / "missing.db", ticket_ids=["D-APPROVED", "D-UNEXPECTED"],
+            client=MissingClient(), evidence_directory=tmp_path / "evidence",
+            allow_unavailable=True, expected_unavailable_ids=["D-APPROVED"],
+        )
+
+
+def test_exact_id_refresh_rejects_unlisted_cached_unavailable_ids(tmp_path: Path) -> None:
+    from datetime import datetime, timezone
+    from hashlib import sha256
+    import pytest
+    from backend.analytics.ingest.pipeline import refresh_octane_tickets_by_ids
+
+    ticket_ids = ["D-APPROVED", "D-UNEXPECTED"]
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    batch_key = sha256(json.dumps(ticket_ids).encode("utf-8")).hexdigest()[:16]
+    snapshot = {
+        "ticket_ids": ticket_ids, "unavailable_ticket_ids": ticket_ids,
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "defects": [], "comments": [], "histories": {},
+    }
+    (evidence / f"batch_00000_{batch_key}.json").write_text(json.dumps(snapshot), encoding="utf-8")
+    with pytest.raises(ValueError, match="Unapproved unavailable"):
+        refresh_octane_tickets_by_ids(
+            source_db_path=tmp_path / "cached.db", ticket_ids=ticket_ids,
+            client=FakeOctaneClient(), evidence_directory=evidence,
+            allow_unavailable=True, expected_unavailable_ids=["D-APPROVED"],
+        )
 
 
 def test_refresh_octane_source_reuses_empty_comment_refresh_state(tmp_path: Path) -> None:
@@ -1256,11 +1605,20 @@ def test_octane_client_fetch_history_uses_legacy_history_logs_shape() -> None:
             return {"data": []}
 
     class FakeSession:
-        def get(self, url: str, *, params: dict[str, object], timeout: int, verify: bool):
+        def get(
+            self,
+            url: str,
+            *,
+            params: dict[str, object],
+            timeout: int,
+            verify: bool,
+            headers: dict[str, str] | None = None,
+        ):
             captured["url"] = url
             captured["params"] = dict(params)
             captured["timeout"] = timeout
             captured["verify"] = verify
+            captured["headers"] = dict(headers or {})
             return FakeResponse()
 
     client = OctaneApiClient(
@@ -1278,4 +1636,53 @@ def test_octane_client_fetch_history_uses_legacy_history_logs_shape() -> None:
         "order_by": "-timestamp",
         "offset": 0,
         "query": '"(entity_id=\'D-1\';entity_type=\'defect\')"',
+    }
+    assert captured["headers"] == {"HPECLIENTTYPE": "HPE_MQM_UI"}
+
+
+def test_octane_client_history_access_check_is_bounded_and_does_not_read_real_tickets() -> None:
+    captured: dict[str, Any] = {}
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"data": []}
+
+    class FakeSession:
+        def get(
+            self,
+            url: str,
+            *,
+            params: dict[str, object],
+            timeout: int,
+            verify: bool,
+            headers: dict[str, str] | None = None,
+        ):
+            captured["url"] = url
+            captured["params"] = dict(params)
+            captured["timeout"] = timeout
+            captured["headers"] = dict(headers or {})
+            return FakeResponse()
+
+    client = OctaneApiClient(
+        base_url="https://octane.example.com",
+        shared_space_id="1002",
+        workspace_id="2001",
+        session=FakeSession(),
+    )
+
+    client.check_history_access()
+
+    assert captured == {
+        "url": "https://octane.example.com/api/shared_spaces/1002/workspaces/2001/history_logs",
+        "params": {
+            "query": '"(entity_id=\'0\';entity_type=\'defect\')"',
+            "limit": 1,
+            "offset": 0,
+            "order_by": "-timestamp",
+        },
+        "timeout": 30,
+        "headers": {"HPECLIENTTYPE": "HPE_MQM_UI"},
     }
