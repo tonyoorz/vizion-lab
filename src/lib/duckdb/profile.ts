@@ -68,7 +68,17 @@ export function summarizeSchemaForPrompt(): string {
   if (!t.length) return "";
   const lines: string[] = [
     "# 已连接的本地数据 (DuckDB)",
-    "你可以通过 <tool name=\"query_sql\" id=\"...\">SELECT ...</tool> 直接查询以下表（DuckDB 方言、只读）。",
+    "你可以通过以下工具查询和分析数据：",
+    "",
+    "· <tool name=\"query_sql\" id=\"...\">SELECT ...</tool> — 执行只读 SQL 查询",
+    "· <tool name=\"list_tables\" id=\"...\" /> — 列出所有已加载的表",
+    "· <tool name=\"describe_schema\" id=\"...\" table=\"表名\">描述</tool> — 查看表结构 + 样本数据",
+    "· <tool name=\"sample_data\" id=\"...\" table=\"表名\" rows=\"10\">描述</tool> — 获取前 N 行样本",
+    "· <tool name=\"profile_table\" id=\"...\" table=\"表名\">描述</tool> — 数据画像（空值率、分布等）",
+    "· <tool name=\"risk_scan\" id=\"...\" table=\"表名\">描述</tool> — 风险扫描",
+    "· <tool name=\"run_python\" id=\"...\" tables=\"表1,表2\">python code</tool> — 执行 Python 代码（pandas/matplotlib/scikit-learn 可用）",
+    "",
+    "以下是已注册的表：",
     "",
   ];
   for (const tbl of t) {

@@ -149,6 +149,8 @@ function ToolBlock({
     list_tables: "列出表",
     risk_scan: "风险扫描",
     run_python: "Python 代码",
+    describe_schema: "表结构概览",
+    sample_data: "样本数据",
   };
   const label = labelMap[toolName] || toolName;
 
@@ -280,35 +282,50 @@ function ToolResultPreview({ name, data }: { name: string; data: any }) {
       </div>
     );
   }
-  if (name === "query_sql" && Array.isArray(data.rows)) {
+  // Render table for describe_schema (shows schema + sample rows)
+  if (name === "describe_schema" && data.tables) {
+    return (
+      <div className="space-y-3 px-3 py-2">
+        {data.tables.map((tbl: any) => (
+          <div key={tbl.table}>
+            <p className="mb-1 text-xs font-semibold text-foreground">
+              {tbl.table} <span className="font-normal text-muted-foreground">({tbl.rows.toLocaleString()} 行 · {tbl.source})</span>
+            </p>
+            <table className="w-full border-collapse text-[11px]">
+              <thead>
+                <tr className="border-b border-border text-left text-muted-foreground">
+                  <th className="py-1 pr-3 font-medium">列名</th>
+                  <th className="py-1 pr-3 font-medium">类型</th>
+                </tr>
+              </thead>
+              <tbody>
+                {tbl.columns?.slice(0, 20).map((c: any) => (
+                  <tr key={c.name} className="border-b border-border/40">
+                    <td className="py-0.5 pr-3 font-mono text-foreground">{c.name}</td>
+                    <td className="py-0.5 pr-3 text-muted-foreground">{c.type}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {Array.isArray(tbl.sampleRows) && tbl.sampleRows.length > 0 && (
+              <div className="mt-2">
+                <p className="mb-1 text-[10px] text-muted-foreground">样本数据（前 {tbl.sampleRows.length} 行）</p>
+                <DataTablePreview rows={tbl.sampleRows} maxRows={3} />
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    );
+  }
+  // Render table for query_sql, sample_data, and any tool with rows
+  if ((name === "query_sql" || name === "sample_data") && Array.isArray(data.rows)) {
 
     const rows = data.rows.slice(0, 8);
-    const cols: string[] = data.columns || (rows[0] ? Object.keys(rows[0]) : []);
     if (!rows.length) return <p className="px-3 py-2 text-xs text-muted-foreground">空结果</p>;
     return (
-      <div className="overflow-x-auto px-3 py-2">
-        <table className="w-full border-collapse text-[11px]">
-          <thead>
-            <tr className="border-b border-border text-left text-muted-foreground">
-              {cols.map((c) => (
-                <th key={c} className="py-1 pr-3 font-medium">
-                  {c}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r: any, i: number) => (
-              <tr key={i} className="border-b border-border/40">
-                {cols.map((c) => (
-                  <td key={c} className="py-1 pr-3 font-mono text-foreground">
-                    {formatCell(r[c])}
-                  </td>
-                ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      <div className="px-3 py-2">
+        <DataTablePreview rows={rows} columns={data.columns} />
         {data.rowCount > rows.length && (
           <p className="mt-1 text-[10px] text-muted-foreground">
             显示前 {rows.length} / {data.rowCount} 行
@@ -329,6 +346,47 @@ function formatCell(v: unknown): string {
   if (typeof v === "number") return Number.isInteger(v) ? v.toString() : v.toFixed(3);
   const s = String(v);
   return s.length > 60 ? s.slice(0, 57) + "…" : s;
+}
+
+/** Reusable compact data table for tool result previews. */
+function DataTablePreview({
+  rows,
+  columns,
+  maxRows,
+}: {
+  rows: any[];
+  columns?: string[];
+  maxRows?: number;
+}) {
+  const display = rows.slice(0, maxRows ?? 8);
+  const cols: string[] = columns || (display[0] ? Object.keys(display[0]) : []);
+  if (!display.length) return <p className="text-xs text-muted-foreground">空结果</p>;
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full border-collapse text-[11px]">
+        <thead>
+          <tr className="border-b border-border text-left text-muted-foreground">
+            {cols.map((c) => (
+              <th key={c} className="py-1 pr-3 font-medium">
+                {c}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {display.map((r: any, i: number) => (
+            <tr key={i} className="border-b border-border/40">
+              {cols.map((c) => (
+                <td key={c} className="py-1 pr-3 font-mono text-foreground">
+                  {formatCell(r[c])}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
 }
 
 function FollowupBlock({

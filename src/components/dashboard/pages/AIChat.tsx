@@ -4,7 +4,9 @@ import {
   Check,
   Copy,
   Database,
+  Download,
   Loader2,
+  Menu,
   MessageSquarePlus,
   Mic,
   MoreHorizontal,
@@ -13,9 +15,12 @@ import {
   Pin,
   PinOff,
   RefreshCcw,
+  Search,
   Sparkles,
   Sparkle,
   Square,
+  Star,
+  StarOff,
   StopCircle,
   Trash2,
   User,
@@ -52,6 +57,7 @@ interface Msg {
   meta?: { ms?: number; chars?: number; model?: string };
   hidden?: boolean; // tool_result messages — sent to model, not shown
   toolResults?: Record<string, ToolResult>;
+  bookmarked?: boolean; // starred / bookmarked by user
 }
 interface Conversation {
   id: string;
@@ -119,6 +125,9 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
   const [transcribing, setTranscribing] = useState(false);
   const [dbTables, setDbTables] = useState<TableInfo[]>(duckdbManager.listTables());
   const [dbLoading, setDbLoading] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   useEffect(() => {
     const unsub = duckdbManager.subscribe(() => setDbTables(duckdbManager.listTables()));
@@ -162,12 +171,42 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
     return () => document.removeEventListener("click", close);
   }, []);
 
+  // Keyboard shortcuts: Cmd/Ctrl+K search, Cmd/Ctrl+N new conversation
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const mod = e.metaKey || e.ctrlKey;
+      if (mod && e.key === "k") {
+        e.preventDefault();
+        setSearchOpen((v) => !v);
+        if (!searchOpen) setSearchQuery("");
+      }
+      if (mod && e.key === "n") {
+        e.preventDefault();
+        handleNew();
+      }
+    };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [searchOpen, conversations]);
+
   const sortedConvos = useMemo(() => {
-    return [...conversations].sort((a, b) => {
+    const q = searchQuery.toLowerCase().trim();
+    let list = [...conversations];
+    // Filter by search query (title + message content)
+    if (q) {
+      list = list.filter(
+        (c) =>
+          c.title.toLowerCase().includes(q) ||
+          c.messages.some(
+            (m) => !m.hidden && m.content.toLowerCase().includes(q),
+          ),
+      );
+    }
+    return list.sort((a, b) => {
       if (!!b.pinned !== !!a.pinned) return (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0);
       return b.updatedAt - a.updatedAt;
     });
-  }, [conversations]);
+  }, [conversations, searchQuery]);
 
   const updateActive = (fn: (c: Conversation) => Conversation) =>
     setConversations((prev) => prev.map((c) => (c.id === activeId ? fn(c) : c)));
@@ -384,8 +423,11 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
   };
 
   // ----- core send -----
-  const buildGatewayMessages = (history: Msg[]) =>
-    history.map((m) => {
+  const MAX_CONTEXT_CHARS = 60_000; // ~20k tokens budget for messages sent to model
+
+  const buildGatewayMessages = (history: Msg[]) => {
+    // Build messages and calculate total char budget
+    const built = history.map((m) => {
       if (m.role !== "user" || !m.attachments?.length) {
         return { role: m.role, content: m.content };
       }
@@ -412,6 +454,23 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
       }
       return { role: "user", content: parts };
     });
+
+    // Context window trimming: drop oldest messages if total exceeds budget
+    const totalChars = built.reduce((s, m) => s + (typeof m.content === "string" ? m.content.length : 200), 0);
+    if (totalChars > MAX_CONTEXT_CHARS && built.length > 2) {
+      // Keep first message (usually system-like) and last N messages
+      const first = built[0];
+      const rest = built.slice(1);
+      const kept = [...rest].reverse();
+      let trimmedChars = kept.reduce((s, m) => s + (typeof m.content === "string" ? m.content.length : 200), 0);
+      while (kept.length > 1 && trimmedChars > MAX_CONTEXT_CHARS * 0.7) {
+        const dropped = kept.pop()!;
+        trimmedChars -= typeof dropped.content === "string" ? dropped.content.length : 200;
+      }
+      return [first, ...kept.reverse()];
+    }
+    return built;
+  };
 
   // Truncate tool data before sending back to the model (keep token budget sane).
   const truncateResultForModel = (data: any): any => {
@@ -557,7 +616,13 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
       if (toolCalls.length && round < 4 && !controller.signal.aborted) {
         const results: Record<string, ToolResult> = {};
         for (const tc of toolCalls) {
-          results[tc.toolId] = await executeTool(tc.toolName, tc.text, tc.args);
+          let result = await executeTool(tc.toolName, tc.text, tc.args);
+          // Auto-retry once on failure (network issues, transient errors)
+          if (!result.ok && !controller.signal.aborted) {
+            await new Promise((r) => setTimeout(r, 800));
+            result = await executeTool(tc.toolName, tc.text, tc.args);
+          }
+          results[tc.toolId] = result;
         }
         // Attach results to the assistant message for UI rendering
         updateActive((c) => ({
@@ -621,6 +686,32 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
         const t = (args?.table || payload).trim();
         const res = await profileTable(t);
         return { ok: true, ms: Math.round(performance.now() - start), data: res };
+      }
+      if (name === "describe_schema") {
+        // Return a rich schema overview with column types and sample data
+        const tableName = (args?.table || payload).trim();
+        const tables = tableName
+          ? duckdbManager.listTables().filter((t) => t.name === tableName)
+          : duckdbManager.listTables();
+        const results: any[] = [];
+        for (const t of tables) {
+          const sample = await duckdbManager.runQuery(`SELECT * FROM "${t.name}" LIMIT 3`, 3);
+          results.push({
+            table: t.name,
+            source: t.source,
+            rows: t.rows,
+            columns: t.columns,
+            sampleRows: sample.rows,
+          });
+        }
+        return { ok: true, ms: Math.round(performance.now() - start), data: { tables: results } };
+      }
+      if (name === "sample_data") {
+        // Return sample rows from a specific table
+        const t = (args?.table || payload).trim();
+        const n = Math.min(Math.max(Number(args?.rows) || 10, 1), 50);
+        const res = await duckdbManager.runQuery(`SELECT * FROM "${t}" LIMIT ${n}`, n);
+        return { ok: true, ms: res.ms, data: { table: t, ...res } };
       }
       if (name === "risk_scan") {
         const t = (args?.table || payload).trim() || undefined;
@@ -771,13 +862,66 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
   const togglePin = (id: string) =>
     setConversations((prev) => prev.map((c) => (c.id === id ? { ...c, pinned: !c.pinned } : c)));
 
+  // ----- bookmark message -----
+  const toggleBookmark = (msgId: string) =>
+    updateActive((c) => ({
+      ...c,
+      messages: c.messages.map((m) =>
+        m.id === msgId ? { ...m, bookmarked: !m.bookmarked } : m,
+      ),
+    }));
+
+  // ----- export conversation as Markdown -----
+  const exportConvo = (id: string) => {
+    const c = conversations.find((x) => x.id === id);
+    if (!c) return;
+    const lines = [`# ${c.title}`, ``, `_导出时间: ${new Date().toLocaleString("zh-CN")}_`, ``];
+    for (const m of c.messages) {
+      if (m.hidden) continue;
+      const label = m.role === "user" ? "👤 用户" : "🤖 DTSV";
+      lines.push(`---`, ``, `**${label}**`, ``);
+      // Strip XML tags for cleaner markdown
+      lines.push(m.content.replace(/<[^>]+>/g, "").trim());
+      lines.push(``);
+    }
+    const blob = new Blob([lines.join("\n")], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${c.title.replace(/[/\\?%*:|"<>]/g, "_")}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   // ----- UI helpers -----
   const lastSeg = (m: Msg) => parseAgentStream(m.content);
 
   return (
     <div className="-m-6 flex h-[calc(100vh-64px)] overflow-hidden">
-      {/* Conversation list */}
-      <aside className="hidden w-[260px] flex-col border-r border-border bg-muted/30 lg:flex">
+      {/* Mobile sidebar overlay */}
+      <AnimatePresence>
+        {sidebarOpen && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => setSidebarOpen(false)}
+            className="fixed inset-0 z-40 bg-black/40 lg:hidden"
+          />
+        )}
+      </AnimatePresence>
+      {/* Conversation list — desktop always visible, mobile slide-in */}
+      <aside
+        className={`${
+          sidebarOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"
+        } fixed inset-y-0 left-0 z-50 w-[260px] flex-col border-r border-border bg-muted/30 transition-transform duration-200 lg:static lg:z-auto lg:flex`}
+      >
+        <button
+          onClick={() => setSidebarOpen(false)}
+          className="absolute right-2 top-3 flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground lg:hidden"
+        >
+          <X className="h-4 w-4" />
+        </button>
         <div className="p-3">
           <button
             onClick={handleNew}
@@ -791,8 +935,31 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
             </kbd>
           </button>
         </div>
+        {/* Search bar */}
         <div className="px-3 pb-2">
-          <p className="filter-label px-1">会话</p>
+          <div className="flex items-center gap-2 rounded-lg border border-border bg-card px-2.5 py-1.5 text-xs">
+            <Search className="h-3.5 w-3.5 text-muted-foreground" />
+            <input
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="搜索会话…"
+              className="flex-1 bg-transparent text-foreground outline-none placeholder:text-muted-foreground"
+            />
+            {searchQuery && (
+              <button
+                onClick={() => setSearchQuery("")}
+                className="text-muted-foreground hover:text-foreground"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            )}
+            <kbd className="rounded bg-muted px-1 py-0.5 font-mono text-[9px] text-muted-foreground">
+              ⌘K
+            </kbd>
+          </div>
+        </div>
+        <div className="px-3 pb-1">
+          <p className="filter-label px-1">{searchQuery ? `搜索结果 (${sortedConvos.length})` : "会话"}</p>
         </div>
         <div className="flex-1 space-y-0.5 overflow-y-auto px-2 pb-3">
           {sortedConvos.map((c) => (
@@ -865,6 +1032,15 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
                     重命名
                   </MenuItem>
                   <MenuItem
+                    icon={Download}
+                    onClick={() => {
+                      exportConvo(c.id);
+                      setMenuId(null);
+                    }}
+                  >
+                    导出 Markdown
+                  </MenuItem>
+                  <MenuItem
                     icon={Trash2}
                     destructive
                     onClick={() => {
@@ -896,8 +1072,15 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
       {/* Main chat area */}
       <div className="flex flex-1 flex-col bg-background">
         {/* Top bar */}
-        <div className="flex items-center justify-between border-b border-border px-6 py-3">
+        <div className="flex items-center justify-between border-b border-border px-4 py-3 sm:px-6">
           <div className="flex items-center gap-2">
+            {/* Mobile sidebar toggle */}
+            <button
+              onClick={() => setSidebarOpen(true)}
+              className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground lg:hidden"
+            >
+              <Menu className="h-4 w-4" />
+            </button>
             <div className="flex h-7 w-7 items-center justify-center rounded-md bg-primary/10">
               <Sparkles className="h-3.5 w-3.5 text-primary" />
             </div>
@@ -1090,6 +1273,14 @@ const AIChat = ({ moduleKey, moduleLabel }: Props) => {
                         {/* actions */}
                         {!editingMsgId && (
                           <div className="mt-1.5 flex h-6 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+                            {/* Bookmark (for all non-empty messages) */}
+                            {m.content && (
+                              <ActionBtn
+                                icon={m.bookmarked ? Star : StarOff}
+                                label={m.bookmarked ? "取消收藏" : "收藏"}
+                                onClick={() => toggleBookmark(m.id)}
+                              />
+                            )}
                             {m.role === "assistant" ? (
                               <>
                                 <CopyBtn

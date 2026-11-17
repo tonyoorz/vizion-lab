@@ -42,7 +42,9 @@ const TAG_RE =
 
 function getAttr(attrs: string | undefined, name: string): string | undefined {
   if (!attrs) return undefined;
-  const m = attrs.match(new RegExp(`${name}\\s*=\\s*"([^"]*)"`, "i"));
+  // Try quoted value first, then fall back to unquoted
+  const m = attrs.match(new RegExp(`${name}\\s*=\\s*"([^"]*)"`, "i"))
+    || attrs.match(new RegExp(`${name}\\s*=\\s*([^\\s>]+)`, "i"));
   return m?.[1];
 }
 

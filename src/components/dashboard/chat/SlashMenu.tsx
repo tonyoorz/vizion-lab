@@ -31,7 +31,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     id: "explore-db",
     label: "/探查我的数据",
     hint: "列出表 + 列出 schema + 给出可分析方向",
-    prompt: "列出我已连接的所有表，对每张表做 profile_table，然后给出 5 个值得深入分析的角度。",
+    prompt: "列出我已连接的所有表，对每张表做 describe_schema，然后给出 5 个值得深入分析的角度。",
     icon: Database,
   },
   {
