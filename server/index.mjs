@@ -4,16 +4,15 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import duplicateBridgeRuntime from "./duplicateBridgeRuntime.cjs";
-import { streamLangGraphChatResponse } from "./agentRuntime/langGraphChatHandler.mjs";
-import { createLangGraphChatRuntime, resolveAgentRuntimeMode } from "./agentRuntime/langGraphChatRuntime.mjs";
+import { streamAgentChatResponse } from "./agentRuntime/langGraphChatHandler.mjs";
+import { resolveAgentRuntimeMode } from "./agentRuntime/governedChatRuntime.mjs";
+import { createPiChatRuntime } from "./agentRuntime/piChatRuntime.mjs";
+import { createBackendToolDiscovery } from "./mainAgentToolRegistry.mjs";
 import { createFileAgentRuntimeStore } from "./agentRuntime/runtimeAuditStore.mjs";
 import { resolveAgentOperationsResponse } from "./agentOperations.mjs";
-import { resolveAiAnalyticsContext } from "./aiAnalyticsContext.mjs";
-import { resolveMainAgentToolContext } from "./mainAgentToolLoop.mjs";
-import { shouldPlanMainAgentTools } from "./mainAgentToolPlanning.mjs";
 import { createDuplicateWarmupManager } from "./duplicateWarmup.mjs";
 import { extractLatestUserQuery, resolveAiDefectContext } from "./aiContext.mjs";
-import { streamCompanyChatCompletion, writeSseEvent } from "./companyChat.mjs";
+import { writeSseEvent } from "./companyChat.mjs";
 import { createLocalHttpBoundary } from "./localHttpBoundary.mjs";
 import { resolveRequestUrl } from "./httpRequestUrl.mjs";
 import { proxyAnalyticsDownload } from "./analyticsDownloadProxy.mjs";
@@ -56,9 +55,10 @@ const duplicateWarmupManager = createDuplicateWarmupManager({
   logger: console,
 });
 const agentRuntimeStore = createFileAgentRuntimeStore();
-const langGraphChatRuntime = createLangGraphChatRuntime({
-  runtimeStore: agentRuntimeStore,
-});
+const configuredRuntimeMode = resolveAgentRuntimeMode(process.env);
+const chatRuntime = configuredRuntimeMode === "langgraph"
+  ? (await import("./agentRuntime/langGraphChatRuntime.mjs")).createLangGraphChatRuntime({ runtimeStore: agentRuntimeStore })
+  : createPiChatRuntime({ runtimeStore: agentRuntimeStore, discoverTools: createBackendToolDiscovery() });
 
 function nowMs() {
   return performance.now();
@@ -82,13 +82,6 @@ function summarizeQuery(queryText) {
 
 function logMetric(event, payload) {
   console.info(`[vizion-metric] ${JSON.stringify({ event, ...payload })}`);
-}
-
-function shouldResolveGatewayAnalyticsContext({ runtimeMode, useAnalyticsContext } = {}) {
-  if (useAnalyticsContext !== true) {
-    return false;
-  }
-  return String(runtimeMode || "").trim().toLowerCase() !== "langgraph";
 }
 
 export async function handleAiChatRequest(request, response) {
@@ -120,25 +113,20 @@ async function handleAuthenticatedAiChatRequest(body, response) {
   const startedAt = nowMs();
   const requestId = buildRequestId("ai-chat");
   const queryText = extractLatestUserQuery(body?.messages);
-  const runtimeMode = resolveAgentRuntimeMode(process.env);
+  const runtimeMode = chatRuntime.kind;
   const useDefectContext = body?.useDefectContext === true;
   const useAnalyticsContext = body?.useAnalyticsContext === true;
-  const analyticsContext = shouldResolveGatewayAnalyticsContext({ runtimeMode, useAnalyticsContext })
-    ? await resolveAiAnalyticsContext({ messages: body?.messages })
-    : null;
-  let aiContext = null;
-  let mainAgentToolContext = null;
+  let runtimeResult = null;
   let streamMetrics = null;
 
   try {
-    if (runtimeMode === "langgraph") {
-      const graphResult = await streamLangGraphChatResponse({
+      const completed = await streamAgentChatResponse({
         body,
         response,
-        runtime: langGraphChatRuntime,
+        runtime: chatRuntime,
         toolDependencies: {
           runDuplicateBridge,
-          ensureDuplicateWarmup: () => duplicateWarmupManager.ensureWarm({ reason: "langgraph-agent-tool" }),
+          ensureDuplicateWarmup: () => duplicateWarmupManager.ensureWarm({ reason: `${runtimeMode}-agent-tool` }),
         },
         onCompleted: async (completed) => {
           await agentRuntimeStore.appendRunEvent({
@@ -157,118 +145,31 @@ async function handleAuthenticatedAiChatRequest(body, response) {
           });
         },
       });
-      streamMetrics = graphResult.streamMetrics;
+      runtimeResult = completed.runtimeResult;
+      streamMetrics = completed.streamMetrics;
       logMetric("ai_chat_request", {
         requestId,
         runtime: runtimeMode,
         model: String(body?.model || ""),
-        query: summarizeQuery(graphResult.runtimeResult?.queryText || queryText),
-        aiContextEnabled: graphResult.runtimeResult?.metrics?.aiContextEnabled || false,
-        analyticsContextEnabled: graphResult.runtimeResult?.metrics?.analyticsContextEnabled || false,
-        mainAgentToolCallCount: graphResult.runtimeResult?.metrics?.mainAgentToolCallCount || 0,
-        aiContextTimings: graphResult.runtimeResult?.metrics?.aiContextTimings || null,
+        query: summarizeQuery(runtimeResult?.queryText || queryText),
+        aiContextEnabled: runtimeResult?.metrics?.aiContextEnabled || false,
+        analyticsContextEnabled: runtimeResult?.metrics?.analyticsContextEnabled || false,
+        mainAgentToolCallCount: runtimeResult?.metrics?.mainAgentToolCallCount || 0,
+        aiContextTimings: runtimeResult?.metrics?.aiContextTimings || null,
         streamMetrics,
         totalMs: roundMs(nowMs() - startedAt),
       });
-      return;
-    }
-
-    if (useDefectContext && !analyticsContext?.skipDefectContext) {
-      writeSseEvent(response, {
-        type: "status",
-        message: "正在检索 qgate 相关缺陷…",
-      });
-
-      aiContext = await resolveAiDefectContext({
-        runDuplicateBridge,
-        ensureDuplicateWarmup: () => duplicateWarmupManager.ensureWarm({ reason: "ai-chat-defect-context" }),
-        messages: body?.messages,
-        topK: 5,
-      });
-    }
-
-    const baseContext = [body?.context, analyticsContext?.contextText, aiContext?.contextText].filter(Boolean).join("\n\n");
-    if (useAnalyticsContext && !analyticsContext?.skipDefectContext && shouldPlanMainAgentTools(body?.messages)) {
-      writeSseEvent(response, {
-        type: "status",
-        message: "正在判断是否需要调用 dashboard 工具…",
-      });
-      try {
-        mainAgentToolContext = await resolveMainAgentToolContext({
-          messages: body?.messages,
-          model: body?.model,
-          context: baseContext,
-          toolDependencies: {
-            runDuplicateBridge,
-            ensureDuplicateWarmup: () => duplicateWarmupManager.ensureWarm({ reason: "main-agent-tool-search-duplicates" }),
-          },
-        });
-        if (mainAgentToolContext.toolCalls.length) {
-          writeSseEvent(response, {
-            type: "status",
-            message: `已调用 ${mainAgentToolContext.toolCalls.length} 个 dashboard 工具，正在生成回答…`,
-          });
-        }
-      } catch (error) {
-        console.warn("[ai-chat] main agent tool planning failed", error);
-        writeSseEvent(response, {
-          type: "status",
-          message: "dashboard 工具暂不可用，改用已检索上下文回答…",
-        });
-      }
-    }
-
-    const mergedContext = [baseContext, mainAgentToolContext?.contextText].filter(Boolean).join("\n\n");
-    const finalMessages = [
-      ...(Array.isArray(body?.messages) ? body.messages : []),
-      ...(mainAgentToolContext?.toolConversationMessages || []),
-    ];
-    await streamCompanyChatCompletion({
-      messages: finalMessages,
-      model: body?.model,
-      context: mergedContext,
-      response,
-      prefaceEvents: [
-        ...(mainAgentToolContext?.toolEvents || []),
-        ...(aiContext?.duplicateSearchResult
-          ? [
-              {
-                type: "context",
-                context: aiContext.contextText,
-                result: aiContext.duplicateSearchResult,
-                timings: aiContext.timings,
-              },
-            ]
-          : []),
-      ],
-      onMetrics: (metrics) => {
-        streamMetrics = metrics;
-      },
-    });
-
-    logMetric("ai_chat_request", {
-      requestId,
-      runtime: runtimeMode,
-      model: String(body?.model || ""),
-      query: summarizeQuery(aiContext?.queryText || queryText),
-      aiContextEnabled: useDefectContext,
-      analyticsContextEnabled: useAnalyticsContext,
-      mainAgentToolCallCount: mainAgentToolContext?.toolCalls?.length || 0,
-      aiContextTimings: aiContext?.timings || null,
-      streamMetrics,
-      totalMs: roundMs(nowMs() - startedAt),
-    });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown server error";
     logMetric("ai_chat_request_failed", {
       requestId,
       runtime: runtimeMode,
       model: String(body?.model || ""),
-      query: summarizeQuery(aiContext?.queryText || queryText),
+      query: summarizeQuery(runtimeResult?.queryText || queryText),
       aiContextEnabled: useDefectContext,
       analyticsContextEnabled: useAnalyticsContext,
-      mainAgentToolCallCount: mainAgentToolContext?.toolCalls?.length || 0,
-      aiContextTimings: aiContext?.timings || null,
+      mainAgentToolCallCount: runtimeResult?.metrics?.mainAgentToolCallCount || 0,
+      aiContextTimings: runtimeResult?.metrics?.aiContextTimings || null,
       streamMetrics,
       totalMs: roundMs(nowMs() - startedAt),
       error: message,
@@ -612,7 +513,7 @@ const server = http.createServer(async (request, response) => {
 
   try {
     if (request.method === "GET" && url.pathname === "/health") {
-      sendJson(response, 200, { ok: true });
+      sendJson(response, 200, { ok: true, service: "vizion-local-api", agentRuntime: chatRuntime.kind });
       return;
     }
 

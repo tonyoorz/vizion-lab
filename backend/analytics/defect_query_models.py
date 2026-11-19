@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import csv
 import base64
 import hashlib
@@ -220,9 +221,23 @@ def _current_snapshot_version() -> str:
     return snapshot_version
 
 
+def _enrich_reporter_names(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    names = read_models._load_detected_by_names(list(dict.fromkeys(
+        str(row.get("ticket_id")) for row in rows if row.get("ticket_id") and not row.get("detected_by")
+    )))
+    return [{**row, "detected_by": row.get("detected_by") or names.get(str(row.get("ticket_id")), "")} for row in rows]
+
+
 def _load_rows(snapshot_version: str, filters: dict[str, list[str]], time_scope: dict[str, Any]) -> list[dict[str, Any]]:
-    query = read_models.normalize_query(**_query_kwargs(filters, time_scope))
+    query_kwargs = _query_kwargs(filters, time_scope)
+    query = read_models.normalize_query(**query_kwargs)
+    if not query_kwargs.get("years") and isinstance(query, read_models.FullPictureDashboardQuery):
+        query = replace(query, years=())
     rows = read_models._load_materialized_ticket_rows(snapshot_version=snapshot_version, query=query)
+    reporters = filters.get("detected_by") or []
+    if reporters:
+        allowed_reporters = set(reporters)
+        rows = [row for row in _enrich_reporter_names(rows) if row.get("detected_by") in allowed_reporters]
     business_modules = filters.get("business_module") or []
     if business_modules:
         allowed = set(business_modules)
@@ -574,6 +589,8 @@ def build_defect_aggregate_payload(**kwargs: Any) -> dict[str, Any]:
     if not snapshot_version:
         raise read_models.FullPictureDashboardDataError("analytics dashboard snapshot is not initialized")
     current_rows = _load_rows(snapshot_version, filters, time_scope)
+    if "detected_by" in dimensions:
+        current_rows = _enrich_reporter_names(current_rows)
     applied_query = _applied_query(
         metrics=metrics,
         dimensions=dimensions,
@@ -589,7 +606,10 @@ def build_defect_aggregate_payload(**kwargs: Any) -> dict[str, Any]:
     comparison_scope = _comparison_time_scope(time_scope)
     comparison_grouped: dict[str, list[dict[str, Any]]] = {}
     if comparison_scope is not None:
-        comparison_grouped = _group_rows(_load_rows(snapshot_version, filters, comparison_scope), dimensions)
+        comparison_rows = _load_rows(snapshot_version, filters, comparison_scope)
+        if "detected_by" in dimensions:
+            comparison_rows = _enrich_reporter_names(comparison_rows)
+        comparison_grouped = _group_rows(comparison_rows, dimensions)
     result_rows: list[dict[str, Any]] = []
     dimension = dimensions[0] if dimensions else "scope"
     group_values = sorted(set(grouped) | set(comparison_grouped), key=read_models._sortable_value)

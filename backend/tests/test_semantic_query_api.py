@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import datetime, timezone
 import json
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -114,6 +115,48 @@ def test_semantic_records_api_reads_json_body_and_returns_safe_error() -> None:
     assert str(payload["code"]).startswith("SEMANTIC_RECORD_REQUEST_MISSING:")
     assert payload["safeMessage"] == "semantic records query rejected"
     assert payload["retryable"] is False
+
+
+def test_semantic_api_returns_persisted_evidence_and_supports_record_continuation(catalog, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("backend.analytics.api.load_ontology", lambda: catalog)
+    monkeypatch.setattr("backend.analytics.semantic_analysis_store.get_semantic_analysis_db_path", lambda: tmp_path / "api-analysis.db")
+    monkeypatch.setattr("backend.analytics.semantic_query.build_semantic_defect_payload", lambda **_kwargs: {
+        "snapshot_version": "snapshot-api",
+        "generated_from": {},
+        "ticket_rows": [{
+            "ticket_id": "D-1", "ticket_name": "Synthetic defect", "problem_finder_team": "DTSV_China",
+            "assigned_ecu": "HU", "status": "Open",
+        }],
+    })
+    client = TestClient(app)
+    metric_payload = _payload(catalog)
+    metric_payload["query"]["dimensionIds"] = ["product.ecu"]
+    response = client.post("/api/semantic/query", json=metric_payload)
+    assert response.status_code == 200
+    result = response.json()
+    assert result["analysisRef"].startswith("analysis-")
+    assert result["evidence"]["analysisRef"] == result["analysisRef"]
+    assert result["evidence"]["metricValues"] == {"defect.count": 1}
+
+    records = client.post("/api/semantic/records", json=_records_payload(catalog, analysis_ref=result["analysisRef"]))
+    assert records.status_code == 200
+    assert records.json()["analysisRef"] == result["analysisRef"]
+    assert records.json()["evidence"]["kind"] == "semantic_record_set"
+
+
+def test_semantic_api_returns_safe_storage_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    def unavailable(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise sqlite3.OperationalError("private storage detail")
+
+    monkeypatch.setattr("backend.analytics.api.execute_semantic_query", unavailable)
+    response = TestClient(app, raise_server_exceptions=False).post("/api/semantic/query", json={})
+    assert response.status_code == 503
+    assert response.json() == {
+        "code": "SEMANTIC_STORAGE_UNAVAILABLE",
+        "safeMessage": "semantic query rejected",
+        "retryable": True,
+    }
+    assert "private storage detail" not in response.text
 
 
 def _records_payload(catalog, *, analysis_ref: str | None, query: dict[str, Any] | None = None) -> dict[str, Any]:

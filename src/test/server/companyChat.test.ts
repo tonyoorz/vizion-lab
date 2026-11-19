@@ -9,6 +9,115 @@ describe("streamCompanyChatCompletion", () => {
     process.env.DUPSEARCH_CHAT_ACCESS_CODE = "test-access-code";
   });
 
+  it("does not give tool-capable requests final-answer-only instructions", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ choices: [{ message: { content: "Ready.", tool_calls: [] } }] }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await requestCompanyChatCompletion({
+      messages: [{ role: "user", content: "Python automation testing coverage" }],
+      model: "deepseek-v4-flash",
+      tools: [{ type: "function", function: { name: "get_ontology_catalog", parameters: { type: "object", properties: {} } } }],
+      toolChoice: "auto",
+    });
+    const request = JSON.parse(String(fetchMock.mock.calls[0][1].body));
+    const system = request.messages.filter((message: { role: string }) => message.role === "system")
+      .map((message: { content: string }) => message.content).join("\n");
+    expect(request.tools).toHaveLength(1);
+    expect(system).not.toContain("Tool use happens only before this final answer stage");
+    expect(system).not.toContain("instead of attempting another tool call");
+    expect(system).not.toContain("when the evidence contract requires it");
+  });
+
+  it.each([true, false])("publishes a prepared answer with advisory evidence diagnostics without another provider call: supported=%s", async (supported) => {
+    const fetchMock = vi.fn().mockRejectedValue(new Error("Unexpected duplicate provider call"));
+    vi.stubGlobal("fetch", fetchMock);
+    const response = { write: vi.fn(), writeHead: vi.fn(), end: vi.fn() };
+    const onAnswerValidation = vi.fn();
+    const onMetrics = vi.fn();
+    await streamCompanyChatCompletion({
+      messages: [{ role: "user", content: "Show the count." }], response,
+      preparedCompletion: {
+        content: `<cite source="call-1">Count: ${supported ? 12 : 999999}.</cite>`,
+        answerModel: "deepseek-v4-pro", usage: { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120 },
+      },
+      answerValidation: {
+        semanticEvidence: [{ toolCallId: "call-1", tool: "query_semantic_metrics", summary: { metrics: { "defect.count": 12 } } }],
+        evidenceGate: { status: "pass" }, registry: createOntologyRegistry(),
+      },
+      onAnswerValidation,
+      onMetrics,
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(onAnswerValidation).toHaveBeenCalledWith(expect.objectContaining({ valid: supported }));
+    const output = response.write.mock.calls.map(([chunk]) => String(chunk)).join("");
+    expect(output).toContain("data: [DONE]");
+    expect(onMetrics).toHaveBeenCalledWith(expect.objectContaining({ tokenUsage: { inputTokens: 100, outputTokens: 20, totalTokens: 120 } }));
+    expect(output).toContain('"total_tokens":120');
+    expect(output).toContain(`Count: ${supported ? 12 : 999999}.`);
+    expect(output).not.toContain("未发布未经证据验证的数据结论");
+  });
+
+  it("publishes a clarification even when semantic evidence is unavailable", async () => {
+    const response = { write: vi.fn(), writeHead: vi.fn(), end: vi.fn() };
+    const onAnswerValidation = vi.fn();
+    const content = "I will use detected_by from your clarification. The current query failed; please confirm the reporter match.";
+    await streamCompanyChatCompletion({
+      messages: [{ role: "user", content: "detected_by" }], response,
+      preparedCompletion: { content, answerModel: "deepseek-v4-pro" },
+      answerValidation: {
+        registry: createOntologyRegistry(),
+        semanticEvidence: [{ toolCallId: "failed-call", tool: "query_semantic_records", success: false }],
+        evidenceGate: { status: "blocked", violations: ["SEMANTIC_QUERY_FAILED"] },
+      },
+      onAnswerValidation,
+    });
+    const output = response.write.mock.calls.map(([chunk]) => String(chunk)).join("");
+    expect(output).toContain(content);
+    expect(output).not.toContain("未发布未经证据验证的数据结论");
+    expect(onAnswerValidation).toHaveBeenCalledWith(expect.objectContaining({ valid: expect.any(Boolean), violations: expect.any(Array) }));
+    expect(output).toContain("data: [DONE]");
+  });
+
+  it("does not truncate or suppress an answer at the evidence inspection buffer limit", async () => {
+    const response = { write: vi.fn(), writeHead: vi.fn(), end: vi.fn() };
+    await streamCompanyChatCompletion({
+      messages: [{ role: "user", content: "Explain these records." }], response,
+      preparedCompletion: { content: `${"x".repeat(70 * 1024)}END_OF_ANSWER`, answerModel: "deepseek-v4-pro" },
+      answerValidation: {
+        registry: createOntologyRegistry(),
+        semanticEvidence: [{ toolCallId: "call-1", tool: "query_semantic_records" }],
+        evidenceGate: { status: "pass" },
+      },
+    });
+    const output = response.write.mock.calls.map(([chunk]) => String(chunk)).join("");
+    expect(output).toContain("END_OF_ANSWER");
+    expect(output).not.toContain("未发布未经证据验证的数据结论");
+    expect(output).toContain("data: [DONE]");
+  });
+
+  it("keeps answers available when evidence diagnostics throw", async () => {
+    const response = { write: vi.fn(), writeHead: vi.fn(), end: vi.fn() };
+    const evidence = {
+      toolCallId: "call-1", tool: "query_semantic_metrics",
+      get data() { throw new Error("Diagnostic data unavailable"); },
+    };
+    await streamCompanyChatCompletion({
+      messages: [{ role: "user", content: "Show the result." }], response,
+      preparedCompletion: { content: '<cite source="call-1">1 defect</cite>', answerModel: "deepseek-v4-pro" },
+      answerValidation: {
+        registry: createOntologyRegistry(), semanticEvidence: [evidence], evidenceGate: { status: "pass" },
+      },
+    });
+    const output = response.write.mock.calls.map(([chunk]) => String(chunk)).join("");
+    expect(output).toContain("1 defect");
+    expect(output).toContain('"blocking":false');
+    expect(output).toContain("ANSWER_VALIDATION_UNAVAILABLE");
+    expect(output).toContain("data: [DONE]");
+    expect(response.end).toHaveBeenCalledOnce();
+  });
+
   it("forwards upstream SSE chunks without waiting for response.json", async () => {
     const encoder = new TextEncoder();
     const write = vi.fn();
@@ -609,7 +718,7 @@ describe("streamCompanyChatCompletion", () => {
     expect(streamedText).toContain("SAM-HERE: 86");
   });
 
-  it("adds a deterministic citation footer for legacy tool evidence", async () => {
+  it("reports missing legacy citations without injecting a citation footer", async () => {
     const encoder = new TextEncoder();
     const response = { writeHead: vi.fn(), write: vi.fn(), end: vi.fn() };
     const registry = createOntologyRegistry();
@@ -640,12 +749,12 @@ describe("streamCompanyChatCompletion", () => {
       .map(([chunk]) => Buffer.from(chunk).toString("utf8"))
       .join("");
     expect(streamedText).toContain("缺陷数是 12");
-    expect(streamedText).toContain('source=\\"legacy-1\\"');
-    expect(streamedText).not.toContain("ANSWER_CITATION_REQUIRED");
+    expect(streamedText).not.toContain('source=\\"legacy-1\\"');
+    expect(streamedText).toContain("ANSWER_CITATION_REQUIRED");
     expect(streamedText.indexOf('"type":"answer-validation"')).toBeLessThan(streamedText.indexOf("data: [DONE]"));
   });
 
-  it("blocks an unsupported governed numeric Claim before it reaches SSE", async () => {
+  it("reports an unsupported numeric claim without suppressing the streamed answer", async () => {
     const encoder = new TextEncoder();
     const response = {
       writeHead: vi.fn(),
@@ -694,13 +803,13 @@ describe("streamCompanyChatCompletion", () => {
       .join("");
     expect(streamedText).toContain('"type":"answer-validation"');
     expect(streamedText).toContain("ANSWER_NUMERIC_CLAIM_UNSUPPORTED:call-1");
-    expect(streamedText).not.toContain("999999");
-    expect(streamedText).toContain("未发布未经证据验证的数据结论");
-    expect(streamedText.indexOf('"type":"answer-validation"')).toBeLessThan(streamedText.indexOf("未发布未经证据验证的数据结论"));
-    expect(streamedText.indexOf("未发布未经证据验证的数据结论")).toBeLessThan(streamedText.indexOf("data: [DONE]"));
+    expect(streamedText).toContain("999999");
+    expect(streamedText).not.toContain("未发布未经证据验证的数据结论");
+    expect(streamedText.indexOf("999999")).toBeLessThan(streamedText.indexOf('"type":"answer-validation"'));
+    expect(onAnswerValidation).toHaveBeenCalledWith(expect.objectContaining({ valid: false }));
   });
 
-  it("releases a supported governed Claim only after validation", async () => {
+  it("streams a supported claim without waiting for evidence diagnostics", async () => {
     const encoder = new TextEncoder();
     const response = { writeHead: vi.fn(), write: vi.fn(), end: vi.fn() };
     const registry = createOntologyRegistry();
@@ -739,7 +848,7 @@ describe("streamCompanyChatCompletion", () => {
       .map(([chunk]) => Buffer.from(chunk).toString("utf8"))
       .join("");
     expect(streamedText).toContain('<cite source=\\"call-1\\">缺陷数是 1</cite>');
-    expect(streamedText.indexOf('"type":"answer-validation"')).toBeLessThan(streamedText.indexOf("缺陷数是 1"));
+    expect(streamedText.indexOf("缺陷数是 1")).toBeLessThan(streamedText.indexOf('"type":"answer-validation"'));
   });
 
   it("emits a causal-claim violation for cited observational analytics output", async () => {

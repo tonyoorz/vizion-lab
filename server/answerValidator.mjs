@@ -42,8 +42,23 @@ function normalizeNumeric(value) {
   return Number.isFinite(numeric) ? `${numeric}${percent ? "%" : ""}` : "";
 }
 
-function numericClaims(text) {
-  return [...String(text || "").matchAll(NUMERIC_CLAIM_PATTERN)].map((match) => String(match[0]));
+function numericClaims(text, supportedDates = new Set()) {
+  const content = String(text || "")
+    .replace(/^([\t ]*(?:>[\t ]*)?)\d{1,9}[.)][\t ]+/gm, "$1")
+    .replace(/\b\d{4}-\d{2}-\d{2}\b/g, (value) => supportedDates.has(value) ? "" : value);
+  return [...content.matchAll(NUMERIC_CLAIM_PATTERN)].map((match) => String(match[0]));
+}
+
+function evidenceScopeDates(items) {
+  const dates = new Set();
+  for (const item of items) {
+    for (const scope of item?.scope?.timeScopes || []) {
+      for (const value of [scope.start, scope.end]) {
+        if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)) dates.add(value);
+      }
+    }
+  }
+  return dates;
 }
 
 function recordIdentifiers(text) {
@@ -170,7 +185,7 @@ export function validateAnswerTextCitations({ text, evidence = [], registry, evi
   const violations = [...validation.violations];
   const claims = extractCitationClaims(answerText);
   const uncitedText = answerText.replace(COMPLETE_CITATION_PATTERN, "");
-  if (numericClaims(uncitedText).length) {
+  if (numericClaims(uncitedText, evidenceScopeDates(evidence)).length) {
     violations.push("ANSWER_NUMERIC_CLAIM_UNCITED");
   }
   if (recordIdentifiers(uncitedText).length) {
@@ -186,7 +201,7 @@ export function validateAnswerTextCitations({ text, evidence = [], registry, evi
       continue;
     }
     const { supportedNumbers, supportedRecordIds } = supportedEvidenceScalars(item);
-    for (const value of numericClaims(claim.text)) {
+    for (const value of numericClaims(claim.text, evidenceScopeDates([item]))) {
       if (!supportedNumbers.has(normalizeNumeric(value))) {
         violations.push(`ANSWER_NUMERIC_CLAIM_UNSUPPORTED:${claim.toolCallId}`);
       }
@@ -201,6 +216,38 @@ export function validateAnswerTextCitations({ text, evidence = [], registry, evi
   return { valid: uniqueViolations.length === 0, violations: uniqueViolations };
 }
 
+export function buildVerifiedEvidenceSummary({ evidence = [], registry, evidenceGate } = {}) {
+  if (evidenceGate?.status !== "pass") return null;
+  const escape = (value) => String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  const lines = [];
+  for (const item of evidence) {
+    if (!["query_semantic_metrics", "query_semantic_records"].includes(item?.tool) || !/^[A-Za-z0-9._:-]+$/.test(item.toolCallId || "")) continue;
+    const cite = (value) => `<cite source="${item.toolCallId}">${escape(value)}</cite>`;
+    for (const scope of item.scope?.timeScopes || []) {
+      lines.push(cite(`${scope.start} to ${scope.end}`));
+    }
+    const metrics = { ...(item.summary?.metrics || {}), ...(item.evidence?.metricValues || {}) };
+    for (const [metricId, value] of Object.entries(metrics)) {
+      if (typeof value !== "number" || !Number.isFinite(value)) continue;
+      let label = metricId;
+      try { label = registry.getMetric(metricId).labels?.["zh-CN"] || metricId; } catch { label = metricId; }
+      lines.push(cite(`${label}: ${value}`));
+    }
+    if (item.tool === "query_semantic_records") {
+      const total = item.pagination?.totalRows ?? item.evidence?.totalRows ?? item.evidence?.rowCount;
+      if (typeof total === "number") lines.push(cite(`Records: ${total}`));
+      for (const row of (item.data || []).slice(0, 10)) {
+        const identifier = row.defect_id ?? row.ticket_id ?? row.test_id ?? row.id;
+        if (identifier != null) lines.push(cite(String(identifier)));
+      }
+    }
+    if (item.quality?.warnings?.length) lines.push(cite(item.quality.warnings.join("; ")));
+  }
+  if (!lines.length) return null;
+  const text = lines.join("\n\n");
+  return validateAnswerTextCitations({ text, evidence, registry, evidenceGate }).valid ? text : null;
+}
+
 export function buildCitationContractContext({ evidence = [], registry } = {}) {
   const constraint = approvedClaimEvidenceConstraint(registry);
   if (!constraint || Number(constraint.parameters?.coverage || 0) <= 0) {
@@ -211,7 +258,8 @@ export function buildCitationContractContext({ evidence = [], registry } = {}) {
     return "";
   }
   return [
-    "# Citation contract",
+    "# Citation contract (advisory)",
+    "Citation formatting is optional guidance, not a condition for answering or asking a clarification.",
     `Constraint: ${constraint.id}`,
     `Allowed toolCallIds: ${rows.map((item) => item.toolCallId).join(", ")}`,
     ...rows.map((item) => [
@@ -221,7 +269,7 @@ export function buildCitationContractContext({ evidence = [], registry } = {}) {
       item.schemaFingerprint ? `schemaFingerprint=${item.schemaFingerprint}` : "",
       item.sourceRevision ? `sourceRevision=${item.sourceRevision}` : "",
     ].filter(Boolean).join("; ")),
-    `Format every numeric or factual data claim as <cite source="${rows[0].toolCallId}">claim</cite> using one of these toolCallIds. Do not invent citation IDs.`,
+    `When useful, cite an actual tool result as <cite source="${rows[0].toolCallId}">claim</cite> using one of these toolCallIds. Do not invent citation IDs.`,
     "Do not state causal conclusions unless supplied evidence explicitly supports causality; describe associations and limitations instead.",
   ].join("\n");
 }

@@ -333,7 +333,7 @@ Rotate the capability secret with a coordinated maintenance window:
 
 The current verifier accepts one secret at a time, so rolling one service before the other intentionally causes agent-only queries to fail closed. Keep FastAPI port `3003` bound to loopback or a private network; do not expose it directly to browsers. Place the Node API behind the authenticated reverse-proxy boundary for shared deployments.
 
-Duplicate search and the legacy allowlisted fallback query do not yet have row-scope enforcement. They are available only in `internal` mode; scoped OIDC actors receive a safe denial from the associated tools and `/api/ai/context` or `/api/duplicate-search*` routes. Do not re-enable them for OIDC users until their backend retrieval path enforces the same actor scope contract.
+Duplicate search, the legacy allowlisted fallback query, and the legacy testcase-context reader do not yet have row-scope enforcement. They are available only in `internal` mode; scoped OIDC actors receive a safe denial from the associated tools and `/api/ai/context` or `/api/duplicate-search*` routes. Do not re-enable them for OIDC users until their backend retrieval path enforces the same actor scope contract.
 
 ### Runtime Ontology Governance
 
@@ -383,7 +383,19 @@ Repeat the full qualification twice after any OIDC policy, actor-capability, age
 
 ### Operations Audit and Retention
 
-LangGraph writes append-only runtime artifacts below `logs/agent-runtime/` by default:
+Pi is the default production Chat runtime. `server/agentRuntime/piChatRuntime.mjs` drives the existing governed business stages without loading StateGraph. Authentication, actor scope, deterministic semantic plans, typed tool execution, recovery, attachment handling, and audit records retain their existing contracts. Answer evidence/citation checks are advisory rather than publication gates.
+
+Pi interprets the complete conversation instead of rejecting topic keywords or forcing ordinary text into a semantic query. Tool-capable conversation and final-answer composition use separate instructions. A completed assistant response is retained and published through the sanitized SSE boundary, without a second request to reinvent it. Backend tool availability is checked against a fixed canonical route map; missing operations are withheld, not invented from OpenAPI metadata. Actor and tool policy checks still apply independently.
+
+The production Pi path does not narrow tools or insert a lookup/aggregate/clarification script for named reporters. It also leaves empty-result diagnosis and ordinary tool-error correction to the model. Invalid arguments are never executed, but their observations can inform a corrected call. Actual access denial and explicit user-input requests still stop execution. The default budget is eight tool rounds, capped at ten; explicit LangGraph rollback retains its compatibility behavior.
+
+Existing discovery, candidate-value, aggregate, record, and export APIs are wired to their repository-owned implementations. Candidate lookup carries the server-signed actor capability when an actor is present; agent aggregation injects mandatory row scope and records/export use signed drilldown references. An unspecified time range is supported without inheriting the Dashboard's default year, while explicit filters remain intact. Interactive field discovery uses bounded sampled profiling rather than a full database population scan; its metadata identifies sampling and does not present sample counts as total rows. Explicit offline catalog generation remains exact.
+
+Evidence and citation checks produce diagnostic `answer-validation` events with `blocking:false`. A failed check, inspection-buffer limit, or diagnostic exception cannot withhold the answer or its usage statistics. Pi does not force an answer-only correction, insert synthetic citations, or replace a completed answer with a fixed evidence summary. Ontology, semantic execution, canonical arguments, and actual data-access permissions remain enforced; failed tools remain failures rather than becoming fabricated results. This intentionally removes the programmatic guarantee that every published claim matches its evidence envelope.
+
+Set `VIZION_AGENT_RUNTIME=langgraph` for explicit rollback (`legacy` remains an alias). Restart the Node service, or the complete local `npm run dev` stack when its shared actor-capability configuration changes. `GET http://127.0.0.1:3004/health` reports the active `agentRuntime` rather than only the configured value. Both runtime paths serialize a complete Chat turn by thread and server-owned actor scope.
+
+The runtime writes append-only artifacts below `logs/agent-runtime/` by default:
 
 - `run-summaries.jsonl`: normalized summary records
 - `run-events.jsonl`: lifecycle and stream-completion events
@@ -391,6 +403,8 @@ LangGraph writes append-only runtime artifacts below `logs/agent-runtime/` by de
 - `threads/`: checkpoints
 
 The Agent Operations page requires the server-resolved `agent.operations.read` row policy. Its API returns opaque run references and sanitized timeline fields only. Raw audit files still require filesystem access control because they are operational logs. Configure external retention and backup jobs; a recommended starting policy is 30 days for raw events/tool audits, 90 days for summaries, and no backup of thread checkpoints unless an approved incident process requires it.
+
+The original migration and its then-blocked business-data checks are recorded in `docs/superpowers/plans/2026-11-11-pi-readonly-agent-poc.md`. The subsequent conversation fixes, restored semantic backend wiring, and successful live semantic verification are recorded in [the contextual conversation implementation record](docs/superpowers/plans/2026-11-18-contextual-agent-conversation.md). A healthy Pi runtime alone still does not imply readiness of every backend operation.
 
 ### Emergency Rollback
 

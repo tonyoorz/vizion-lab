@@ -525,3 +525,250 @@ def test_workbook_walkthrough_refuses_to_overwrite_source_or_existing_output(tmp
     with pytest.raises(FileExistsError):
         build_workbook_walkthrough(source, output)
     assert output.read_text(encoding='utf-8') == 'User output'
+
+
+def test_quality_scope_deduplicates_candidates_and_does_not_confuse_triggers_with_quality() -> None:
+    from backend.analytics.free_test_quality_scope import classify_free_test_evidence
+
+    slow = {
+        'defectId': '123', 'name': 'Speech response takes 8 seconds',
+        'discoveryPath': 'Activate speech and observe delayed response.',
+        'functions': ['Speech'], 'reproductionAttempts': 5, 'lifecycleRuns': 2,
+    }
+    wrong = {
+        'defectId': '124', 'name': 'Navigation route is wrong',
+        'discoveryPath': 'Rapidly tap the destination and check the incorrect route.',
+        'functions': ['Navigation'],
+    }
+    recovery = {
+        'defectId': '125', 'name': 'Camera preview remains black after permission is restored',
+        'discoveryPath': 'Disable camera permission, restore permission and reopen the app.',
+        'functions': ['Camera'],
+    }
+    data = {
+        'coverage': {'freeTestTickets': 20, 'freeTestWithActions': 18},
+        'discoveryPatternLibrary': {
+            'candidateTicketCount': 3,
+            'patterns': [
+                {'patternId': 'input', 'pattern': 'Voice-input channel and mode boundaries',
+                 'caseStudies': [slow, wrong]},
+                {'patternId': 'recovery', 'pattern': 'Disconnect/reconnect sequence exploration',
+                 'caseStudies': [slow, recovery]},
+            ],
+        },
+    }
+    result = classify_free_test_evidence(data)
+    records = {record['ticketId']: record for record in result['records']}
+    assert set(records) == {'123', '124', '125'}
+    assert records['123']['qualityPrimary'] == 'PE.TIME'
+    assert records['124']['qualityPrimary'] == 'FS.CORRECT'
+    assert 'PE.TIME' not in records['124']['qualitySecondary']
+    assert records['125']['qualityPrimary'] == 'RE.RECOVER'
+    assert not any(code.startswith('SE.') for code in records['125']['qualitySecondary'])
+    assert records['123']['sourcePatterns'] == ['input', 'recovery']
+    assert all(record['reviewStatus'] == 'candidate_needs_review' for record in records.values())
+    assert result['summary']['uniqueTickets'] == 3
+    assert sum(result['summary']['primaryQualityCounts'].values()) == 3
+    assert sum(result['summary']['primaryScenarioCounts'].values()) == 3
+    assert sum(result['summary']['qualityScenarioCounts'].values()) == 3
+    assert result['summary']['sourceFreeTestTickets'] == 20
+    assert result['summary']['unit'] == 'unique_candidate_ticket'
+
+
+def test_quality_scope_keeps_the_full_cohort_separate_from_the_complex_candidate_subset() -> None:
+    from copy import deepcopy
+
+    from backend.analytics.free_test_quality_scope import classify_free_test_evidence
+
+    data = {
+        'coverage': {'freeTestTickets': 3, 'freeTestWithActions': 2},
+        'freeTestEvidence': [
+            {'defectId': '123', 'name': 'Speech loads slowly', 'actions': 'Activate speech.',
+             'discoveryBasis': 'Explicit Free-test report reference',
+             'methodEvidence': {'Input / language / command variation': {'source': 'actions', 'excerpt': 'Activate speech.'}}},
+            {'defectId': '124', 'name': 'No audio after source selection', 'actions': 'Quickly select a source.',
+             'discoveryBasis': 'No testcase link (Free test by policy)'},
+            {'defectId': '125', 'name': 'Observation needs clarification', 'actions': '',
+             'discoveryBasis': 'No testcase link (Free test by policy)'},
+        ],
+        'discoveryPatternLibrary': {
+            'candidateTicketCount': 1, 'candidateTicketIds': ['123'],
+            'patterns': [{'patternId': 'input_channel_contrast', 'pattern': 'Voice-input channel and mode boundaries',
+                          'caseStudies': [{'defectId': '123', 'name': 'Speech loads slowly',
+                                           'discoveryPath': 'Activate speech.'}]}],
+        },
+    }
+    original = deepcopy(data)
+    result = classify_free_test_evidence(data)
+    records = {record['ticketId']: record for record in result['records']}
+    assert data == original
+    assert set(records) == {'123', '124', '125'}
+    assert records['123']['qualityPrimary'] == 'PE.TIME'
+    assert records['123']['inComplexSubset'] is True
+    assert records['124']['inComplexSubset'] is False
+    assert records['125']['qualityPrimary'] == 'UNCLASSIFIED'
+    assert records['123']['discoveryBasis'] == 'Explicit Free-test report reference'
+    assert result['summary']['complexCandidateTickets'] == 1
+    assert result['summary']['uniqueTickets'] == 3
+    assert result['summary']['cohortBasisCounts'] == {
+        'Explicit Free-test report reference': 1,
+        'No testcase link (Free test by policy)': 2,
+    }
+    assert sum(result['summary']['primaryQualityCounts'].values()) == 3
+
+
+@pytest.mark.parametrize(('invalid_source', 'message'), [
+    ('complex_ids', 'Complex candidate ID mismatch'),
+    ('complex_count', 'Complex candidate count mismatch'),
+    ('cohort_count', 'Full cohort count mismatch'),
+    ('cohort_basis', 'Conflicting discovery basis'),
+])
+def test_quality_scope_rejects_inconsistent_frozen_evidence(tmp_path: Path, invalid_source: str, message: str) -> None:
+    from backend.analytics.free_test_quality_scope import classify_free_test_evidence
+
+    source, evidence = _inputs(tmp_path)
+    data = json.loads(evidence.read_text(encoding='utf-8'))
+    if invalid_source == 'complex_ids':
+        data['discoveryPatternLibrary']['candidateTicketIds'] = ['999']
+    elif invalid_source == 'complex_count':
+        data['discoveryPatternLibrary']['candidateTicketCount'] = 2
+    elif invalid_source == 'cohort_count':
+        data['freeTestEvidence'] = [{'defectId': '123', 'name': 'Failure'}]
+    else:
+        data['coverage']['freeTestTickets'] = 1
+        data['freeTestEvidence'] = [
+            {'defectId': '123', 'name': 'Failure', 'discoveryBasis': 'Explicit Free-test report reference'},
+            {'defectId': '123', 'name': 'Failure', 'discoveryBasis': 'No testcase link (Free test by policy)'},
+        ]
+    with pytest.raises(ValueError, match=message):
+        classify_free_test_evidence(data)
+
+
+def test_quality_scope_workbook_preserves_existing_navigation_and_adds_independent_axes(tmp_path: Path) -> None:
+    from copy import copy
+    import re
+
+    from backend.analytics.free_test_quality_scope import SHEETS, build_quality_scope_workbook
+    from backend.analytics.work_package_matrix import add_work_package_explanations, add_workbook_navigation, build_work_package_matrix
+
+    source, evidence, strategies = _matrix_inputs(tmp_path)
+    navigator = tmp_path / 'navigator.xlsx'
+    build_work_package_matrix(source, evidence, strategies, navigator)
+    original = load_workbook(navigator)
+    add_work_package_explanations(original.active, original.create_sheet('Sheet1'))
+    add_workbook_navigation(original)
+    original.save(navigator)
+    original.close()
+    original = load_workbook(navigator)
+    expected = {(sheet.title, cell.coordinate): (cell.value, copy(cell._style))
+                for sheet in original for row in sheet for cell in row}
+    original.close()
+    source_bytes, evidence_bytes = navigator.read_bytes(), evidence.read_bytes()
+    output = tmp_path / 'quality_navigator.xlsx'
+    result = build_quality_scope_workbook(navigator, evidence, output)
+    assert navigator.read_bytes() == source_bytes
+    assert evidence.read_bytes() == evidence_bytes
+    assert result['qualityPackageCount'] == 7
+    assert result['qualityCharacteristicCount'] == 8
+    assert result['summary']['uniqueTickets'] == 1
+    workbook = load_workbook(output)
+    assert workbook.active.title == SHEETS['guide']
+    assert set(SHEETS.values()) <= set(workbook.sheetnames)
+    assert len(workbook.sheetnames) == 12
+    for (sheet_name, address), value in expected.items():
+        cell = workbook[sheet_name][address]
+        assert (cell.value, copy(cell._style)) == value
+    packages = workbook[SHEETS['packages']]
+    assert [packages.cell(row, 1).value for row in range(6, 13)] == [f'FT-Q{index:02d}' for index in range(1, 8)]
+    taxonomy = workbook[SHEETS['taxonomy']]
+    assert taxonomy.max_row == 37
+    assert {taxonomy.cell(row, 1).value for row in range(6, 38)} >= {'FS.CORRECT', 'PE.TIME', 'CO.INTEROP', 'RE.RECOVER', 'SE.CONF', 'UNCLASSIFIED'}
+    assert workbook[SHEETS['checkpoints']].max_row >= 40
+    details = workbook[SHEETS['evidence']]
+    assert details['A6'].value == '123'
+    assert details['G6'].value is None and details['K6'].value is None
+    assert details['H6'].value == '=IF(G6="",F6,IF(COUNTIF(FTQ_QualityCodes,G6)=1,G6,"UNCLASSIFIED"))'
+    assert details['L6'].value == '=IF(K6="",J6,IF(COUNTIF(FTQ_Scenarios,K6)=1,K6,"UNMAPPED"))'
+    assert 'INVALID_REVIEW' in details['X6'].value
+    log = workbook[SHEETS['activity']]
+    assert log['A6'].value is None and log['N6'].value is None
+    assert 'COUNTIFS' in log['S6'].value
+    assert 'INVALID_VALUE' in log['R6'].value
+    assert 'NEGATIVE_OR_NONNUMERIC' in log['R6'].value
+    assert 'FTQ_WorkPackages' in log['R6'].value
+    assert '"PASS"' in log['S6'].value and '"NO_FINDING"' in log['S6'].value
+    assert log.data_validations.count >= 8
+    statistics = workbook[SHEETS['summary']]
+    assert any('waiting FreeTest minutes' in str(cell.value) for row in statistics for cell in row)
+    assert any('$N$6:$N$1005,"<>"' in str(cell.value) for row in statistics for cell in row)
+    assert workbook.calculation.calcMode == 'auto'
+    assert workbook.calculation.fullCalcOnLoad is True
+    for sheet in workbook:
+        for row in sheet:
+            for cell in row:
+                if cell.hyperlink and cell.hyperlink.location:
+                    match = re.fullmatch(r"'((?:[^']|'')+)'!([A-Z]+\d+)", cell.hyperlink.location)
+                    assert match, cell.hyperlink.location
+                    title, address = match.groups()
+                    assert workbook[title.replace("''", "'")][address].value is not None
+    workbook.close()
+    with pytest.raises(FileExistsError):
+        build_quality_scope_workbook(navigator, evidence, output)
+    with pytest.raises(ValueError, match='overwrite'):
+        build_quality_scope_workbook(navigator, evidence, navigator)
+
+
+@pytest.mark.parametrize('compact_header', [False, True])
+def test_free_test_only_revision_changes_only_the_existing_six_matrix_rows(tmp_path: Path, compact_header: bool) -> None:
+    from copy import copy
+
+    from backend.analytics.work_package_matrix import (
+        add_work_package_explanations, add_workbook_navigation, build_work_package_matrix,
+        revise_free_test_quality_rows,
+    )
+
+    source, evidence, strategies = _matrix_inputs(tmp_path)
+    path = tmp_path / 'original.xlsx'
+    build_work_package_matrix(source, evidence, strategies, path)
+    workbook = load_workbook(path)
+    matrix = workbook.active
+    if compact_header:
+        for merged in list(matrix.merged_cells.ranges):
+            if merged.min_row > 1:
+                matrix.unmerge_cells(str(merged))
+        matrix.delete_rows(2, 5)
+    add_work_package_explanations(matrix, workbook.create_sheet('Sheet1'))
+    add_workbook_navigation(workbook)
+    workbook.save(path)
+    workbook.close()
+    original_bytes = path.read_bytes()
+    workbook = load_workbook(path)
+    titles = list(workbook.sheetnames)
+    target_rows = {row[0].row for row in workbook[matrix.title]
+                   if str(row[0].value).startswith('FREE-')}
+    preserved = {(sheet.title, cell.coordinate): (cell.value, copy(cell._style),
+                 cell.comment.text if cell.comment else None)
+                 for sheet in workbook for row in sheet for cell in row
+                 if sheet.title != matrix.title or cell.row not in target_rows}
+    size = (workbook[matrix.title].max_row, workbook[matrix.title].max_column)
+    result = revise_free_test_quality_rows(workbook)
+    assert workbook.sheetnames == titles
+    assert set(result['rows']) == target_rows
+    assert result['packageCount'] == 6
+    assert (workbook[matrix.title].max_row, workbook[matrix.title].max_column) == size
+    assert [workbook[matrix.title].cell(row, 1).value for row in sorted(target_rows)] == [f'FREE-0{index}' for index in range(1, 7)]
+    for (title, address), value in preserved.items():
+        cell = workbook[title][address]
+        assert (cell.value, copy(cell._style), cell.comment.text if cell.comment else None) == value
+    names = [workbook[matrix.title].cell(row, 3).value for row in sorted(target_rows)]
+    assert names == [
+        '\u529f\u80fd\u6b63\u786e\u6027\u4e0e\u4ea4\u4e92\u8fb9\u754c\u63a2\u7d22',
+        '\u65f6\u95f4\u884c\u4e3a\u4e0e\u54cd\u5e94\u6027\u80fd\u63a2\u7d22',
+        '\u8de8\u7cfb\u7edf\u4e0e\u8de8\u8bbe\u5907\u4e92\u64cd\u4f5c\u63a2\u7d22',
+        '\u6b63\u5e38\u4f7f\u7528\u7a33\u5b9a\u6027\u4e0e\u53ef\u7528\u6027\u63a2\u7d22',
+        '\u5f02\u5e38\u6761\u4ef6\u5bb9\u9519\u4e0e\u964d\u7ea7\u884c\u4e3a\u63a2\u7d22',
+        '\u4e2d\u65ad\u540e\u6062\u590d\u4e0e\u72b6\u6001\u4fdd\u6301\u63a2\u7d22',
+    ]
+    workbook.save(tmp_path / 'free_test_only.xlsx')
+    workbook.close()
+    assert path.read_bytes() == original_bytes

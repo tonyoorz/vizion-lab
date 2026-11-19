@@ -251,7 +251,7 @@ describe("main agent analytics tools", () => {
     expect(result.contextText).toContain("allowlisted read-only fallback");
   });
 
-  it("fails closed for legacy fallback and duplicate search under an OIDC-scoped actor", async () => {
+  it("fails closed for legacy unscoped tools under an OIDC-scoped actor", async () => {
     const oidcActor = {
       actorId: "oidc-reader",
       scopeHash: "oidc-0123456789abcdef",
@@ -275,11 +275,16 @@ describe("main agent analytics tools", () => {
       },
       { runDuplicateBridge, actor: oidcActor },
     );
+    const context = await executeMainAgentToolCall(
+      { id: "oidc-context", type: "function", function: { name: "get_test_case_context", arguments: JSON.stringify({ anchor: { type: "defect_id", value: "D-1" } }) } },
+      { analyticsFetch, analyticsApiBase: "http://127.0.0.1:3003", actor: oidcActor },
+    );
 
     expect(analyticsFetch).not.toHaveBeenCalled();
     expect(runDuplicateBridge).not.toHaveBeenCalled();
     expect(JSON.parse(fallback.toolMessage.content)).toMatchObject({ ok: false, failure: { code: "OIDC_UNSCOPED_TOOL_DISABLED" } });
     expect(JSON.parse(duplicate.toolMessage.content)).toMatchObject({ ok: false, failure: { code: "OIDC_UNSCOPED_TOOL_DISABLED" } });
+    expect(JSON.parse(context.toolMessage.content)).toMatchObject({ ok: false, failure: { code: "OIDC_UNSCOPED_TOOL_DISABLED" } });
   });
 
   it("executes query_semantic_metrics through the semantic API", async () => {
@@ -607,6 +612,18 @@ describe("main agent analytics tools", () => {
     expect(result.contextText).toContain("Tool: search_analytics_filter_values");
     expect(result.contextText).toContain("detected_by candidates for siz");
     expect(result.contextText).toContain("Size Li: 2");
+  });
+
+  it("signs filter-value discovery with the server-owned actor scope", async () => {
+    const analyticsFetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ values: [] }) });
+    await executeMainAgentToolCall({
+      id: "scoped-values", type: "function",
+      function: { name: "search_analytics_filter_values", arguments: JSON.stringify({ dataset: "defects", field: "detected_by", query: "alice" }) },
+    }, { analyticsFetch, analyticsApiBase: "http://127.0.0.1:3003", ...scopedAgentDependencies() });
+
+    expect(verifyActorCapabilityHeader(analyticsFetch.mock.calls[0][1].headers, {
+      secret: AGENT_CAPABILITY_SECRET, now: AGENT_CAPABILITY_NOW,
+    })).toMatchObject({ actorId: "alice", scopeHash: "scope-alice-dtsv" });
   });
 
   it("normalizes common QGate business terms without calling data APIs", async () => {

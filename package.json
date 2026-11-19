@@ -19,6 +19,7 @@
     "start": "node ./server/index.mjs",
     "test": "vitest run",
     "benchmark:asr": "node ./scripts/benchmarkTranscription.mjs",
+    "probe:pi-agent": "node ./scripts/probePiAgentRuntime.mjs",
     "test:watch": "vitest",
     "test:agent-evals": "vitest run src/test/server/mainAgentGolden.test.ts src/test/server/ontology/semanticGolden.test.ts src/test/server/ontology/semanticQualityGolden.test.ts src/test/server/mainAgentExecutionGolden.test.ts src/test/server/mainAgentPolicyGolden.test.ts src/test/server/mainAgentToolRecovery.test.ts src/test/server/answerValidator.test.ts",
     "report:qgate-kpi": "node ./scripts/runPython.mjs -m backend.analytics_cli generate-qgate-kpi-reports",
@@ -29,6 +30,8 @@
     "test:ontology": "vitest run src/test/server/ontology && node ./scripts/runPython.mjs -m pytest backend/tests/test_ontology_contract.py -q"
   },
   "dependencies": {
+    "@earendil-works/pi-agent-core": "1.5.2",
+    "@earendil-works/pi-ai": "1.5.2",
     "@hookform/resolvers": "^3.10.0",
     "@langchain/langgraph": "^1.4.8",
     "@radix-ui/react-accordion": "^1.2.11",

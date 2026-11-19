@@ -129,3 +129,80 @@ def test_filter_value_search_loads_missing_detected_by_names(monkeypatch: pytest
 def test_filter_value_search_rejects_unsupported_field() -> None:
     with pytest.raises(read_models.FullPictureDashboardRequestError, match="Unsupported filter value field"):
         read_models.build_analytics_filter_value_search_payload(dataset="defects", field="status")
+
+
+def test_reporter_names_load_only_requested_source_rows(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    import json
+    import sqlite3
+
+    source = tmp_path / "source.db"
+    conn = sqlite3.connect(source)
+    try:
+        conn.execute("CREATE TABLE octane_defects (defect_id TEXT PRIMARY KEY, raw_json TEXT)")
+        conn.executemany("INSERT INTO octane_defects VALUES (?, ?)", [
+            ("D-1", json.dumps({"detected_by": {"full_name": "Alice"}, "author": {"full_name": "Other Author"}})),
+            ("D-2", json.dumps({"author": {"full_name": "Bob"}})),
+            ("D-3", json.dumps({"detected_by": {"full_name": "Not Requested"}})),
+        ])
+        conn.commit()
+    finally:
+        conn.close()
+    monkeypatch.setattr(read_models, "get_full_picture_source_db_path", lambda: source)
+
+    assert read_models._load_detected_by_names(["D-1", "D-2"]) == {"D-1": "Alice", "D-2": "Bob"}
+
+
+def test_analytics_loader_applies_the_person_filter(monkeypatch: pytest.MonkeyPatch) -> None:
+    from backend.analytics import defect_query_models
+
+    rows = [
+        {"ticket_id": "D-1", "detected_by": "Alice"},
+        {"ticket_id": "D-2", "detected_by": "Bob"},
+        {"ticket_id": "D-3"},
+    ]
+    monkeypatch.setattr(read_models, "normalize_query", lambda **_filters: object())
+    monkeypatch.setattr(read_models, "_load_materialized_ticket_rows", lambda **_kwargs: rows)
+    monkeypatch.setattr(read_models, "_load_detected_by_names", lambda _ids: {"D-3": "Alice"}, raising=False)
+
+    result = defect_query_models._load_rows("snapshot-1", {"detected_by": ["Alice"]}, {})
+
+    assert [row["ticket_id"] for row in result] == ["D-1", "D-3"]
+
+
+@pytest.mark.parametrize("lookup", [False, True])
+@pytest.mark.parametrize("years", [[], ["2025"]])
+def test_agent_queries_preserve_explicit_years_without_inheriting_dashboard_defaults(monkeypatch, lookup, years) -> None:
+    from backend.analytics import defect_query_models
+
+    captured: dict[str, object] = {}
+
+    def load_rows(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(read_models, "_read_snapshot_metadata", lambda: {})
+    monkeypatch.setattr(read_models, "_resolve_effective_snapshot_version", lambda _metadata: "snapshot-1")
+    monkeypatch.setattr(read_models, "_load_materialized_ticket_rows", load_rows)
+    filters = {"years": years} if years else {}
+    if lookup:
+        read_models.build_analytics_filter_value_search_payload(dataset="defects", field="detected_by", filters=filters)
+    else:
+        defect_query_models._load_rows("snapshot-1", filters, {})
+
+    assert getattr(captured["query"], "years") == tuple(years)
+
+
+def test_reporter_dimension_uses_materialized_and_source_names(monkeypatch) -> None:
+    from backend.analytics import defect_query_models
+
+    monkeypatch.setattr(defect_query_models, "_current_snapshot_version", lambda: "snapshot-1")
+    monkeypatch.setattr(read_models, "_load_materialized_ticket_rows", lambda **_kwargs: [
+        {"ticket_id": "D-1", "detected_by": "Alice"},
+        {"ticket_id": "D-2", "detected_by": "Bob"},
+        {"ticket_id": "D-3"},
+    ])
+    monkeypatch.setattr(read_models, "_load_detected_by_names", lambda _ids: {"D-3": "Alice"})
+
+    result = defect_query_models.build_defect_aggregate_payload(dimensions=["detected_by"], filters={}, time={})
+
+    assert {row["detected_by"]: row["defect_count"] for row in result["rows"]} == {"Alice": 2, "Bob": 1}

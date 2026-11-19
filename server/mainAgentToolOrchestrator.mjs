@@ -24,6 +24,11 @@ function standardEvent(base, event) {
   };
 }
 
+export async function runPiMainAgentToolTurn(options = {}) {
+  const runtime = await import("./agentRuntime/piToolRuntime.mjs");
+  return runtime.runPiMainAgentToolTurn(options);
+}
+
 export async function runMainAgentToolTurn({
   messages,
   model,

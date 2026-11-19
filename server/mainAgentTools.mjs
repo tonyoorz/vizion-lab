@@ -102,7 +102,6 @@ const ANALYTICS_QUERY_PROPERTIES = {
       comparison: { type: "array", items: { type: "string" }, minItems: 2, maxItems: 2 },
       timezone: { type: "string", enum: ["Asia/Shanghai"] },
     },
-    required: ["field", "current", "timezone"],
     additionalProperties: false,
   },
   order_by: {
@@ -339,7 +338,6 @@ export const MAIN_AGENT_TOOLS = [
               current: { type: "array", items: { type: "string" }, minItems: 2, maxItems: 2 },
               timezone: { type: "string", enum: ["Asia/Shanghai"] },
             },
-            required: ["field", "current", "timezone"],
             additionalProperties: false,
           },
           order_by: {
@@ -659,7 +657,6 @@ export const MAIN_AGENT_TOOLS = [
               comparison: { type: "array", items: { type: "string" }, minItems: 2, maxItems: 2 },
               timezone: { type: "string", enum: ["Asia/Shanghai"] },
             },
-            required: ["field", "current", "timezone"],
             additionalProperties: false,
           },
           order_by: {
@@ -1372,7 +1369,7 @@ function formatAnalyticsFilterValueSearchContext(url, payload) {
   ].join("\n");
 }
 
-async function executeAnalyticsFilterValueSearch(toolCall, { analyticsFetch, analyticsApiBase }) {
+async function executeAnalyticsFilterValueSearch(toolCall, dependencies) {
   const args = parseToolArguments(toolCall?.function?.arguments);
   const payload = {
     dataset: String(args.dataset || "defects"),
@@ -1381,13 +1378,11 @@ async function executeAnalyticsFilterValueSearch(toolCall, { analyticsFetch, ana
     ...(args.filters && typeof args.filters === "object" ? { filters: args.filters } : {}),
     ...(args.limit ? { limit: Number(args.limit) } : {}),
   };
-  const { url, response } = await postAnalyticsJson("/api/analytics/filter-values/search", payload, { analyticsFetch, analyticsApiBase });
+  const post = dependencies.actor ? postAgentAnalyticsJson : postAnalyticsJson;
+  const { url, response } = await post("/api/analytics/filter-values/search", payload, dependencies);
   if (!response?.ok) {
-    const content = JSON.stringify({ error: `Analytics API request failed for search_analytics_filter_values: ${response?.status || "unknown"}` });
-    return {
-      toolMessage: buildToolMessage(toolCall, content),
-      contextText: `# Main agent tool result\nTool: search_analytics_filter_values\nSource query: POST ${url}\nResult: unavailable because the analytics value search API request failed.`,
-    };
+    return failedToolResult(toolCall, "search_analytics_filter_values", await sanitizedHttpFailure(response),
+      `# Main agent tool result\nTool: search_analytics_filter_values\nSource query: POST ${url}\nResult: unavailable because the analytics value search API request failed.`);
   }
 
   const result = await response.json();
@@ -1728,7 +1723,12 @@ function formatTestCaseContext(url, payload) {
   ].join("\n");
 }
 
-async function executeTestCaseContext(toolCall, { analyticsFetch, analyticsApiBase }) {
+async function executeTestCaseContext(toolCall, { analyticsFetch, analyticsApiBase, actor }) {
+  if (isOidcScopedActor(actor)) {
+    return failedToolResult(toolCall, "get_test_case_context",
+      { code: "OIDC_UNSCOPED_TOOL_DISABLED", statusCode: 403, retryable: false },
+      "# Main agent tool result\nTool: get_test_case_context\nResult: the legacy context reader does not enforce the current actor row scope.");
+  }
   const args = parseToolArguments(toolCall?.function?.arguments);
   const { url, response } = await postAnalyticsJson("/api/ontology/context", args, { analyticsFetch, analyticsApiBase });
   if (!response?.ok) {
@@ -2343,7 +2343,7 @@ export async function executeMainAgentToolCall(toolCall, {
       return await executeOctaneFieldSearch(toolCall, { analyticsFetch, analyticsApiBase });
     }
     if (name === "search_analytics_filter_values") {
-      return await executeAnalyticsFilterValueSearch(toolCall, { analyticsFetch, analyticsApiBase });
+      return await executeAnalyticsFilterValueSearch(toolCall, agentAnalyticsDependencies);
     }
     if (name === "resolve_business_terms") {
       return executeResolveBusinessTerms(toolCall);
@@ -2376,7 +2376,7 @@ export async function executeMainAgentToolCall(toolCall, {
       return await executeTestingTeamFvAnalysis(toolCall, agentAnalyticsDependencies);
     }
     if (name === "get_test_case_context") {
-      return await executeTestCaseContext(toolCall, { analyticsFetch, analyticsApiBase });
+      return await executeTestCaseContext(toolCall, { analyticsFetch, analyticsApiBase, actor });
     }
     if (name === "query_defect_high_frequency_analysis") {
       return await executeDefectHighFrequency(toolCall, { analyticsFetch, analyticsApiBase, now });

@@ -2,12 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 
 import { streamLangGraphChatResponse } from "../../../../server/agentRuntime/langGraphChatHandler.mjs";
 
-describe("LangGraph chat handler", () => {
+describe.each(["pi", "langgraph"])("%s Chat handler", (runtimeKind) => {
   it("streams a runtime direct response without calling the final chat model", async () => {
     const response = { writeHead: vi.fn(), write: vi.fn(), end: vi.fn(), flushHeaders: vi.fn() };
     const runtime = {
       invoke: vi.fn(async () => ({
-        runtime: "langgraph",
+        runtime: runtimeKind,
         threadId: "thread-1",
         directResponse: { content: "你好，我可以帮你看测试质量和缺陷数据。" },
         metrics: { mainAgentToolCallCount: 0 },
@@ -40,13 +40,14 @@ describe("LangGraph chat handler", () => {
       invoke: vi.fn(async (_input, options) => {
         options.onEvent({ type: "agent-runtime-started", threadId: "thread-1" });
         return {
-          runtime: "langgraph",
+          runtime: runtimeKind,
           threadId: "thread-1",
           finalMessages: [
             { role: "user", content: "DTSV 6月份提了多少bug？" },
             { role: "tool", name: "query_semantic_metrics", content: "{}" },
           ],
           context: "# Tool context",
+          preparedCompletion: { content: "Prepared supported answer.", answerModel: "deepseek-v4-flash" },
           prefaceEvents: [{ type: "tool-output-available", toolName: "query_semantic_metrics" }],
           mainAgentToolContext: {
             evidence: [{ toolCallId: "call-1", tool: "query_semantic_metrics" }],
@@ -94,6 +95,7 @@ describe("LangGraph chat handler", () => {
         ],
         model: "deepseek-v4-flash",
         context: "# Tool context",
+        preparedCompletion: { content: "Prepared supported answer.", answerModel: "deepseek-v4-flash" },
         response,
         prefaceEvents: [{ type: "tool-output-available", toolName: "query_semantic_metrics" }],
         answerValidation: expect.objectContaining({
@@ -112,7 +114,7 @@ describe("LangGraph chat handler", () => {
     const response = { writeHead: vi.fn(), write: vi.fn(), end: vi.fn(), writableEnded: false };
     const runtime = {
       invoke: vi.fn(async () => ({
-        runtime: "langgraph",
+        runtime: runtimeKind,
         runId: "run-1",
         threadId: "thread-1",
         finalMessages: [{ role: "user", content: "DTSV count" }],

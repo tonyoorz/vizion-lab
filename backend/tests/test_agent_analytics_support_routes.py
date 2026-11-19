@@ -57,6 +57,35 @@ def test_filter_value_search_route_forwards_structured_payload(monkeypatch) -> N
     assert captured_payload == {"dataset": "defects", "field": "detected_by", "query": "alice"}
 
 
+def test_filter_value_search_injects_verified_scope(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def build_payload(**payload: Any) -> dict[str, Any]:
+        captured.update(payload)
+        return {"values": []}
+
+    monkeypatch.setattr(api, "build_analytics_filter_value_search_payload", build_payload, raising=False)
+    response = TestClient(api.app).post(
+        "/api/analytics/filter-values/search",
+        json={"dataset": "defects", "field": "detected_by", "query": "alice"},
+        headers=_actor_headers(monkeypatch),
+    )
+
+    assert response.status_code == 200
+    assert captured["filters"] == {"problem_finder_teams": ["DTSV_China"]}
+
+
+def test_filter_value_search_rejects_a_scope_expansion(monkeypatch) -> None:
+    response = TestClient(api.app).post(
+        "/api/analytics/filter-values/search",
+        json={"dataset": "defects", "field": "detected_by", "filters": {"problem_finder_teams": ["Other"]}},
+        headers=_actor_headers(monkeypatch),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "ACTOR_CAPABILITY_SCOPE_DENIED"
+
+
 def test_ontology_catalog_route_exposes_the_catalog_builder(monkeypatch) -> None:
     monkeypatch.setattr(api, "build_ontology_catalog_payload", lambda: {"ontology_version": "1.0"}, raising=False)
 

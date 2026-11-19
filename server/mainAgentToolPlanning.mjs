@@ -1,5 +1,4 @@
 import { extractLatestUserQuery } from "./aiContext.mjs";
-import { classifyDirectMainAgentIntent } from "./mainAgentDirectIntent.mjs";
 import { executeMainAgentToolCall, extractDetectedByName, isDefectReporterTicketQuery, MAIN_AGENT_TOOLS } from "./mainAgentTools.mjs";
 import { buildToolEvidence } from "./mainAgentEvidence.mjs";
 import { executeToolWithRecovery } from "./mainAgentToolRecovery.mjs";
@@ -65,7 +64,16 @@ Use get_test_case_context before drafting or extending a testcase when the user 
 For an Octane ticket URL such as entityType=work_item&id=2774806, extract id=2774806 as anchor.type defect_id and call get_test_case_context; do not stop at external-link access limitations.
 Use query_full_picture_module as the fallback for factual Full Picture dashboard questions when no more specific tool fits. Prefer query_analytics first for defect counts/trends/rankings; use query_full_picture_module for page-parity payloads or modules not covered by query_analytics. Choose only one allowlisted module: dashboard_summary, dashboard_tickets, top_issue_analysis, long_runner_analysis, or defect_high_frequency_analysis.`;
 
-const TOOL_PLANNING_QUERY_RE = /\b(DTSV|QGate|Octane|ticket|work_item|dashboard|ontology|capability|available|partial|unavailable|bug|defect|issue|top\s*issue|octane_defects|solution_cluster|assigned_ecu|business_module|opened|created|raised|submitted|resolved|coverage|test|summary|count|metric|trend|growth|rising|increase|delta|duplicate|similar|write|update|delete|edit|empty\s*result|no\s*data|zero\s*rows)\b|entityType=work_item|id=\d+|本体|能力|缺陷|测试|覆盖率|多少|几个|统计|趋势|创建|提交|新建|解决|关闭|更新|修改|删除|写入|重复|查重|相似|模块|问题模块|上升|增长|环比|同比|根因|提票|报票|提了|数据.*(?:为空|没数据|没有数据|查不到)|为什么.*(?:为空|没数据|没有数据|查不到)|空结果/i;
+const MODEL_TOOL_PLANNING_CONTEXT = `# Model-owned business tool conversation
+Interpret the complete conversation and choose available registered tools without a fixed business workflow.
+Tool descriptions, schemas, ontology definitions, and actual tool results describe capabilities; a person's name or a business keyword does not select a mandatory tool sequence.
+Use available discovery tools when fields, metrics, or exact filter values are unclear. Do not call an unavailable tool or treat a missing capability as a user-permission denial.
+For a broad data request, obtain a useful initial result within the authorized scope. Optional project or time filters do not require repeated clarification; use the supported authorized scope and state necessary assumptions. Clarify only a genuinely unresolved identity or required execution detail.
+Preserve the user's established entity, filters, timeframe, and follow-up intent. Reuse backend analysis or drilldown references when continuing a result, without widening their scope.
+Use ontology and semantic definitions when they cover the question. If they do not, inspect other available authorized typed capabilities instead of inventing a metric or field.
+Ordinary argument, field, value, and service errors are observations for the next decision. Correct a permitted call or choose another available tool based on its schema and the returned evidence; do not repeat an identical failed call.
+Authorization denials are not recoverable by changing identity, broadening scope, or retrying the denied operation. Do not execute arbitrary SQL, code, or external writes through read tools.
+Answer from actual results, disclose relevant failures and limitations, and never describe an unsuccessful query as completed data retrieval.`;
 
 function formatPlanningDate(now = new Date()) {
   try {
@@ -82,17 +90,15 @@ function formatPlanningDate(now = new Date()) {
   }
 }
 
-export function buildToolPlanningContext(now) {
+export function buildToolPlanningContext(now, { modelDriven = false } = {}) {
   return [
-    TOOL_PLANNING_CONTEXT,
+    modelDriven ? MODEL_TOOL_PLANNING_CONTEXT : TOOL_PLANNING_CONTEXT,
     `# Runtime date\nCurrent date for relative analytics windows: ${formatPlanningDate(now)}. Timezone: Asia/Shanghai.`,
   ].join("\n\n");
 }
 
 export function shouldPlanMainAgentTools(messages) {
-  const queryText = extractLatestUserQuery(messages);
-  if (classifyDirectMainAgentIntent(queryText)) return false;
-  return Boolean(resolveDefectReporterRequest(messages)) || TOOL_PLANNING_QUERY_RE.test(queryText);
+  return Boolean(extractLatestUserQuery(messages));
 }
 
 export function mergeToolContext(...parts) {
@@ -195,8 +201,8 @@ function lookupForReporter(priorToolCalls, reporter) {
   });
 }
 
-export function buildDefectReporterLookupToolCall(messages, priorToolCalls = []) {
-  const reporterRequest = resolveDefectReporterRequest(messages, priorToolCalls);
+export function buildDefectReporterLookupToolCall(messages, priorToolCalls = [], reporterHistory = priorToolCalls) {
+  const reporterRequest = resolveDefectReporterRequest(messages, reporterHistory);
   if (!reporterRequest) {
     return null;
   }
@@ -293,8 +299,8 @@ export function buildDefectReporterExportToolCall({ messages, toolMessages = [],
   };
 }
 
-export function buildDefectReporterAliasLookupToolCall({ messages, toolMessages = [], priorToolCalls = [] } = {}) {
-  const reporterRequest = resolveDefectReporterRequest(messages, priorToolCalls);
+export function buildDefectReporterAliasLookupToolCall({ messages, toolMessages = [], priorToolCalls = [], reporterHistory = priorToolCalls } = {}) {
+  const reporterRequest = resolveDefectReporterRequest(messages, reporterHistory);
   if (!reporterRequest) {
     return null;
   }
@@ -321,8 +327,8 @@ export function buildDefectReporterAliasLookupToolCall({ messages, toolMessages 
   };
 }
 
-export function buildDefectReporterAggregateToolCall({ messages, toolMessages = [], priorToolCalls = [], now = new Date() } = {}) {
-  const reporterRequest = resolveDefectReporterRequest(messages, priorToolCalls);
+export function buildDefectReporterAggregateToolCall({ messages, toolMessages = [], priorToolCalls = [], reporterHistory = priorToolCalls, now = new Date() } = {}) {
+  const reporterRequest = resolveDefectReporterRequest(messages, reporterHistory);
   if (!reporterRequest) {
     return null;
   }
@@ -370,8 +376,8 @@ export function buildDefectReporterAggregateToolCall({ messages, toolMessages = 
   };
 }
 
-export function buildDefectReporterClarificationToolCall({ messages, toolMessages = [], priorToolCalls = [] } = {}) {
-  const reporterRequest = resolveDefectReporterRequest(messages, priorToolCalls);
+export function buildDefectReporterClarificationToolCall({ messages, toolMessages = [], priorToolCalls = [], reporterHistory = priorToolCalls } = {}) {
+  const reporterRequest = resolveDefectReporterRequest(messages, reporterHistory);
   if (!reporterRequest) {
     return null;
   }
@@ -494,6 +500,7 @@ export async function executeMainAgentPlannedToolCall({
   selectedToolset,
   executeToolCall = executeMainAgentToolCall,
   toolDependencies = {},
+  allowModelRecovery = false,
 } = {}) {
   const toolName = toolCall?.function?.name || "unknown_tool";
   const toolEvents = [{
@@ -563,6 +570,8 @@ export async function executeMainAgentPlannedToolCall({
       ? "clarification_requested"
       : recovered.recovery.action === "deny"
         ? "tool_access_denied"
+        : allowModelRecovery
+          ? ""
         : recovered.recovery.action === "retry" && recovered.recovery.outcome === "exhausted"
           ? "tool_recovery_exhausted"
           : recovered.recovery.action === "catalog"

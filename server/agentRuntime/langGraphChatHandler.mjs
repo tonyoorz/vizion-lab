@@ -17,7 +17,7 @@ function createAnswerValidation(runtimeResult) {
   }
 }
 
-export async function streamLangGraphChatResponse({
+async function streamRuntimeChatResponse({
   body = {},
   response,
   runtime,
@@ -58,6 +58,7 @@ export async function streamLangGraphChatResponse({
     prefaceEvents: runtimeResult.prefaceEvents,
     imageOcrRunner,
     documentTextRunner,
+    ...(runtimeResult.preparedCompletion ? { preparedCompletion: runtimeResult.preparedCompletion } : {}),
     answerValidation: createAnswerValidation(runtimeResult),
     onAnswerValidation: (validation) => {
       answerValidationResult = validation;
@@ -75,3 +76,13 @@ export async function streamLangGraphChatResponse({
   }
   return result;
 }
+
+export function streamAgentChatResponse(options = {}) {
+  const { runtime, body = {}, toolDependencies = {} } = options;
+  if (typeof runtime?.runChatTurn === "function") {
+    return runtime.runChatTurn({ body, toolDependencies }, (leased) => streamRuntimeChatResponse({ ...options, runtime: leased }));
+  }
+  return streamRuntimeChatResponse(options);
+}
+
+export const streamLangGraphChatResponse = streamAgentChatResponse;

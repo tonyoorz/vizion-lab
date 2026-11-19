@@ -1,16 +1,42 @@
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from urllib.parse import urlencode
 
 from fastapi import FastAPI, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
+from starlette.concurrency import run_in_threadpool
 
+from backend.analytics.auth_routes import router as auth_router
+from backend.analytics.agent_actor_capability import (
+    ACTOR_CAPABILITY_HEADER,
+    ActorCapabilityError,
+    enforce_defect_query_scope,
+    enforce_testing_team_fv_analysis_scope,
+    get_agent_actor_capability_secret,
+    verify_actor_capability_header,
+)
 from backend.analytics.config import get_analytics_db_path, get_full_picture_hot_db_path
 from backend.analytics.dashboard_snapshot import read_active_snapshot_state
+from backend.analytics.defect_query_models import (
+    AgentDrilldownScopeError,
+    build_defect_aggregate_payload,
+    build_defect_records_payload,
+    create_defect_records_export_payload,
+    stream_defect_records_export_csv,
+)
+from backend.analytics.ontology import OntologyLoadError, load_ontology
+from backend.analytics.ontology_context import build_ontology_catalog_payload, build_test_case_context_payload
+from backend.analytics.octane_field_catalog import load_local_octane_field_catalog, search_octane_fields
+from backend.analytics.fallback_query import build_analytics_fallback_query_payload
+from backend.analytics.semantic_analysis_store import SemanticAnalysisStore
+from backend.analytics.semantic_query import SemanticQueryError, execute_semantic_query, execute_semantic_records
 from backend.analytics.read_models import (
     FullPictureDashboardDataError,
     FullPictureDashboardRequestError,
+    build_analytics_filter_value_search_payload,
     build_defect_high_frequency_analysis_payload,
     build_defect_test_correlation,
     build_filter_metadata,
@@ -43,6 +69,7 @@ async def analytics_lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="Vizion Analytics API", lifespan=analytics_lifespan)
+app.include_router(auth_router)
 
 
 def _full_picture_query_params(request: Request) -> dict[str, object]:
@@ -61,6 +88,202 @@ def _full_picture_query_params(request: Request) -> dict[str, object]:
 @app.get("/health")
 def health() -> dict[str, object]:
     return {"ok": True, "service": "analytics"}
+
+
+@app.get("/api/ontology/catalog")
+def ontology_catalog() -> JSONResponse:
+    try:
+        return JSONResponse(status_code=200, content=build_ontology_catalog_payload())
+    except (OntologyLoadError, sqlite3.Error, OSError):
+        return JSONResponse(status_code=503, content={"error": "ontology catalog is unavailable"})
+
+
+def _agent_capability_error_response(error: ActorCapabilityError) -> JSONResponse:
+    return JSONResponse(
+        status_code=error.status_code,
+        content={"code": error.code, "safeMessage": "agent capability rejected", "retryable": False},
+    )
+
+
+def _agent_analytics_schema_error_response() -> JSONResponse:
+    return JSONResponse(status_code=400, content={
+        "code": "AGENT_ANALYTICS_SCHEMA_INVALID", "safeMessage": "agent analytics request rejected", "retryable": False,
+    })
+
+
+async def _agent_defect_response(request: Request, *, operation: str) -> JSONResponse:
+    try:
+        actor = verify_actor_capability_header(request.headers)
+        raw_payload = await request.json()
+        if operation == "aggregate":
+            scoped_payload = enforce_defect_query_scope(raw_payload, actor)
+        else:
+            if not isinstance(raw_payload, dict) or {"agent_actor_scope_hash", "agent_drilldown_secret"} & set(raw_payload):
+                raise ValueError("agent records payload must be an object")
+            scoped_payload = raw_payload
+        builder = {
+            "aggregate": build_defect_aggregate_payload,
+            "records": build_defect_records_payload,
+            "export": create_defect_records_export_payload,
+        }[operation]
+        payload = await run_in_threadpool(
+            builder, **scoped_payload,
+            agent_actor_scope_hash=actor["scopeHash"],
+            agent_drilldown_secret=get_agent_actor_capability_secret(),
+        )
+        if operation == "export":
+            payload = dict(payload)
+            token = payload.pop("download_token")
+            payload["download_url"] = "/api/agent/analytics/defects/export/download?" + urlencode({"token": token})
+        return JSONResponse(status_code=200, content=payload)
+    except ActorCapabilityError as exc:
+        return _agent_capability_error_response(exc)
+    except AgentDrilldownScopeError:
+        return JSONResponse(status_code=403, content={
+            "code": "AGENT_DRILLDOWN_SCOPE_DENIED", "safeMessage": "agent drilldown denied", "retryable": False,
+        })
+    except (FullPictureDashboardDataError, sqlite3.Error, OSError):
+        return JSONResponse(status_code=503, content={"error": "analytics database not initialized"})
+    except (FullPictureDashboardRequestError, ValueError, TypeError):
+        return _agent_analytics_schema_error_response()
+
+
+@app.post("/api/agent/analytics/defects/aggregate")
+async def agent_analytics_defects_aggregate(request: Request) -> JSONResponse:
+    return await _agent_defect_response(request, operation="aggregate")
+
+
+@app.post("/api/agent/analytics/defects/records")
+async def agent_analytics_defects_records(request: Request) -> JSONResponse:
+    return await _agent_defect_response(request, operation="records")
+
+
+@app.post("/api/agent/analytics/defects/export")
+async def agent_analytics_defects_export(request: Request) -> JSONResponse:
+    return await _agent_defect_response(request, operation="export")
+
+
+@app.get("/api/agent/analytics/defects/export/download")
+def agent_analytics_defects_export_download(token: str = Query(...)) -> Response:
+    try:
+        filename, rows = stream_defect_records_export_csv(token, secret=get_agent_actor_capability_secret())
+        return StreamingResponse(rows, media_type="text/csv", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+    except ActorCapabilityError as exc:
+        return _agent_capability_error_response(exc)
+    except AgentDrilldownScopeError:
+        return JSONResponse(status_code=403, content={"code": "AGENT_DRILLDOWN_SCOPE_DENIED", "retryable": False})
+    except (FullPictureDashboardDataError, sqlite3.Error, OSError):
+        return JSONResponse(status_code=503, content={"error": "analytics database not initialized"})
+    except (FullPictureDashboardRequestError, ValueError):
+        return _agent_analytics_schema_error_response()
+
+
+@app.post("/api/analytics/filter-values/search")
+async def analytics_filter_values_search(request: Request) -> JSONResponse:
+    try:
+        raw_payload = await request.json()
+        payload = raw_payload if isinstance(raw_payload, dict) else {}
+        if request.headers.get(ACTOR_CAPABILITY_HEADER) is not None:
+            payload = enforce_defect_query_scope(payload, verify_actor_capability_header(request.headers))
+        result = await run_in_threadpool(build_analytics_filter_value_search_payload, **payload)
+        return JSONResponse(status_code=200, content=result)
+    except ActorCapabilityError as exc:
+        return _agent_capability_error_response(exc)
+    except (FullPictureDashboardDataError, sqlite3.Error, OSError):
+        return JSONResponse(status_code=503, content={"error": "analytics database not initialized"})
+    except (FullPictureDashboardRequestError, ValueError, TypeError) as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+
+
+@app.post("/api/analytics/fallback/query")
+async def analytics_fallback_query(request: Request) -> JSONResponse:
+    try:
+        raw_payload = await request.json()
+        payload = await run_in_threadpool(build_analytics_fallback_query_payload, **(raw_payload if isinstance(raw_payload, dict) else {}))
+        return JSONResponse(status_code=200, content=payload)
+    except (FullPictureDashboardDataError, sqlite3.Error, OSError):
+        return JSONResponse(status_code=503, content={"error": "analytics database not initialized"})
+    except (FullPictureDashboardRequestError, ValueError, TypeError) as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+
+
+@app.post("/api/ontology/fields/search")
+async def ontology_fields_search(request: Request) -> JSONResponse:
+    try:
+        raw_payload = await request.json()
+        payload = raw_payload if isinstance(raw_payload, dict) else {}
+        query = str(payload.get("query") or "").strip()
+        if not query:
+            return JSONResponse(status_code=400, content={"error": "query is required"})
+        top_k = max(1, min(50, int(payload.get("top_k") or 20)))
+        entity = str(payload.get("entity") or "").strip() or None
+        catalog = await run_in_threadpool(load_local_octane_field_catalog, sample_limit=200)
+        results = await run_in_threadpool(search_octane_fields, catalog, query, entity=entity, top_k=top_k)
+        return JSONResponse(status_code=200, content={"summary": catalog["summary"], "results": results, "source": catalog["source"]})
+    except (ValueError, TypeError):
+        return JSONResponse(status_code=400, content={"error": "invalid field search request"})
+    except (sqlite3.Error, OSError):
+        return JSONResponse(status_code=503, content={"error": "field catalog is unavailable"})
+
+
+@app.post("/api/ontology/context")
+async def ontology_context(request: Request) -> JSONResponse:
+    try:
+        raw_payload = await request.json()
+        payload = await run_in_threadpool(build_test_case_context_payload, raw_payload if isinstance(raw_payload, dict) else {})
+        return JSONResponse(status_code=200, content=payload)
+    except (ValueError, TypeError) as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    except (sqlite3.Error, OSError):
+        return JSONResponse(status_code=503, content={"error": "testcase context is unavailable"})
+
+
+@app.post("/api/agent/analytics/testing/team-fv-analysis")
+async def agent_testing_team_fv_analysis(request: Request) -> JSONResponse:
+    try:
+        actor = verify_actor_capability_header(request.headers)
+        scoped_payload = enforce_testing_team_fv_analysis_scope(await request.json(), actor)
+        team = str(scoped_payload.pop("team"))
+        payload = await run_in_threadpool(build_test_team_analysis_payload, team, {**scoped_payload, "group_by": "fv"})
+        return JSONResponse(status_code=200, content=payload)
+    except ActorCapabilityError as exc:
+        return _agent_capability_error_response(exc)
+    except (ValueError, TypeError):
+        return _agent_analytics_schema_error_response()
+    except (TestingCoverageDataNotReadyError, sqlite3.Error, OSError):
+        return JSONResponse(status_code=503, content={"error": "testing analysis is unavailable"})
+
+
+async def _semantic_response(request: Request, *, records: bool = False) -> JSONResponse:
+    safe_message = "semantic records query rejected" if records else "semantic query rejected"
+    try:
+        try:
+            payload = await request.json()
+        except ValueError as exc:
+            raise SemanticQueryError("SEMANTIC_REQUEST_INVALID_JSON") from exc
+        catalog = load_ontology()
+        execute = execute_semantic_records if records else execute_semantic_query
+        result = await run_in_threadpool(execute, payload, catalog=catalog, analysis_store=SemanticAnalysisStore())
+        return JSONResponse(status_code=200, content=result)
+    except SemanticQueryError as exc:
+        content: dict[str, object] = {"code": exc.code, "safeMessage": safe_message, "retryable": exc.status_code >= 500}
+        if exc.rule_codes:
+            content["ruleCodes"] = exc.rule_codes
+        return JSONResponse(status_code=exc.status_code, content=content)
+    except OntologyLoadError:
+        return JSONResponse(status_code=503, content={"code": "SEMANTIC_ONTOLOGY_UNAVAILABLE", "safeMessage": safe_message, "retryable": False})
+    except (sqlite3.Error, OSError):
+        return JSONResponse(status_code=503, content={"code": "SEMANTIC_STORAGE_UNAVAILABLE", "safeMessage": safe_message, "retryable": True})
+
+
+@app.post("/api/semantic/query")
+async def semantic_query(request: Request) -> JSONResponse:
+    return await _semantic_response(request)
+
+
+@app.post("/api/semantic/records")
+async def semantic_records(request: Request) -> JSONResponse:
+    return await _semantic_response(request, records=True)
 
 
 @app.get("/api/full-picture/dashboard")

@@ -192,3 +192,24 @@ def test_octane_field_search_api_returns_top_k_without_full_catalog(tmp_path: Pa
         "octane_defects.raw_json.model_series_udf",
     }
     assert "fields" not in payload
+
+
+def test_interactive_field_catalog_does_not_profile_every_source_row(tmp_path: Path, monkeypatch) -> None:
+    from backend.analytics import octane_field_catalog as field_catalog
+
+    db_path = tmp_path / "qgate_raw.db"
+    _seed_octane_db(db_path)
+    reset_octane_field_catalog_cache()
+
+    def reject_full_scan(*_args, **_kwargs):
+        raise AssertionError("Interactive discovery must not run full-table population counts")
+
+    monkeypatch.setattr(field_catalog, "_column_populated_rows", reject_full_scan)
+    monkeypatch.setattr(field_catalog, "_table_row_count", reject_full_scan)
+
+    catalog = load_local_octane_field_catalog(db_path=db_path, sample_limit=1, prefer_generated=False)
+
+    assert catalog["source"]["columnProfiling"] == "sampled"
+    assert catalog["summary"]["tableCount"] == 2
+    assert all(field["observedRows"] <= 1 for field in catalog["fields"])
+    assert all(table["rows"] is None and table["rowCountExact"] is False for table in catalog["tables"])

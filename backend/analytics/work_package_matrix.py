@@ -829,6 +829,78 @@ def build_work_package_matrix(source_path, evidence_path, strategy_paths, output
             'strategyVersions': {page['id']: page['version'] for page in pages}}
 
 
+def revise_free_test_quality_rows(workbook) -> dict:
+    anchors = [(sheet, row[0].row) for sheet in workbook for row in sheet
+               if row[0].value in ('WP 编号', 'WP ID')]
+    if len(anchors) != 1:
+        raise ValueError('Exactly one existing work-package matrix is required')
+    sheet, header_row = anchors[0]
+    headers = {re.sub(r'\s+', '', str(cell.value)): cell.column for cell in sheet[header_row]}
+    source_column = headers.get('Confluence/来源依据')
+    if source_column is None or source_column + 3 > sheet.max_column:
+        raise ValueError('Existing matrix evidence columns are required')
+    references = {reference: cell.column for cell in sheet[header_row][4:source_column - 1]
+                  for reference in re.findall(r'\b[A-Z]+(?:2|33)\b', cell.comment.text if cell.comment else '')}
+    if not {'Z2', 'Y2', 'V2', 'W2', 'T2'} <= references.keys():
+        raise ValueError('Existing work-type source references are required')
+    rows = {row[0].value: row[0].row for row in sheet if str(row[0].value).startswith('FREE-')}
+    if set(rows) != {f'FREE-0{index}' for index in range(1, 7)}:
+        raise ValueError('The existing six FREE rows are required; no rows will be inserted')
+    revisions = (
+        ('FREE-01', '功能正确性与交互边界探索', '输入/表达、状态及功能组合的预期与实际结果对照',
+         {'Z2': '主项\n设计表达、输入和交互边界，检查功能结果', 'Y2': '条件\n同类目标已固化为正式脚本时'},
+         'Functional Suitability / Functional Correctness',
+         '结合现有输入/语音及跨功能探索记录，检查唤醒、识别、TTS/STT、车控等结果；不新增 ticket 或执行量统计。',
+         '按质量目标归类，输入方式、账号状态和功能组合属于场景；发现记录不等于已执行检查点数。', '功能检查点/输入组合'),
+        ('FREE-02', '时间行为与响应性能探索', '启动、唤醒、语音反馈或路线计算的计时样本及条件',
+         {'Z2': '主项\n改变启动、输入或负载条件，记录响应时间', 'Y2': '条件\n脚本已定义计时目标时', 'V2': '条件\n道路环境需要计时观察时'},
+         'Performance Efficiency / Time Behaviour',
+         '参考现有启动慢、响应延迟线索及 Speech response performance 检查点；未统一采集计时边界、阈值及通过样本。',
+         '快速点击、重复操作只是触发条件，不自动属于性能测量；一般稳定性放在 FREE-04。', '计时样本/性能场景'),
+        ('FREE-03', '跨系统与跨设备互操作探索', '设备、应用、屏幕或 ECU 之间的信息交换与一致性结果',
+         {'Z2': '主项\n组合设备、角色、屏幕、音频源及应用交互', 'Y2': '条件\n脚本已定义同类互操作组合时'},
+         'Compatibility / Interoperability',
+         '复用已有多设备、多屏、音频和跨应用路径，对照 Speech Cross System / Cross Platform 检查点；不推定完整兼容矩阵。',
+         '需明确两端/多端的交互预期；只是用到手机或另一个应用，不自动证明进行了互操作测试。', '接口/设备/系统组合'),
+        ('FREE-04', '正常使用稳定性与可用性探索', '连续任务、状态切换及 LC 中的可执行性、黑屏/卡死与异常记录',
+         {'Z2': '主项\n在正常负载、连续操作及状态切换中观察稳定与可用性', 'Y2': '条件\n脚本已定义同类稳定性检查时', 'V2': '条件\n周路测承载连续使用观察时', 'W2': '条件\n长途任务承载持续使用观察时'},
+         'Reliability / Maturity + Availability',
+         '结合已有 LC、状态切换、音频抢占及黑屏/卡死线索；没有完整运行时长、探测次数及通过记录，不计算稳定率或可用率。',
+         '为保持原六行，将成熟度和可用性合并在一包；通过观察口径区分，不把 LC 答案或缺陷数直接当执行次数。', '稳定性任务/可用性检查点'),
+        ('FREE-05', '异常条件容错与降级行为探索', '异常输入、断网、权限限制或资源干扰下的受控行为与影响边界',
+         {'Z2': '主项\n建立负向或中断条件，检查降级行为和其他功能', 'Y2': '条件\n脚本已定义故障条件及预期时', 'T2': '条件\n刷后异常需要容错验证时'},
+         'Reliability / Fault Tolerance',
+         '复用已有负向配置、网络/连接中断及并发干扰路径；仅作为容错候选，需确认故障前提、降级预期及非目标功能状态。',
+         '本包检查异常仍存在时的行为；异常解除后的恢复归 FREE-06。权限切换不自动等于信息安全或系统级故障注入。', '故障/降级条件组合'),
+        ('FREE-06', '中断后恢复与状态保持探索', '权限、网络、连接或生命周期条件恢复后的重入、状态及恢复时间',
+         {'Z2': '主项\n解除中断并检查恢复、重入及历史状态保持', 'Y2': '条件\n脚本已定义同类恢复路径时', 'T2': '条件\n刷后异常处理需要恢复检查时', 'V2': '条件\n周路测需要真实环境恢复时', 'W2': '条件\n连续任务需要跨地点恢复时'},
+         'Reliability / Recoverability',
+         '结合已有恢复权限、断开重连、退出重入和 LC 对照路径，以及坏网络恢复检查点；不把这些路径推定为独立执行或工时。',
+         '需区分正常上电前置、手动恢复与自动恢复；同一活动不与道路、刷后检查或提单后维护重复记时。', '中断/恢复路径'),
+    )
+    for code, name, output, actions, quality, evidence, boundary, unit in revisions:
+        row = rows[code]
+        sheet.cell(row, 3, name)
+        sheet.cell(row, 4, output)
+        previous = sheet.cell(row, 3).comment
+        citation = '\n\n保留原策略引用：\n' + previous.text if previous else ''
+        sheet.cell(row, 3).comment = Comment('仅按用户提供的 CN Test Scope 和 Speech 图调整本行质量主分类；不是新增执行或覆盖率。' + citation, 'DTSV scope revision')
+        empty_fill = copy(sheet.cell(row, source_column).fill)
+        for column in range(5, source_column):
+            cell = sheet.cell(row, column)
+            cell.value = None
+            cell.comment = None
+            cell.fill = copy(empty_fill)
+        for reference, action in actions.items():
+            cell = sheet.cell(row, references[reference], action)
+            cell.fill = copy(sheet.cell(row, 1).fill)
+            cell.comment = Comment(quality + '\n' + boundary, 'DTSV scope revision')
+        for column, value in enumerate((f'ISO/IEC 25010:2011：{quality}；用户提供的 CN Test Scope / Speech 图',
+                                         evidence, boundary, unit), source_column):
+            sheet.cell(row, column, value)
+    return {'sheet': sheet.title, 'rows': sorted(rows.values()), 'packageCount': len(revisions)}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', required=True)

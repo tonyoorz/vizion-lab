@@ -46,12 +46,13 @@ function deterministicMetricPlan(actorScopeHash: string) {
 }
 
 describe("LangGraph chat runtime", () => {
-  it("uses LangGraph as the default runtime mode", () => {
-    expect(resolveAgentRuntimeMode({})).toBe("langgraph");
-    expect(resolveAgentRuntimeMode({ VIZION_AGENT_RUNTIME: "" })).toBe("langgraph");
+  it("uses Pi by default and keeps explicit LangGraph rollback", () => {
+    expect(resolveAgentRuntimeMode({})).toBe("pi");
+    expect(resolveAgentRuntimeMode({ VIZION_AGENT_RUNTIME: "" })).toBe("pi");
     expect(resolveAgentRuntimeMode({ VIZION_AGENT_RUNTIME: "langgraph" })).toBe("langgraph");
     expect(resolveAgentRuntimeMode({ VIZION_AGENT_RUNTIME: "legacy" })).toBe("langgraph");
-    expect(resolveAgentRuntimeMode({ VIZION_AGENT_RUNTIME: "pi" })).toBe("langgraph");
+    expect(resolveAgentRuntimeMode({ VIZION_AGENT_RUNTIME: "pi" })).toBe("pi");
+    expect(resolveAgentRuntimeMode({ VIZION_AGENT_RUNTIME: "unknown" })).toBe("pi");
   });
 
   it("resolves analytics context and existing tool loop through a graph run", async () => {
@@ -133,7 +134,7 @@ describe("LangGraph chat runtime", () => {
     });
     expect(result.metrics.toolRouting).toEqual(expect.objectContaining({
       shouldUseTools: true,
-      intent: "metric_query",
+      intent: "general",
       toolNames: expect.arrayContaining(["query_analytics", "diagnose_analytics_empty"]),
     }));
     expect(events.map((event) => (event as { type?: string }).type)).toEqual([
@@ -531,13 +532,15 @@ describe("LangGraph chat runtime", () => {
     expect(result.metrics.toolRouting).toEqual(expect.objectContaining({ shouldUseTools: false }));
   });
 
-  it("returns a deterministic direct response for chitchat without tool planning", async () => {
-    const requestToolCompletion = vi.fn();
+  it("lets the model answer a greeting without executing data tools", async () => {
+    const requestToolCompletion = vi.fn().mockResolvedValue({ content: "Hello. What would you like to review?", toolCalls: [] });
+    const executeToolCall = vi.fn();
     const runtime = createLangGraphChatRuntime({
       resolveAnalyticsContext: vi.fn(),
       resolveDefectContext: vi.fn(),
       shouldPlanTools: vi.fn().mockReturnValue(true),
       requestToolCompletion,
+      executeToolCall,
       now: () => new Date("2026-07-23T08:00:00.000Z"),
     });
 
@@ -545,14 +548,16 @@ describe("LangGraph chat runtime", () => {
       body: {
         threadId: "thread-chat-1",
         useAnalyticsContext: true,
+        actor: analyticsActor("scope-greeting"),
         messages: [{ role: "user", content: "你好" }],
       },
     });
 
-    expect(result.directResponse).toEqual(expect.objectContaining({ intent: "chitchat" }));
-    expect(result.directResponse.content).toContain("测试质量");
-    expect(result.metrics.toolRouting).toEqual(expect.objectContaining({ shouldUseTools: false, intent: "chitchat" }));
-    expect(requestToolCompletion).not.toHaveBeenCalled();
+    expect(result.directResponse).toBeNull();
+    expect(result.preparedCompletion.content).toBe("Hello. What would you like to review?");
+    expect(result.mainAgentToolContext.toolCalls).toEqual([]);
+    expect(executeToolCall).not.toHaveBeenCalled();
+    expect(requestToolCompletion).toHaveBeenCalledTimes(1);
   });
 
   it("executes a valid canonical QueryPlan without asking the model to plan tools", async () => {
@@ -643,13 +648,13 @@ describe("LangGraph chat runtime", () => {
     expect(requestToolCompletion).toHaveBeenCalledTimes(1);
   });
 
-  it("returns direct clarification for vague testing status without resolving analytics context", async () => {
+  it("lets the model clarify a vague testing question using available context", async () => {
     const resolveAnalyticsContext = vi.fn();
-    const requestToolCompletion = vi.fn();
+    const requestToolCompletion = vi.fn().mockResolvedValue({ content: "Which testing aspect should we review?", toolCalls: [] });
     const runtime = createLangGraphChatRuntime({
       resolveAnalyticsContext,
       resolveDefectContext: vi.fn(),
-      shouldPlanTools: vi.fn().mockReturnValue(false),
+      shouldPlanTools: vi.fn().mockReturnValue(true),
       requestToolCompletion,
       now: () => new Date("2026-08-11T08:00:00.000Z"),
     });
@@ -658,14 +663,15 @@ describe("LangGraph chat runtime", () => {
       body: {
         threadId: "thread-vague-test-status",
         useAnalyticsContext: true,
+        actor: analyticsActor("scope-clarify"),
         messages: [{ role: "user", content: "测试怎么样" }],
       },
     });
 
-    expect(result.directResponse).toEqual(expect.objectContaining({ intent: "clarification" }));
-    expect(result.metrics.toolRouting).toEqual(expect.objectContaining({ shouldUseTools: false, intent: "clarification" }));
-    expect(resolveAnalyticsContext).not.toHaveBeenCalled();
-    expect(requestToolCompletion).not.toHaveBeenCalled();
+    expect(result.directResponse).toBeNull();
+    expect(result.preparedCompletion.content).toBe("Which testing aspect should we review?");
+    expect(resolveAnalyticsContext).toHaveBeenCalledTimes(1);
+    expect(requestToolCompletion).toHaveBeenCalledTimes(1);
   });
 
   it("does not enter tool planning when the governed analysis plan is denied", async () => {
@@ -879,12 +885,13 @@ describe("LangGraph chat runtime", () => {
     expect(resolveDefectContext).not.toHaveBeenCalled();
   });
 
-  it("returns a deterministic direct response for out-of-scope requests", async () => {
+  it("does not substitute a keyword rejection for a model conversation", async () => {
+    const requestToolCompletion = vi.fn().mockResolvedValue({ content: "We can discuss the test report presentation.", toolCalls: [] });
     const runtime = createLangGraphChatRuntime({
       resolveAnalyticsContext: vi.fn(),
       resolveDefectContext: vi.fn(),
       shouldPlanTools: vi.fn().mockReturnValue(true),
-      requestToolCompletion: vi.fn(),
+      requestToolCompletion,
       now: () => new Date("2026-07-23T08:00:00.000Z"),
     });
 
@@ -892,13 +899,14 @@ describe("LangGraph chat runtime", () => {
       body: {
         threadId: "thread-oos-1",
         useAnalyticsContext: true,
+        actor: analyticsActor("scope-conversation"),
         messages: [{ role: "user", content: "帮我写一首诗" }],
       },
     });
 
-    expect(result.directResponse).toEqual(expect.objectContaining({ intent: "out_of_scope" }));
-    expect(result.directResponse.content).toContain("汽车测试质量");
-    expect(result.metrics.toolRouting).toEqual(expect.objectContaining({ shouldUseTools: false, intent: "out_of_scope" }));
+    expect(result.directResponse).toBeNull();
+    expect(result.preparedCompletion.content).toBe("We can discuss the test report presentation.");
+    expect(requestToolCompletion).toHaveBeenCalledTimes(1);
   });
 
   it("persists actor scope, run events, checkpoint, and tool-call audit", async () => {
@@ -985,7 +993,7 @@ describe("LangGraph chat runtime", () => {
       runId: "run-123",
       threadId: "thread-123",
       actorScopeHash: "scope-1",
-      intent: "metric_query",
+      intent: "general",
       outcome: "completed",
       toolNames: ["query_semantic_metrics"],
     }));

@@ -3,6 +3,7 @@ import { requestCompanyChatCompletion } from "./companyChat.mjs";
 import { createGovernedAnalysisPlanner } from "./ontology/analysisPlanner.mjs";
 import { createQueryPlanner } from "./ontology/queryPlanner.mjs";
 import { createSemanticResolver } from "./ontology/resolver.mjs";
+import { mandatoryScopeFilters } from "./ontology/scopePolicy.mjs";
 import {
   createSemanticCandidateCatalog,
   createSemanticCandidateMessages,
@@ -314,11 +315,32 @@ export async function resolveAiAnalyticsContext({
   actor,
   ontologyRegistry,
   model,
+  interpretQuery = true,
   requestSemanticCandidate = requestCompanySemanticCandidate,
 }) {
   const queryText = extractLatestUserQuery(messages);
   if (!queryText) {
     return { queryText: "", contextText: "" };
+  }
+  if (!interpretQuery) {
+    const catalog = ontologyRegistry ? {
+      ontologyVersion: ontologyRegistry.version,
+      schemaFingerprint: ontologyRegistry.fingerprint,
+      metrics: ontologyRegistry.bundle.metrics.filter((item) => item.governance?.status === "approved")
+        .map((item) => ({ id: item.id, entityId: item.entityId, allowedDimensions: item.allowedDimensions })),
+      dimensions: ontologyRegistry.bundle.dimensions.map((item) => ({ id: item.id, entityId: item.entityId })),
+      policyFiltersByEntity: Object.fromEntries(ontologyRegistry.bundle.entities.map((entity) => [
+        entity.id, mandatoryScopeFilters(actor, [entity.id], "aggregate", ontologyRegistry),
+      ])),
+    } : null;
+    return {
+      queryText,
+      contextText: [ANALYTICS_CONTEXT, ...(catalog ? [
+        "# Available governed ontology\n" + JSON.stringify(catalog),
+        "This catalog describes capabilities, not a request to execute them. Interpret the complete conversation and select tools only when needed. Use the exact ontologyVersion and schemaFingerprint in semantic queries. Include policyFiltersByEntity for the selected entity with source=policy; do not replace them with user filters. Backend semantic validators remain authoritative.",
+      ] : [])].join("\n\n"),
+      skipDefectContext: false,
+    };
   }
 
   const recentUserText = extractRecentUserText(messages);

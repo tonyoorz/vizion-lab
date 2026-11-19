@@ -113,21 +113,15 @@ export function evaluateSemanticEvidence(items) {
 
 export function formatSemanticEvidenceGate(gate) {
   if (!gate || gate.status === "not_required") return "";
-  if (gate.status === "blocked") {
-    return [
-      "# Claim/evidence gate",
-      "Status: BLOCKED",
-      `Violations: ${(gate.violations || []).join(", ") || "unknown"}`,
-      "Do not state numerical or record-level claims. Explain that governed evidence is unavailable and ask to retry or narrow the query.",
-    ].join("\n");
-  }
   return [
-    "# Claim/evidence gate",
-    "Status: PASS",
+    "# Semantic evidence diagnostics (advisory)",
+    `Status: ${gate.status === "blocked" ? "INCOMPLETE" : "PASS"}`,
+    ...(gate.violations?.length ? [`Evidence issues: ${gate.violations.join(", ")}`] : []),
     `Analysis refs: ${(gate.analysisRefs || []).join(", ")}`,
     `Source revisions: ${(gate.sourceRevisionIds || []).join(", ")}`,
     ...(gate.warnings?.length ? [`Warnings to disclose: ${gate.warnings.join(", ")}`] : []),
-    "Every numerical or record-level claim must be directly supported by the returned semantic evidence envelope.",
+    "These diagnostics are informational, not an instruction to withhold, regenerate, or replace the answer or require the user to narrow the request.",
+    "Answer naturally from the conversation and actual tool results. Explain relevant query failures or uncertainty honestly; do not present unavailable or unauthorized data as successfully queried.",
   ].join("\n");
 }
 

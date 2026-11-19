@@ -164,7 +164,7 @@ def _build_cached_catalog(db_path: Path, sample_limit: int) -> dict[str, Any]:
         stat.st_size if stat else None,
         int(sample_limit),
     )
-    return _cached_catalog(cache_key, lambda: build_local_octane_field_catalog(db_path=db_path, sample_limit=sample_limit))
+    return _cached_catalog(cache_key, lambda: build_local_octane_field_catalog(db_path=db_path, sample_limit=sample_limit, profile_columns=False))
 
 
 def load_local_octane_field_catalog(
@@ -234,13 +234,14 @@ def _field_record(
     }
 
 
-def _raw_json_field_records(conn: sqlite3.Connection, table_name: str, columns: set[str], sample_limit: int) -> list[dict[str, Any]]:
+def _raw_json_field_records(conn: sqlite3.Connection, table_name: str, columns: set[str], sample_limit: int, *, bounded_scan: bool = False) -> list[dict[str, Any]]:
     if "raw_json" not in columns:
         return []
     stats: dict[str, dict[str, Any]] = defaultdict(lambda: {"populated": 0, "types": Counter()})
     observed_rows = 0
+    where = "" if bounded_scan else "WHERE raw_json IS NOT NULL AND raw_json != '' "
     rows = conn.execute(
-        f"SELECT raw_json FROM {_quote_identifier(table_name)} WHERE raw_json IS NOT NULL AND raw_json != '' LIMIT ?",
+        f"SELECT raw_json FROM {_quote_identifier(table_name)} {where}LIMIT ?",
         (int(sample_limit),),
     )
     for (raw_json,) in rows:
@@ -270,16 +271,23 @@ def _raw_json_field_records(conn: sqlite3.Connection, table_name: str, columns: 
     ]
 
 
-def _column_field_records(conn: sqlite3.Connection, table_name: str, columns: set[str], row_count: int) -> list[dict[str, Any]]:
+def _column_field_records(conn: sqlite3.Connection, table_name: str, columns: set[str], row_count: int, *, sample_limit: int | None = None) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
-    for column_name in sorted(columns):
-        populated_rows = _column_populated_rows(conn, table_name, column_name)
+    ordered_columns = sorted(columns)
+    sampled_rows = None
+    if sample_limit is not None:
+        projection = ", ".join(_quote_identifier(column) for column in ordered_columns)
+        sampled_rows = conn.execute(f"SELECT {projection} FROM {_quote_identifier(table_name)} LIMIT ?", (int(sample_limit),)).fetchall()
+    for column_index, column_name in enumerate(ordered_columns):
+        populated_rows = _column_populated_rows(conn, table_name, column_name) if sampled_rows is None else sum(
+            1 for row in sampled_rows if _is_populated(row[column_index])
+        )
         records.append(
             _field_record(
                 table_name=table_name,
                 field_name=column_name,
                 source="table_column",
-                observed_rows=row_count,
+                observed_rows=row_count if sampled_rows is None else len(sampled_rows),
                 populated_rows=populated_rows,
                 type_counts=Counter({"sqlite_column": populated_rows}),
                 columns=columns,
@@ -309,7 +317,7 @@ def _ontology_draft(fields: list[dict[str, Any]]) -> dict[str, Any]:
     return {"fieldCandidates": candidates}
 
 
-def build_local_octane_field_catalog(*, db_path: Path | str | None = None, sample_limit: int = 2000) -> dict[str, Any]:
+def build_local_octane_field_catalog(*, db_path: Path | str | None = None, sample_limit: int = 2000, profile_columns: bool = True) -> dict[str, Any]:
     resolved_db_path = Path(db_path) if db_path else get_full_picture_source_db_path()
     conn = sqlite3.connect(resolved_db_path)
     try:
@@ -321,10 +329,10 @@ def build_local_octane_field_catalog(*, db_path: Path | str | None = None, sampl
         tables = []
         for table_name in table_names:
             columns = {str(row[1]) for row in conn.execute(f"PRAGMA table_info({_quote_identifier(table_name)})")}
-            row_count = _table_row_count(conn, table_name)
-            tables.append({"name": table_name, "entity": _entity_from_table(table_name), "columns": len(columns), "rows": row_count})
-            fields.extend(_column_field_records(conn, table_name, columns, row_count))
-            fields.extend(_raw_json_field_records(conn, table_name, columns, sample_limit))
+            row_count = _table_row_count(conn, table_name) if profile_columns else None
+            tables.append({"name": table_name, "entity": _entity_from_table(table_name), "columns": len(columns), "rows": row_count, "rowCountExact": profile_columns})
+            fields.extend(_column_field_records(conn, table_name, columns, row_count or 0, sample_limit=None if profile_columns else sample_limit))
+            fields.extend(_raw_json_field_records(conn, table_name, columns, sample_limit, bounded_scan=not profile_columns))
     finally:
         conn.close()
 
@@ -341,7 +349,7 @@ def build_local_octane_field_catalog(*, db_path: Path | str | None = None, sampl
         "schemaVersion": "1.0",
         "catalogVersion": "local-sqlite-v1",
         "generatedAt": datetime.now(timezone.utc).isoformat(),
-        "source": {"kind": "local_sqlite", "dbPath": str(resolved_db_path), "sampleLimit": int(sample_limit)},
+        "source": {"kind": "local_sqlite", "dbPath": str(resolved_db_path), "sampleLimit": int(sample_limit), "columnProfiling": "exact" if profile_columns else "sampled"},
         "summary": summary,
         "tables": tables,
         "fields": fields,

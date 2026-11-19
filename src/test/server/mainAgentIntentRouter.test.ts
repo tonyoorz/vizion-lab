@@ -41,15 +41,15 @@ describe("main agent intent router", () => {
     );
   });
 
-  it("still classifies chitchat as a direct intent with no tools", () => {
+  it("leaves greeting interpretation and tool choice to the conversation model", () => {
     const routed = routeMainAgentIntent([
       { role: "user", content: "你好" },
     ]);
-    expect(routed.intent).toBe("chitchat");
+    expect(routed.intent).toBe("general");
     const toolset = selectMainAgentToolset(
       [{ role: "user", content: "你好" }],
       MAIN_AGENT_TOOLS,
     );
-    expect(toolset.tools).toHaveLength(0);
+    expect(toolset.tools).toHaveLength(MAIN_AGENT_TOOLS.length);
   });
 });

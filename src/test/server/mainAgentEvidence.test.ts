@@ -33,9 +33,11 @@ describe("main agent semantic evidence", () => {
       warnings: [],
     });
     expect(formatSemanticEvidenceGate(gate)).toContain("Status: PASS");
+    expect(formatSemanticEvidenceGate(gate)).toContain("advisory");
+    expect(formatSemanticEvidenceGate(gate)).not.toContain("Every numerical or record-level claim must");
   });
 
-  it("blocks semantic claims when provenance or backend evidence is absent", () => {
+  it("reports missing semantic evidence without instructing the model to withhold its answer", () => {
     const gate = evaluateSemanticEvidence([{
       ...validEvidence,
       analysisRef: undefined,
@@ -49,7 +51,11 @@ describe("main agent semantic evidence", () => {
       "SEMANTIC_SOURCE_REVISION_MISSING",
       "SEMANTIC_BACKEND_EVIDENCE_MISSING",
     ]));
-    expect(formatSemanticEvidenceGate(gate)).toContain("Do not state numerical or record-level claims");
+    const context = formatSemanticEvidenceGate(gate);
+    expect(context).toContain("advisory");
+    expect(context).toContain("SEMANTIC_ANALYSIS_REF_MISSING");
+    expect(context).not.toContain("Status: BLOCKED");
+    expect(context).not.toContain("Do not state numerical or record-level claims");
   });
 
   it("blocks failed tool results and revision drift behind one analysis ref", () => {
@@ -119,7 +125,8 @@ describe("main agent semantic evidence", () => {
     expect(gate.status).toBe("blocked");
     expect(gate.violations).toEqual(["SEMANTIC_EVIDENCE_UNPARSEABLE"]);
     expect(gate.violations).not.toContain("SEMANTIC_ONTOLOGY_VERSION_MISSING");
-    expect(formatSemanticEvidenceGate(gate)).toContain("Do not state numerical or record-level claims");
+    expect(formatSemanticEvidenceGate(gate)).toContain("SEMANTIC_EVIDENCE_UNPARSEABLE");
+    expect(formatSemanticEvidenceGate(gate)).not.toContain("Do not state numerical or record-level claims");
   });
 
   it("still blocks on a real tool failure even when provenance is present", () => {

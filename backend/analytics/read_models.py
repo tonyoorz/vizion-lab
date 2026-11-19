@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -218,6 +219,82 @@ def normalize_query(**kwargs: Any) -> FullPictureDashboardQuery:
         lead_models=_normalize_multi_value(kwargs.get("lead_models")),
         groups=_normalize_multi_value(kwargs.get("groups")),
     )
+
+
+def _load_detected_by_names(ticket_ids: list[str]) -> dict[str, str]:
+    requested = list(dict.fromkeys(str(value).strip() for value in ticket_ids if str(value).strip()))
+    if not requested:
+        return {}
+    source = get_full_picture_source_db_path()
+    if not source.exists():
+        raise FullPictureDashboardDataError("Reporter source is unavailable")
+
+    def person_name(value: object) -> str:
+        if isinstance(value, dict):
+            return str(value.get("full_name") or value.get("name") or "").strip()
+        return str(value or "").strip()
+
+    names: dict[str, str] = {}
+    with closing(sqlite3.connect(f"{source.resolve().as_uri()}?mode=ro", uri=True)) as conn:
+        conn.row_factory = sqlite3.Row
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(octane_defects)")}
+        if "defect_id" not in columns or not {"raw_json", "detected_by"} & columns:
+            raise FullPictureDashboardDataError("Reporter source fields are unavailable")
+        projection = ", ".join(field if field in columns else f"NULL AS {field}" for field in ("detected_by", "raw_json"))
+        for offset in range(0, len(requested), 400):
+            batch = requested[offset:offset + 400]
+            placeholders = ",".join("?" for _ in batch)
+            rows = conn.execute(f"SELECT defect_id, {projection} FROM octane_defects WHERE defect_id IN ({placeholders})", batch)
+            for row in rows:
+                try:
+                    raw = json.loads(row["raw_json"] or "{}")
+                except (ValueError, TypeError):
+                    raw = {}
+                raw = raw if isinstance(raw, dict) else {}
+                name = person_name(raw.get("detected_by")) or person_name(row["detected_by"]) or person_name(raw.get("author"))
+                if name:
+                    names[str(row["defect_id"])] = name
+    return names
+
+
+def build_analytics_filter_value_search_payload(**kwargs: Any) -> dict[str, object]:
+    dataset = str(kwargs.get("dataset") or "defects").strip()
+    if dataset != "defects":
+        raise FullPictureDashboardRequestError(f"Unsupported filter value dataset: {dataset}")
+    field = str(kwargs.get("field") or "").strip()
+    if field not in {"detected_by", "assigned_ecu", "business_module", "problem_finder_team"}:
+        raise FullPictureDashboardRequestError(f"Unsupported filter value field: {field or 'empty'}")
+    try:
+        limit = max(1, min(50, int(kwargs.get("limit") or 10)))
+    except (ValueError, TypeError) as exc:
+        raise FullPictureDashboardRequestError("Invalid filter value limit") from exc
+    snapshot_version = _resolve_effective_snapshot_version(_read_snapshot_metadata())
+    if not snapshot_version:
+        raise FullPictureDashboardDataError("No active dashboard snapshot is available for filter value search")
+    if snapshot_version.startswith("live-"):
+        _materialize_snapshot_ticket_rows(snapshot_version)
+    filters = kwargs.get("filters") if isinstance(kwargs.get("filters"), dict) else {}
+    normalized_query = normalize_query(**filters)
+    if not filters.get("years") and isinstance(normalized_query, FullPictureDashboardQuery):
+        normalized_query = replace(normalized_query, years=())
+    rows = _load_materialized_ticket_rows(snapshot_version=snapshot_version, query=normalized_query)
+    names = _load_detected_by_names(list(dict.fromkeys(
+        str(row.get("ticket_id")) for row in rows if row.get("ticket_id") and not row.get("detected_by")
+    ))) if field == "detected_by" else {}
+    query_text = str(kwargs.get("query") or "").strip()
+    counts: dict[str, int] = {}
+    for row in rows:
+        raw_value = (row.get("solution_cluster") or row.get("defect_category") or "UNCLASSIFIED") if field == "business_module" else row.get(field)
+        value = str(raw_value or (names.get(str(row.get("ticket_id"))) if field == "detected_by" else "") or "").strip()
+        if value and (not query_text or query_text.casefold() in value.casefold()):
+            counts[value] = counts.get(value, 0) + 1
+    ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0].casefold(), item[0]))
+    return {
+        "schema_version": "1.0", "dataset": dataset, "field": field, "query": query_text,
+        "snapshot_version": snapshot_version,
+        "values": [{"value": value, "count": count} for value, count in ranked[:limit]],
+        "total_values": len(ranked), "returned_values": min(limit, len(ranked)), "truncated": len(ranked) > limit,
+    }
 
 
 def classify_phase_group(phase_value: Any) -> str:
@@ -1860,6 +1937,35 @@ def _build_full_picture_dataset(
         **_serialize_query_filters(query),
     }
     return generated_from, ticket_rows
+
+
+def build_semantic_defect_payload(**kwargs: Any) -> dict[str, Any]:
+    query = normalize_query(**kwargs)
+    snapshot_metadata = _read_snapshot_metadata()
+    snapshot_version = _resolve_effective_snapshot_version(snapshot_metadata)
+    requested_version = str(kwargs.get("snapshot_version") or "").strip()
+    if requested_version and requested_version != snapshot_version:
+        raise FullPictureDashboardRequestError(
+            f"Requested snapshot version is stale: {requested_version}"
+        )
+    if not snapshot_version:
+        raise FullPictureDashboardDataError("Semantic defect snapshot is not available")
+    if snapshot_version.startswith("live-"):
+        _materialize_snapshot_ticket_rows(snapshot_version)
+    if not has_materialized_dashboard_snapshot_rows(snapshot_version):
+        raise FullPictureDashboardDataError("Semantic defect snapshot is not available")
+    if not kwargs.get("years"):
+        query = replace(query, years=())
+    generated_from = _build_generated_from_payload(query)
+    ticket_rows = _load_materialized_ticket_rows(snapshot_version=snapshot_version, query=query)
+    if _resolve_effective_snapshot_version(_read_snapshot_metadata()) != snapshot_version:
+        raise FullPictureDashboardRequestError("Dashboard snapshot changed during request")
+    return {
+        "snapshot_version": snapshot_version,
+        "generated_from": generated_from,
+        "refresh_metadata": snapshot_metadata,
+        "ticket_rows": ticket_rows,
+    }
 
 
 def build_full_picture_summary_payload(**kwargs: Any) -> dict[str, Any]:

@@ -14,8 +14,6 @@ import { MAIN_AGENT_TOOLS } from "./mainAgentTools.mjs";
  * classified so the runtime can short-circuit to a direct response.
  */
 
-const PLANNING_QUERY_RE = /\b(DTSV|QGate|Octane|ticket|work_item|dashboard|ontology|capability|available|partial|unavailable|bug|defect|issue|top\s*issue|octane_defects|solution_cluster|assigned_ecu|business_module|opened|created|raised|submitted|resolved|coverage|test|summary|count|metric|trend|growth|rising|increase|delta|duplicate|similar|write|update|delete|edit|risk|health|overview|assessment|empty\s*result|no\s*data|zero\s*rows|jira|atlassian)\b|[A-Z][A-Z0-9]+-\d+|entityType=work_item|id=\d+|本体|能力|缺陷|测试|测试小组|执行效率|缺陷发现率|覆盖率|多少|几个|统计|趋势|风险|健康度|当前情况|怎么看|怎么样|创建|提交|新建|解决|关闭|更新|修改|删除|写入|重复|查重|相似|模块|问题模块|上升|增长|环比|同比|根因|提票|报票|提了|数据.*(?:为空|没数据|没有数据|查不到)|为什么.*(?:为空|没数据|没有数据|查不到)|空结果/i;
-
 const GENERAL_PROFILE = Object.freeze({
   confidence: 0.5,
   reason: "model-driven tool selection",
@@ -29,6 +27,47 @@ function toolName(toolCall) {
 
 function toolsByName(allTools) {
   return new Map((Array.isArray(allTools) ? allTools : []).map((tool) => [tool.function?.name, tool]));
+}
+
+export function createBackendToolDiscovery({ analyticsFetch = globalThis.fetch, analyticsApiBase = process.env.VIZION_ANALYTICS_API_BASE || "http://127.0.0.1:3003" } = {}) {
+  const operations = {
+    get_data_catalog: [], resolve_business_terms: [], ask_clarification: [], search_duplicates: [],
+    get_ontology_catalog: [["/api/ontology/catalog", "get"]],
+    search_octane_fields: [["/api/ontology/fields/search", "post"]],
+    search_analytics_filter_values: [["/api/analytics/filter-values/search", "post"]],
+    query_analytics: [["/api/agent/analytics/defects/aggregate", "post"]],
+    diagnose_analytics_empty: [["/api/agent/analytics/defects/aggregate", "post"]],
+    query_analytics_fallback: [["/api/analytics/fallback/query", "post"]],
+    query_semantic_metrics: [["/api/semantic/query", "post"]],
+    query_semantic_records: [["/api/semantic/records", "post"]],
+    query_traceability: [["/api/semantic/query", "post"]],
+    query_dashboard_summary: [["/api/full-picture/dashboard/summary", "get"]],
+    query_testing_coverage_project_status: [["/api/testing/coverage-analysis/project-status", "get"]],
+    query_testing_coverage_aida_status: [["/api/testing/coverage-analysis/aida-status", "get"]],
+    query_testing_team_fv_analysis: [["/api/agent/analytics/testing/team-fv-analysis", "post"]],
+    get_test_case_context: [["/api/ontology/context", "post"]],
+    query_defect_high_frequency_analysis: [["/api/full-picture/defect-high-frequency-analysis", "get"]],
+    query_defect_aggregate: [["/api/agent/analytics/defects/aggregate", "post"]],
+    query_defect_records: [["/api/agent/analytics/defects/records", "post"]],
+    export_defect_records: [["/api/agent/analytics/defects/export", "post"]],
+    query_full_picture_module: ["dashboard/summary", "dashboard/tickets", "top-issue-analysis", "long-runner-analysis", "defect-high-frequency-analysis"]
+      .map((path) => [`/api/full-picture/${path}`, "get"]),
+  };
+  let cached = null;
+  let expiresAt = 0;
+  return async () => {
+    if (cached && Date.now() < expiresAt) return structuredClone(cached);
+    let paths = {};
+    try {
+      const response = await analyticsFetch(new URL("/openapi.json", analyticsApiBase).toString(), { signal: AbortSignal.timeout(3000) });
+      if (response.ok) paths = (await response.json()).paths || {};
+    } catch { paths = {}; }
+    const availableToolNames = MAIN_AGENT_TOOLS.map((tool) => tool.function.name)
+      .filter((name) => operations[name]?.every(([path, method]) => paths[path]?.[method] !== undefined));
+    cached = { availableToolNames, unavailableToolNames: MAIN_AGENT_TOOLS.map((tool) => tool.function.name).filter((name) => !availableToolNames.includes(name)) };
+    expiresAt = Date.now() + 30000;
+    return structuredClone(cached);
+  };
 }
 
 export function createMainAgentToolRegistry(allTools = MAIN_AGENT_TOOLS) {
@@ -57,10 +96,7 @@ export function createMainAgentToolRegistry(allTools = MAIN_AGENT_TOOLS) {
   }
 
   function shouldPlanTools(messages) {
-    const queryText = extractLatestUserQuery(messages);
-    if (classifyDirectMainAgentIntent(queryText)) return false;
-    // Broad trigger: let the model attempt tools for any analytics-shaped query.
-    return PLANNING_QUERY_RE.test(queryText);
+    return Boolean(extractLatestUserQuery(messages));
   }
 
   function isToolAllowed(name, selectedToolset) {
